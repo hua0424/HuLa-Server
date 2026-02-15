@@ -1,5 +1,6 @@
 package com.luohuo.flex.ws.websocket;
 
+import com.luohuo.flex.ws.websocket.ai.AiNodeWebSocketHandler;
 import io.netty.channel.ChannelOption;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.web.embedded.netty.NettyReactiveWebServerFactory;
@@ -11,6 +12,7 @@ import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -23,10 +25,13 @@ import java.util.Map;
 @Configuration
 public class NettyServerConfig {
 
-	private  ReactiveWebSocketHandler webSocketHandler;
+	private final ReactiveWebSocketHandler webSocketHandler;
+	private final AiNodeWebSocketHandler aiNodeWebSocketHandler;
 
-	public NettyServerConfig(ReactiveWebSocketHandler webSocketHandler) {
+	public NettyServerConfig(ReactiveWebSocketHandler webSocketHandler,
+							 AiNodeWebSocketHandler aiNodeWebSocketHandler) {
 		this.webSocketHandler = webSocketHandler;
+		this.aiNodeWebSocketHandler = aiNodeWebSocketHandler;
 	}
 
 	@Bean
@@ -44,9 +49,16 @@ public class NettyServerConfig {
 	}
 
 	@Bean
+	public WebSocketHandler aiNodeSocketHandler() {
+		return session -> aiNodeWebSocketHandler.handle(session);
+	}
+
+	@Bean
 	public HandlerMapping webSocketMapping() {
 		// 配置连接地址
-		Map<String, WebSocketHandler> map = Map.of("/ws", messageWebSocketHandler());
+		Map<String, WebSocketHandler> map = new LinkedHashMap<>();
+		map.put("/ws", messageWebSocketHandler());
+		map.put("/ws/ai-node", aiNodeSocketHandler());
 		SimpleUrlHandlerMapping handlerMapping = new SimpleUrlHandlerMapping();
 		handlerMapping.setUrlMap(map);
 		handlerMapping.setOrder(-1); // 最高优先级

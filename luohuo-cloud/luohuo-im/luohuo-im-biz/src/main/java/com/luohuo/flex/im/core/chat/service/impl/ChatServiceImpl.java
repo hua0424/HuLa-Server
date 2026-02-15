@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.basic.utils.TimeUtils;
 import com.luohuo.flex.im.core.chat.dao.*;
+import com.luohuo.flex.im.core.chat.service.ai.AiDispatchPrecheckService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.MsgCache;
 import com.luohuo.flex.im.core.user.dao.UserFriendDao;
@@ -63,6 +64,7 @@ public class ChatServiceImpl implements ChatService {
     private ContactDao contactDao;
     private RoomCache roomCache;
     private GroupMemberDao groupMemberDao;
+	private AiDispatchPrecheckService aiDispatchPrecheckService;
     /**
      * 发送消息
      */
@@ -70,6 +72,7 @@ public class ChatServiceImpl implements ChatService {
     @Transactional
     public Long sendMsg(ChatMessageReq request, Long uid) {
         check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid);
+		aiDispatchPrecheckService.preCheck(request.getRoomId(), uid);
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
 
