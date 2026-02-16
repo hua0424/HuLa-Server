@@ -25,6 +25,9 @@ public class AiNodeRegistryService {
 		cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiNodeOnline(latest.getNodeId()), latest);
 		if (latest.getAiUserId() != null) {
 			cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiUserNode(latest.getAiUserId()), latest.getNodeId());
+			if (latest.getOwnerId() != null) {
+				cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiUserOwner(latest.getAiUserId()), latest.getOwnerId());
+			}
 		}
 		if (latest.getOwnerId() != null) {
 			cachePlusOps.sAdd(AiNodeCacheKeyBuilder.buildOwnerNodes(latest.getOwnerId()), latest.getNodeId());

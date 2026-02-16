@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.consumer;
 
 import com.luohuo.basic.cache.repository.CachePlusOps;
+import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.common.OnlineService;
 import com.luohuo.flex.common.cache.PassageMsgCacheKeyBuilder;
 import com.luohuo.flex.common.constant.MqConstant;
@@ -60,11 +61,23 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 
     @Override
     public void onMessage(MsgSendMessageDTO dto) {
+		Long tenantId = dto == null ? null : dto.getTenantId();
+		if (tenantId != null) {
+			ContextUtil.setTenantId(tenantId);
+		}
+		try {
         Message message = messageDao.getById(dto.getMsgId());
         if (Objects.isNull(message)) {
             return;
         }
+		Long effectiveTenantId = tenantId != null ? tenantId : message.getTenantId();
+		if (effectiveTenantId != null) {
+			ContextUtil.setTenantId(effectiveTenantId);
+		}
         Room room = roomCache.get(message.getRoomId());
+		if (effectiveTenantId != null) {
+			ContextUtil.setTenantId(effectiveTenantId);
+		}
         // 1. 所有房间更新房间最新消息
         roomDao.refreshActiveTime(room.getId(), message.getId(), message.getCreateTime());
         roomCache.refresh(room.getId());
@@ -123,6 +136,9 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				pushService.sendPushMsg(wsBaseResp, new ArrayList<>(onlineUsersList), dto.getUid());
 				asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
 			}
+		}
+		} finally {
+			ContextUtil.clearTenantContext();
 		}
     }
 

@@ -5,6 +5,7 @@ import com.luohuo.basic.cache.redis2.CacheResult;
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
+import com.luohuo.flex.im.core.chat.service.ai.approval.AiApprovalService;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.im.domain.entity.Room;
@@ -15,6 +16,8 @@ import com.luohuo.flex.router.AiNodeCacheKeyBuilder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+
+import java.util.Map;
 
 /**
  * AI 消息发送前预检
@@ -28,6 +31,7 @@ public class AiDispatchPrecheckService {
 	private final RoomFriendDao roomFriendDao;
 	private final UserDao userDao;
 	private final CachePlusOps cachePlusOps;
+	private final AiApprovalService aiApprovalService;
 
 	/**
 	 * 仅对 AI 单聊做可达性预检，离线直接失败
@@ -64,6 +68,31 @@ public class AiDispatchPrecheckService {
 			log.warn("AI节点离线: targetUid={}, nodeId={}", targetUid, nodeId);
 			throw BizException.wrap(503, "AI_NODE_OFFLINE");
 		}
+
+		Long ownerUid = resolveOwnerUid(targetUid, nodeId);
+		aiApprovalService.ensureAccess(targetUid, ownerUid, senderUid);
+	}
+
+	private Long resolveOwnerUid(Long aiUserId, String nodeId) {
+		CacheResult<Long> ownerResult = cachePlusOps.get(AiNodeCacheKeyBuilder.buildAiUserOwner(aiUserId));
+		Long ownerUid = ownerResult == null ? null : ownerResult.getValue();
+		if (ownerUid != null) {
+			return ownerUid;
+		}
+
+		CacheResult<Object> onlineMetaResult = cachePlusOps.get(AiNodeCacheKeyBuilder.buildAiNodeOnline(nodeId));
+		Object onlineMeta = onlineMetaResult == null ? null : onlineMetaResult.getValue();
+		if (onlineMeta instanceof Map<?, ?> map) {
+			Object ownerVal = map.get("ownerId");
+			if (ownerVal != null) {
+				try {
+					return Long.parseLong(String.valueOf(ownerVal));
+				} catch (NumberFormatException ignored) {
+					return null;
+				}
+			}
+		}
+		return null;
 	}
 
 	private Long resolveTargetUid(RoomFriend roomFriend, Long senderUid) {

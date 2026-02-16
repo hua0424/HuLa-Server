@@ -35,6 +35,18 @@ public interface MqConstant {
     String PUSH_GROUP = "websocket_push_group";
 
 	/**
+	 * IM -> WS：向 AI 节点投递请求
+	 */
+	String AI_NODE_REQUEST_TOPIC = "ai_node_request_topic";
+	String AI_NODE_REQUEST_TOPIC_GROUP = "ai_node_request_topic_group";
+
+	/**
+	 * WS -> IM：AI 最终回复回流
+	 */
+	String AI_NODE_REPLY_TOPIC = "ai_node_reply_topic";
+	String AI_NODE_REPLY_TOPIC_GROUP = "ai_node_reply_topic_group";
+
+	/**
 	 * push用户 [延迟队列]
 	 */
 	String PUSH_DELAY_TOPIC = "websocket_push_delay";
