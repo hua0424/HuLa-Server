@@ -7,6 +7,7 @@ import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.common.event.MessageSendEvent;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
+import com.luohuo.flex.im.core.chat.service.MessageService;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.im.domain.MsgSendMessageDTO;
@@ -46,6 +47,8 @@ public class MessageSendListener {
 	private UserDao userDao;
     @Resource
     private MQProducer mqProducer;
+	@Resource
+	private MessageService messageService;
 
     @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT, classes = MessageSendEvent.class, fallbackExecution = true)
     public void messageRoute(MessageSendEvent event) {
@@ -96,6 +99,9 @@ public class MessageSendListener {
 			return;
 		}
 
+		String originalText = message.getContent();
+		String finalText = originalText;
+
 		AiNodeRequestDTO dto = new AiNodeRequestDTO();
 		dto.setTenantId(tenantId);
 		dto.setRequestId("req_" + msgId);
@@ -103,11 +109,14 @@ public class MessageSendListener {
 		dto.setRoomId(message.getRoomId());
 		dto.setFromUserId(senderUid);
 		dto.setAiUserId(targetUid);
-		dto.setContent(message.getContent());
+		dto.setContent(finalText);
+		dto.setOriginalText(originalText);
+		dto.setFinalText(finalText);
 		dto.setTimestamp(System.currentTimeMillis());
 
 		mqProducer.sendSecureMsg(MqConstant.AI_NODE_REQUEST_TOPIC, dto, msgId);
-		log.info("AI请求已投递: requestId={}, msgId={}, fromUid={}, aiUid={}, roomId={}", dto.getRequestId(), msgId, senderUid, targetUid, message.getRoomId());
+		log.info("AI请求已投递: requestId={}, msgId={}, fromUid={}, aiUid={}, roomId={}, originalText={}, finalText={}",
+				dto.getRequestId(), msgId, senderUid, targetUid, message.getRoomId(), originalText, finalText);
 	}
 
 	private Long resolveTargetUid(RoomFriend roomFriend, Long senderUid) {

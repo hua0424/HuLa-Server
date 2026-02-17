@@ -25,6 +25,7 @@ public class AiNodeWebSocketHandler implements WebSocketHandler {
 	private static final CloseStatus TOKEN_EXPIRED = new CloseStatus(4401, "AI_AUTH_TOKEN_EXPIRED");
 	private static final CloseStatus CLAIM_MISMATCH = new CloseStatus(4403, "AI_AUTH_CLAIM_MISMATCH");
 	private static final CloseStatus BAD_PROTOCOL = new CloseStatus(4408, "AI_PROTOCOL_INVALID");
+	private static final CloseStatus HEARTBEAT_TIMEOUT = new CloseStatus(4408, "AI_HEARTBEAT_TIMEOUT");
 
 	private final AiNodeTokenVerifier tokenVerifier;
 	private final AiNodeSessionManager aiNodeSessionManager;
@@ -42,21 +43,43 @@ public class AiNodeWebSocketHandler implements WebSocketHandler {
 		} catch (IllegalArgumentException ex) {
 			return closeByCode(session, ex.getMessage());
 		} catch (Exception ex) {
-			log.warn("AI节点握手异常: sessionId={}", session.getId(), ex);
+			log.warn("[AI-LINK] event=ai_node_handshake_error, sessionId={}, error={}", session.getId(), ex.getMessage());
 			return session.close(BAD_PROTOCOL);
 		}
 
 		aiNodeSessionManager.register(session, metadata);
 		aiNodeRegistryService.online(metadata);
-		log.info("AI节点连接成功: nodeId={}, ownerId={}, mode={}, aiUserId={}, sessionId={}",
+		log.info("[AI-LINK] event=ai_node_connected, nodeId={}, ownerId={}, mode={}, aiUserId={}, sessionId={}",
 				metadata.getNodeId(), metadata.getOwnerId(), metadata.getMode(), metadata.getAiUserId(), metadata.getConnectionId());
 
 		return session.receive()
 				.timeout(Duration.ofSeconds(120))
-				.doOnNext(msg -> aiNodeMessageService.handleMessage(metadata, msg.getPayloadAsText()))
+				.doOnNext(msg -> {
+					try {
+						aiNodeMessageService.handleMessage(metadata, msg.getPayloadAsText());
+					} catch (Exception ex) {
+						log.warn("[AI-LINK] event=ai_node_message_error, nodeId={}, sessionId={}, error={}",
+								metadata.getNodeId(), session.getId(), ex.getMessage());
+						// 发送错误帧
+						aiNodeSessionManager.sendToNode(metadata.getNodeId(),
+								"{\"type\":\"ai_error\",\"code\":\"AI_PROTOCOL_INVALID\",\"message\":\"Invalid message format\"}")
+								.subscribe();
+					}
+				})
+				.doOnError(ex -> {
+					if (ex instanceof java.util.concurrent.TimeoutException) {
+						log.warn("[AI-LINK] event=ai_node_heartbeat_timeout, nodeId={}, sessionId={}",
+								metadata.getNodeId(), session.getId());
+						// 心跳超时，主动关闭连接并清理注册
+						aiNodeSessionManager.cleanup(session.getId());
+						aiNodeRegistryService.offline(metadata);
+					}
+				})
 				.doFinally(signal -> {
 					aiNodeSessionManager.cleanup(session.getId());
 					aiNodeRegistryService.offline(metadata);
+					log.info("[AI-LINK] event=ai_node_disconnected, nodeId={}, ownerId={}, aiUserId={}, sessionId={}, signal={}",
+							metadata.getNodeId(), metadata.getOwnerId(), metadata.getAiUserId(), metadata.getConnectionId(), signal);
 				})
 				.then();
 	}

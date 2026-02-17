@@ -3,7 +3,6 @@ package com.luohuo.flex.im.core.chat.service.ai;
 import cn.hutool.core.util.StrUtil;
 import com.luohuo.basic.cache.redis2.CacheResult;
 import com.luohuo.basic.cache.repository.CachePlusOps;
-import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.service.ai.approval.AiApprovalService;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
@@ -32,45 +31,56 @@ public class AiDispatchPrecheckService {
 	private final UserDao userDao;
 	private final CachePlusOps cachePlusOps;
 	private final AiApprovalService aiApprovalService;
+	private final AiRateLimiterService aiRateLimiterService;
 
 	/**
 	 * 仅对 AI 单聊做可达性预检，离线直接失败
+	 * @return 节点ID，用于后续请求投递
 	 */
-	public void preCheck(Long roomId, Long senderUid) {
+	public String preCheck(Long roomId, Long senderUid) {
 		Room room = roomCache.get(roomId);
 		if (room == null || !room.isRoomFriend()) {
-			return;
+			return null;
 		}
 
 		RoomFriend roomFriend = roomFriendDao.getByRoomId(roomId);
 		if (roomFriend == null) {
-			return;
+			return null;
 		}
 
 		Long targetUid = resolveTargetUid(roomFriend, senderUid);
 		if (targetUid == null) {
-			return;
+			return null;
 		}
 
 		User targetUser = userDao.getById(targetUid);
 		if (targetUser == null || !UserTypeEnum.BOT.getValue().equals(targetUser.getUserType())) {
-			return;
+			return null;
 		}
 
 		CacheResult<String> nodeResult = cachePlusOps.get(AiNodeCacheKeyBuilder.buildAiUserNode(targetUid));
 		String nodeId = nodeResult == null ? null : nodeResult.asString();
 		if (StrUtil.isBlank(nodeId)) {
-			throw BizException.wrap(503, "AI_NODE_OFFLINE");
+			log.warn("[AI-LINK] event=ai_node_offline, targetUid={}, nodeId=null", targetUid);
+			AiErrorCodeEnum.AI_NODE_OFFLINE.throwEx();
 		}
 
 		boolean online = Boolean.TRUE.equals(cachePlusOps.exists(AiNodeCacheKeyBuilder.buildAiNodeOnline(nodeId)));
 		if (!online) {
-			log.warn("AI节点离线: targetUid={}, nodeId={}", targetUid, nodeId);
-			throw BizException.wrap(503, "AI_NODE_OFFLINE");
+			log.warn("[AI-LINK] event=ai_node_offline, targetUid={}, nodeId={}", targetUid, nodeId);
+			AiErrorCodeEnum.AI_NODE_OFFLINE.throwEx();
 		}
 
 		Long ownerUid = resolveOwnerUid(targetUid, nodeId);
+		// 审批检查
 		aiApprovalService.ensureAccess(targetUid, ownerUid, senderUid);
+
+		// 限流检查（在审批通过后）
+		aiRateLimiterService.checkRateLimit(senderUid, nodeId, targetUid);
+
+		log.info("[AI-LINK] event=precheck_pass, roomId={}, senderUid={}, targetUid={}, nodeId={}",
+				roomId, senderUid, targetUid, nodeId);
+		return nodeId;
 	}
 
 	private Long resolveOwnerUid(Long aiUserId, String nodeId) {

@@ -23,6 +23,7 @@ public class AiNodeMessageService {
 
 	private final AiNodeRegistryService aiNodeRegistryService;
 	private final AiNodeRequestTrackerService aiNodeRequestTrackerService;
+	private final AiNodeSessionManager aiNodeSessionManager;
 	private final RocketMQTemplate rocketMQTemplate;
 	private final CachePlusOps cachePlusOps;
 
@@ -31,7 +32,9 @@ public class AiNodeMessageService {
 		try {
 			json = JSONUtil.parseObj(payload);
 		} catch (Exception ex) {
-			log.warn("AI节点消息协议错误: nodeId={}, payload={}", metadata.getNodeId(), payload);
+			log.warn("[AI-LINK] event=ai_protocol_invalid, nodeId={}, reason=invalid_json, payload={}",
+					metadata.getNodeId(), payload);
+			sendErrorFrame(metadata, "AI_PROTOCOL_INVALID", "Invalid JSON format");
 			return;
 		}
 
@@ -43,29 +46,46 @@ public class AiNodeMessageService {
 				String requestId = json.getStr("requestId");
 				boolean isFinal = Boolean.TRUE.equals(json.getBool("isFinal"));
 				String content = json.getStr("content", "");
-				log.debug("收到AI流式分片: nodeId={}, requestId={}, seq={}, isFinal={}",
+				log.debug("[AI-LINK] event=ai_reply_chunk, nodeId={}, requestId={}, seq={}, isFinal={}",
 						metadata.getNodeId(), requestId, json.getInt("seq"), isFinal);
 				AiNodeFinalReplyDTO reply = aiNodeRequestTrackerService.appendChunk(requestId, content, isFinal, metadata.getNodeId());
 				if (reply != null) {
 					Boolean exists = cachePlusOps.exists(AiNodeCacheKeyBuilder.buildAiReplyDedup(requestId));
 					if (Boolean.TRUE.equals(exists)) {
-						log.warn("AI回复重复投递，已忽略: requestId={}", requestId);
+						log.warn("[AI-LINK] event=ai_reply_duplicate, requestId={}", requestId);
 						return;
 					}
 					cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiReplyDedup(requestId), "1");
 					rocketMQTemplate.send(MqConstant.AI_NODE_REPLY_TOPIC,
 							MessageBuilder.withPayload(reply).build());
-					log.info("AI最终回复已回流: requestId={}, roomId={}, toUserId={}", reply.getRequestId(), reply.getRoomId(), reply.getToUserId());
+					log.info("[AI-LINK] event=ai_reply_flow_back, requestId={}, roomId={}, toUserId={}",
+							reply.getRequestId(), reply.getRoomId(), reply.getToUserId());
 				}
 			}
 			case "ai_error" -> {
 				aiNodeRegistryService.touch(metadata);
 				String requestId = json.getStr("requestId");
 				aiNodeRequestTrackerService.remove(requestId);
-				log.warn("AI节点执行错误: nodeId={}, requestId={}, code={}, msg={}",
+				log.warn("[AI-LINK] event=ai_node_error, nodeId={}, requestId={}, code={}, msg={}",
 						metadata.getNodeId(), requestId, json.getStr("code"), json.getStr("message"));
 			}
-			default -> log.warn("未知AI消息类型: nodeId={}, type={}", metadata.getNodeId(), type);
+			default -> {
+				log.warn("[AI-LINK] event=ai_unknown_message_type, nodeId={}, type={}", metadata.getNodeId(), type);
+				sendErrorFrame(metadata, "AI_PROTOCOL_INVALID", "Unknown message type: " + type);
+			}
 		}
+	}
+
+	/**
+	 * 发送错误帧给 AI 节点
+	 */
+	private void sendErrorFrame(AiNodeSessionMetadata metadata, String code, String message) {
+		if (metadata == null || metadata.getNodeId() == null) {
+			return;
+		}
+		String errorPayload = String.format(
+				"{\"type\":\"ai_error\",\"code\":\"%s\",\"message\":\"%s\",\"timestamp\":%d}",
+				code, message, System.currentTimeMillis());
+		aiNodeSessionManager.sendToNode(metadata.getNodeId(), errorPayload).subscribe();
 	}
 }

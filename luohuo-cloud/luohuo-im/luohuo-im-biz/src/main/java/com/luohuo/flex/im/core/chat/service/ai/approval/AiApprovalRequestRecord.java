@@ -27,4 +27,12 @@ public class AiApprovalRequestRecord implements Serializable {
 	private Long expireAt;
 	private Long decidedAt;
 	private Long decidedBy;
+	/**
+	 * 用户原始请求文本
+	 */
+	private String originalText;
+	/**
+	 * owner 审批时可能改写的文本
+	 */
+	private String finalText;
 }

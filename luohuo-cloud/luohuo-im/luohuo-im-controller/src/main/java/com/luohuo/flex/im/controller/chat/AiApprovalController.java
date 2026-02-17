@@ -4,6 +4,9 @@ import com.luohuo.basic.base.R;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.im.core.chat.service.ai.approval.AiApprovalRequestRecord;
 import com.luohuo.flex.im.core.chat.service.ai.approval.AiApprovalService;
+import com.luohuo.flex.im.core.chat.service.ai.audit.AiAuditLogService;
+import com.luohuo.flex.im.domain.entity.ai.AiAuditLog;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -29,6 +32,7 @@ import java.util.List;
 public class AiApprovalController {
 
 	private final AiApprovalService aiApprovalService;
+	private final AiAuditLogService aiAuditLogService;
 
 	@GetMapping("/pending")
 	@Operation(summary = "查询 owner 待审批列表")
@@ -42,7 +46,7 @@ public class AiApprovalController {
 	@Operation(summary = "审批通过")
 	public R<AiApprovalRequestRecord> approve(@Valid @RequestBody ApprovalDecisionReq req) {
 		Long ownerUid = ContextUtil.getUid();
-		return R.success(aiApprovalService.approve(ownerUid, req.getRequestId(), req.getRole()));
+		return R.success(aiApprovalService.approve(ownerUid, req.getRequestId(), req.getRole(), req.getRewrittenText()));
 	}
 
 	@PostMapping("/reject")
@@ -52,17 +56,21 @@ public class AiApprovalController {
 		return R.success(aiApprovalService.reject(ownerUid, req.getRequestId(), req.getReason()));
 	}
 
+	@GetMapping("/audit")
+	@Operation(summary = "查询审计日志列表")
+	public R<Page<AiAuditLog>> auditList(@RequestParam(required = false) Long aiUserId,
+										  @RequestParam(defaultValue = "1") Integer page,
+										  @RequestParam(defaultValue = "20") Integer size) {
+		Long ownerUid = ContextUtil.getUid();
+		return R.success(aiAuditLogService.listAuditLogs(ownerUid, aiUserId, page, size));
+	}
+
 	@Data
 	public static class ApprovalDecisionReq {
 		@NotBlank(message = "requestId不能为空")
 		private String requestId;
-		/**
-		 * approve 时可选：viewer/admin
-		 */
 		private String role;
-		/**
-		 * reject 时可选
-		 */
 		private String reason;
+		private String rewrittenText;
 	}
 }

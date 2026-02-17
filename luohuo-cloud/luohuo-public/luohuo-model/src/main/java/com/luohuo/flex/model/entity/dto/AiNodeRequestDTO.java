@@ -27,4 +27,12 @@ public class AiNodeRequestDTO extends TenantDTO {
 	private String toNodeId;
 	private String content;
 	private Long timestamp;
+	/**
+	 * 原始请求文本（用户发送的内容）
+	 */
+	private String originalText;
+	/**
+	 * owner 改写后的文本（可能与 content 相同）
+	 */
+	private String finalText;
 }

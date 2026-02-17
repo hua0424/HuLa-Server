@@ -7,6 +7,7 @@ import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.EnableAspectJAutoProxy;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import com.luohuo.basic.validator.annotation.EnableFormValidator;
 import com.luohuo.flex.common.ServerApplication;
 
@@ -35,6 +36,7 @@ import static com.luohuo.flex.common.constant.BizConstant.UTIL_PACKAGE;
 @Slf4j
 @EnableAspectJAutoProxy(proxyTargetClass = true, exposeProxy = true)
 @EnableFormValidator
+@EnableScheduling
 public class ImServerApplication extends ServerApplication {
     public static void main(String[] args) throws UnknownHostException {
         start(ImServerApplication.class, args);

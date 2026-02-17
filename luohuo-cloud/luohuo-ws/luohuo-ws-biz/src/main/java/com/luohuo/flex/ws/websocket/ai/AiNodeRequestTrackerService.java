@@ -47,6 +47,7 @@ public class AiNodeRequestTrackerService {
 		reply.setMsgId(req.getMsgId());
 		reply.setRoomId(req.getRoomId());
 		reply.setToUserId(req.getFromUserId());
+		reply.setFromUserId(req.getFromUserId());
 		reply.setAiUserId(req.getAiUserId());
 		reply.setNodeId(nodeId);
 		reply.setContent(finalText);

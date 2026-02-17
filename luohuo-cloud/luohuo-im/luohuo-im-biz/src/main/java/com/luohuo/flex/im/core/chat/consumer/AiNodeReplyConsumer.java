@@ -4,6 +4,7 @@ import cn.hutool.core.util.StrUtil;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.core.chat.service.ChatService;
+import com.luohuo.flex.im.core.chat.service.ai.AiRateLimiterService;
 import com.luohuo.flex.im.domain.entity.msg.TextMsgReq;
 import com.luohuo.flex.im.domain.enums.MessageTypeEnum;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
@@ -27,6 +28,7 @@ import org.springframework.stereotype.Component;
 public class AiNodeReplyConsumer implements RocketMQListener<AiNodeFinalReplyDTO> {
 
 	private final ChatService chatService;
+	private final AiRateLimiterService aiRateLimiterService;
 
 	@Override
 	public void onMessage(AiNodeFinalReplyDTO dto) {
@@ -52,11 +54,17 @@ public class AiNodeReplyConsumer implements RocketMQListener<AiNodeFinalReplyDTO
 			req.setSkip(true);
 			req.setPushMessage(true);
 			Long msgId = chatService.sendMsg(req, dto.getAiUserId());
-			log.info("AI回复已落库并推送: requestId={}, msgId={}, roomId={}", dto.getRequestId(), msgId, dto.getRoomId());
+			log.info("[AI-LINK] event=ai_reply_stored, requestId={}, msgId={}, roomId={}",
+					dto.getRequestId(), msgId, dto.getRoomId());
 		} catch (Exception ex) {
-			log.error("AI回复回流失败: requestId={}, roomId={}", dto.getRequestId(), dto.getRoomId(), ex);
+			log.error("[AI-LINK] event=ai_reply_failed, requestId={}, roomId={}", dto.getRequestId(), dto.getRoomId(), ex);
 		} finally {
 			ContextUtil.clearTenantContext();
+		}
+
+		// 释放 in-flight 计数
+		if (dto.getFromUserId() != null && dto.getNodeId() != null) {
+			aiRateLimiterService.releaseInflight(dto.getFromUserId(), dto.getNodeId());
 		}
 	}
 }

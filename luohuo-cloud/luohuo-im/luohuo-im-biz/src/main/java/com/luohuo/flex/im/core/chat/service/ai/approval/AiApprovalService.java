@@ -6,10 +6,12 @@ import com.luohuo.basic.cache.redis2.CacheResult;
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.basic.model.cache.CacheKey;
+import com.luohuo.flex.im.core.chat.service.ai.audit.AiAuditLogService;
 import com.luohuo.flex.router.AiNodeCacheKeyBuilder;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -23,13 +25,19 @@ import java.util.Set;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AiApprovalService {
 
 	private final CachePlusOps cachePlusOps;
 
+	@Autowired(required = false)
+	private AiAuditLogService aiAuditLogService;
+
 	@Value("${luohuo.ai-node.approval-timeout-seconds:300}")
 	private long approvalTimeoutSeconds;
+
+	public AiApprovalService(CachePlusOps cachePlusOps) {
+		this.cachePlusOps = cachePlusOps;
+	}
 
 	public void ensureAccess(Long aiUserId, Long ownerUid, Long requesterUid) {
 		if (aiUserId == null || ownerUid == null || requesterUid == null) {
@@ -86,14 +94,96 @@ public class AiApprovalService {
 		throw BizException.wrap(403, "AI_APPROVAL_REQUIRED:" + requestId);
 	}
 
-	public AiApprovalRequestRecord approve(Long ownerUid, String requestId, String role) {
+	public AiApprovalRequestRecord approve(Long ownerUid, String requestId, String role, String rewrittenText) {
 		AiApprovalRoleEnum finalRole = AiApprovalRoleEnum.parseOrDefault(role);
-		return decide(ownerUid, requestId, AiApprovalStatusEnum.APPROVED, finalRole.getCode(), null);
+		AiApprovalRequestRecord record = decide(ownerUid, requestId, AiApprovalStatusEnum.APPROVED, finalRole.getCode(), null, rewrittenText);
+		if (aiAuditLogService != null && record != null) {
+			aiAuditLogService.logApproval(record);
+		}
+		return record;
 	}
 
 	public AiApprovalRequestRecord reject(Long ownerUid, String requestId, String reason) {
 		String finalReason = StrUtil.blankToDefault(reason, "rejected_by_owner");
-		return decide(ownerUid, requestId, AiApprovalStatusEnum.REJECTED, AiApprovalRoleEnum.VIEWER.getCode(), finalReason);
+		AiApprovalRequestRecord record = decide(ownerUid, requestId, AiApprovalStatusEnum.REJECTED, AiApprovalRoleEnum.VIEWER.getCode(), finalReason, null);
+		if (aiAuditLogService != null && record != null) {
+			aiAuditLogService.logApproval(record);
+		}
+		return record;
+	}
+
+	/**
+	 * 定时扫描并处理超时的审批请求（每分钟执行一次）
+	 */
+	@Scheduled(fixedRate = 60000)
+	public void processTimeoutRequests() {
+		Set<String> ownerKeys = cachePlusOps.keys(new AiNodeCacheKeyBuilder.AiApprovalOwnerPending().getPattern());
+		if (ownerKeys == null || ownerKeys.isEmpty()) {
+			return;
+		}
+		for (String rawKey : ownerKeys) {
+			try {
+				String ownerIdStr = rawKey.substring(rawKey.lastIndexOf(":") + 1);
+				Long ownerUid = Long.parseLong(ownerIdStr);
+				processOwnerTimeoutRequests(ownerUid);
+			} catch (Exception ignored) {
+			}
+		}
+	}
+
+	/**
+	 * 处理单个 owner 的超时请求
+	 */
+	private void processOwnerTimeoutRequests(Long ownerUid) {
+		Set<Object> requestIds = cachePlusOps.sMembers(AiNodeCacheKeyBuilder.buildAiApprovalOwnerPending(ownerUid));
+		if (requestIds == null || requestIds.isEmpty()) {
+			return;
+		}
+
+		long now = System.currentTimeMillis();
+		for (Object obj : requestIds) {
+			if (obj == null) {
+				continue;
+			}
+			String requestId = String.valueOf(obj);
+			AiApprovalRequestRecord record = getRequestRecord(requestId);
+			if (record == null) {
+				cachePlusOps.sRem(AiNodeCacheKeyBuilder.buildAiApprovalOwnerPending(ownerUid), requestId);
+				continue;
+			}
+			if (!AiApprovalStatusEnum.PENDING.getCode().equals(record.getStatus())) {
+				cachePlusOps.sRem(AiNodeCacheKeyBuilder.buildAiApprovalOwnerPending(ownerUid), requestId);
+				continue;
+			}
+			// 检查是否超时
+			if (record.getExpireAt() != null && record.getExpireAt() < now) {
+				log.info("审批请求超时，自动拒绝: requestId={}, aiUserId={}, ownerUid={}, requesterUid={}",
+						requestId, record.getAiUserId(), ownerUid, record.getRequesterUid());
+				// 执行超时拒绝
+				AiApprovalRequestRecord timeoutRecord = timeoutReject(requestId, record);
+				// 写入审计日志
+				if (aiAuditLogService != null && timeoutRecord != null) {
+					aiAuditLogService.logApproval(timeoutRecord);
+				}
+			}
+		}
+	}
+
+	/**
+	 * 超时自动拒绝
+	 */
+	private AiApprovalRequestRecord timeoutReject(String requestId, AiApprovalRequestRecord record) {
+		record.setStatus(AiApprovalStatusEnum.REJECTED.getCode());
+		record.setReason("timeout");
+		record.setDecidedAt(System.currentTimeMillis());
+		record.setDecidedBy(record.getOwnerUid());
+
+		// 清理 Redis 缓存
+		cachePlusOps.del(AiNodeCacheKeyBuilder.buildAiApprovalPending(record.getAiUserId(), record.getRequesterUid()));
+		cachePlusOps.sRem(AiNodeCacheKeyBuilder.buildAiApprovalOwnerPending(record.getOwnerUid()), requestId);
+		cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId), record);
+
+		return record;
 	}
 
 	public List<AiApprovalRequestRecord> listPending(Long ownerUid, Long aiUserId, Integer limit) {
@@ -126,7 +216,7 @@ public class AiApprovalService {
 		return result;
 	}
 
-	private AiApprovalRequestRecord decide(Long ownerUid, String requestId, AiApprovalStatusEnum status, String role, String reason) {
+	private AiApprovalRequestRecord decide(Long ownerUid, String requestId, AiApprovalStatusEnum status, String role, String reason, String rewrittenText) {
 		AiApprovalRequestRecord record = getRequestRecord(requestId);
 		if (record == null) {
 			throw BizException.wrap(404, "AI_APPROVAL_REQUEST_NOT_FOUND");
@@ -143,6 +233,11 @@ public class AiApprovalService {
 		record.setReason(reason);
 		record.setDecidedAt(System.currentTimeMillis());
 		record.setDecidedBy(ownerUid);
+
+		// 处理改写文本
+		if (status == AiApprovalStatusEnum.APPROVED && StrUtil.isNotBlank(rewrittenText)) {
+			record.setFinalText(rewrittenText);
+		}
 
 		if (status == AiApprovalStatusEnum.APPROVED) {
 			AiApprovalGrantRecord grant = AiApprovalGrantRecord.builder()

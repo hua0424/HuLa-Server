@@ -44,11 +44,13 @@ public class AiNodeRequestConsumer implements RocketMQListener<AiNodeRequestDTO>
 			nodeId = aiNodeRegistryService.getNodeIdByAiUser(dto.getAiUserId()).orElse(null);
 		}
 		if (StrUtil.isBlank(nodeId)) {
-			log.warn("AI请求路由失败，未找到在线节点: requestId={}, aiUserId={}", dto.getRequestId(), dto.getAiUserId());
+			log.warn("[AI-LINK] event=ai_request_route_failed, requestId={}, aiUserId={}, reason=no_online_node",
+					dto.getRequestId(), dto.getAiUserId());
 			return;
 		}
 		if (aiNodeSessionManager.getSession(nodeId).isEmpty()) {
-			log.warn("AI请求路由失败，节点会话不存在: requestId={}, nodeId={}", dto.getRequestId(), nodeId);
+			log.warn("[AI-LINK] event=ai_request_route_failed, requestId={}, nodeId={}, reason=session_not_found",
+					dto.getRequestId(), nodeId);
 			return;
 		}
 
@@ -68,9 +70,12 @@ public class AiNodeRequestConsumer implements RocketMQListener<AiNodeRequestDTO>
 		final String finalNodeId = nodeId;
 		String text = JSONUtil.toJsonStr(payload);
 		aiNodeSessionManager.sendToNode(nodeId, text)
+				.doOnSuccess(v -> log.info("[AI-LINK] event=ai_request_delivered, requestId={}, nodeId={}, roomId={}, fromUserId={}",
+						dto.getRequestId(), finalNodeId, dto.getRoomId(), dto.getFromUserId()))
 				.doOnError(ex -> {
 					aiNodeRequestTrackerService.remove(dto.getRequestId());
-					log.error("AI请求发送失败: requestId={}, nodeId={}", dto.getRequestId(), finalNodeId, ex);
+					log.error("[AI-LINK] event=ai_request_send_failed, requestId={}, nodeId={}, error={}",
+							dto.getRequestId(), finalNodeId, ex.getMessage());
 				})
 				.subscribe();
 	}

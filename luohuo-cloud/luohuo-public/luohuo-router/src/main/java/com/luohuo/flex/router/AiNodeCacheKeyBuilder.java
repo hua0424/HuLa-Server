@@ -75,6 +75,124 @@ public class AiNodeCacheKeyBuilder {
 		return new AiReplyDedup().key(requestId);
 	}
 
+	// ==================== 限流相关 Keys ====================
+
+	/**
+	 * 限流：requester -> node 每分钟请求数 (滑动窗口)
+	 * Redis key: ai:rate:{requesterUid}:{nodeId}:min
+	 */
+	public static CacheKey buildAiRateLimitMin(Long requesterUid, String nodeId) {
+		return new AiRateLimitMin().key(requesterUid, nodeId);
+	}
+
+	/**
+	 * 限流：requester 并发 in-flight 请求数
+	 * Redis key: ai:inflight:{requesterUid}
+	 */
+	public static CacheKey buildAiInflightRequester(Long requesterUid) {
+		return new AiInflightRequester().key(requesterUid);
+	}
+
+	/**
+	 * 限流：node 全局并发 in-flight 请求数
+	 * Redis key: ai:inflight:node:{nodeId}
+	 */
+	public static CacheKey buildAiInflightNode(String nodeId) {
+		return new AiInflightNode().key(nodeId);
+	}
+
+	// ==================== 限流 Key 实现 ====================
+
+	/**
+	 * 每分钟限流计数器（使用 Redis String + INCR + EXPIRE）
+	 */
+	public static class AiRateLimitMin implements CacheKeyBuilder {
+		@Override
+		public String getPrefix() {
+			return "ai";
+		}
+
+		@Override
+		public String getModular() {
+			return "rate";
+		}
+
+		@Override
+		public String getTable() {
+			return "min";
+		}
+
+		@Override
+		public ValueType getValueType() {
+			return ValueType.number;
+		}
+
+		@Override
+		public Duration getExpire() {
+			return Duration.ofSeconds(60);
+		}
+	}
+
+	/**
+	 * requester 并发 in-flight 计数器
+	 */
+	public static class AiInflightRequester implements CacheKeyBuilder {
+		@Override
+		public String getPrefix() {
+			return "ai";
+		}
+
+		@Override
+		public String getModular() {
+			return "inflight";
+		}
+
+		@Override
+		public String getTable() {
+			return "requester";
+		}
+
+		@Override
+		public ValueType getValueType() {
+			return ValueType.number;
+		}
+
+		@Override
+		public Duration getExpire() {
+			return Duration.ofSeconds(300);
+		}
+	}
+
+	/**
+	 * node 全局并发 in-flight 计数器
+	 */
+	public static class AiInflightNode implements CacheKeyBuilder {
+		@Override
+		public String getPrefix() {
+			return "ai";
+		}
+
+		@Override
+		public String getModular() {
+			return "inflight";
+		}
+
+		@Override
+		public String getTable() {
+			return "node";
+		}
+
+		@Override
+		public ValueType getValueType() {
+			return ValueType.number;
+		}
+
+		@Override
+		public Duration getExpire() {
+			return Duration.ofSeconds(300);
+		}
+	}
+
 	public static class AiNodeOnline implements CacheKeyBuilder {
 		@Override
 		public String getPrefix() {

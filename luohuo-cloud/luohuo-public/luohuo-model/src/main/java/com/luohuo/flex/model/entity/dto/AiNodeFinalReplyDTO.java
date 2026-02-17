@@ -23,6 +23,7 @@ public class AiNodeFinalReplyDTO extends TenantDTO {
 	private Long msgId;
 	private Long roomId;
 	private Long toUserId;
+	private Long fromUserId;
 	private Long aiUserId;
 	private String nodeId;
 	private String content;
