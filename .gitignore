@@ -38,3 +38,7 @@ docker/store/**
 docker/console/**
 docker/minio/**
 docker/redis/**
+
+# Local runtime artifacts (generated during containerized dev runs)
+com/
+luohuo-cloud/logs/
