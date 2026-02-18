@@ -55,7 +55,7 @@ public class AiApprovalService {
 		}
 
 		CacheKey pendingKey = AiNodeCacheKeyBuilder.buildAiApprovalPending(aiUserId, requesterUid);
-		CacheResult<String> pendingResult = cachePlusOps.get(pendingKey);
+		CacheResult<String> pendingResult = cachePlusOps.get(pendingKey, false);
 		String pendingRequestId = pendingResult == null || pendingResult.getValue() == null
 				? null
 				: String.valueOf(pendingResult.getValue());
@@ -67,7 +67,7 @@ public class AiApprovalService {
 		}
 
 		long now = System.currentTimeMillis();
-		long ttlMillis = Duration.ofSeconds(Math.max(30, approvalTimeoutSeconds)).toMillis();
+		long approvalTimeoutMillis = Duration.ofSeconds(Math.max(30, approvalTimeoutSeconds)).toMillis();
 		String requestId = "apr_" + IdUtil.fastSimpleUUID();
 
 		AiApprovalRequestRecord requestRecord = AiApprovalRequestRecord.builder()
@@ -78,14 +78,15 @@ public class AiApprovalService {
 				.status(AiApprovalStatusEnum.PENDING.getCode())
 				.role(AiApprovalRoleEnum.VIEWER.getCode())
 				.createdAt(now)
-				.expireAt(now + ttlMillis)
+				.expireAt(now + approvalTimeoutMillis)
 				.originalText(originalText)
 				.finalText(originalText)
 				.build();
 
 		CacheKey requestKey = AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId);
-		requestKey.setExpire(Duration.ofMillis(ttlMillis));
-		pendingKey.setExpire(Duration.ofMillis(ttlMillis));
+		// pending/request key 需要存活到定时器扫描完成，避免请求刚到超时就被TTL清掉导致无法落审计
+		long pendingTtlSeconds = Math.max(approvalTimeoutSeconds + 120, 300);
+		pendingKey.setExpire(Duration.ofSeconds(pendingTtlSeconds));
 
 		cachePlusOps.set(requestKey, requestRecord);
 		cachePlusOps.set(pendingKey, requestId);
@@ -224,7 +225,7 @@ public class AiApprovalService {
 	 */
 	public String consumeRewriteText(Long aiUserId, Long requesterUid) {
 		CacheKey rewriteKey = AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(aiUserId, requesterUid);
-		CacheResult<String> rewriteResult = cachePlusOps.get(rewriteKey);
+		CacheResult<String> rewriteResult = cachePlusOps.get(rewriteKey, false);
 		String rewrittenText = rewriteResult == null ? null : rewriteResult.asString();
 		if (StrUtil.isBlank(rewrittenText) || StrUtil.equalsIgnoreCase(rewrittenText, "null")) {
 			cachePlusOps.del(rewriteKey);
@@ -289,7 +290,7 @@ public class AiApprovalService {
 		if (StrUtil.isBlank(requestId)) {
 			return null;
 		}
-		CacheResult<AiApprovalRequestRecord> result = cachePlusOps.get(AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId));
+		CacheResult<AiApprovalRequestRecord> result = cachePlusOps.get(AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId), false);
 		return result == null ? null : result.getValue();
 	}
 }
