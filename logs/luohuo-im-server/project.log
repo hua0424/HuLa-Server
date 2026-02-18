@@ -1,6 +1,0 @@
-[luohuo-im-server:18778:] 2026-02-18 04:19:17.303[ WARN] 2352 [] [main:42315] [com.luohuo.basic.cache.RedisAutoConfigure.cacheOps:118] 检查到缓存采用了 Redis模式
-[luohuo-im-server:18778:] 2026-02-18 04:19:21.354[ WARN] 2352 [] [main:46366] [c.luohuo.basic.database.injector.LuohuoSqlInjector.getMethodList:56] class com.luohuo.flex.im.sensitive.domain.SensitiveWord ,Not found @TableId annotation, Cannot use Mybatis-Plus 'xxById' Method.
-[luohuo-im-server:18778:] 2026-02-18 04:23:09.792[ WARN] 3292 [] [main:42022] [com.luohuo.basic.cache.RedisAutoConfigure.cacheOps:118] 检查到缓存采用了 Redis模式
-[luohuo-im-server:18778:] 2026-02-18 04:23:13.416[ WARN] 3292 [] [main:45646] [c.luohuo.basic.database.injector.LuohuoSqlInjector.getMethodList:56] class com.luohuo.flex.im.sensitive.domain.SensitiveWord ,Not found @TableId annotation, Cannot use Mybatis-Plus 'xxById' Method.
-[luohuo-im-server:18778:] 2026-02-18 06:31:17.791[ WARN] 689 [] [main:51945] [com.luohuo.basic.cache.RedisAutoConfigure.cacheOps:118] 检查到缓存采用了 Redis模式
-[luohuo-im-server:18778:] 2026-02-18 06:31:21.706[ WARN] 689 [] [main:55860] [c.luohuo.basic.database.injector.LuohuoSqlInjector.getMethodList:56] class com.luohuo.flex.im.sensitive.domain.SensitiveWord ,Not found @TableId annotation, Cannot use Mybatis-Plus 'xxById' Method.
