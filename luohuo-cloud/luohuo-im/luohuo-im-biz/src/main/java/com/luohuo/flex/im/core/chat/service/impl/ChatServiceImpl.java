@@ -4,6 +4,9 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.collection.CollectionUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.basic.utils.TimeUtils;
@@ -13,6 +16,7 @@ import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.MsgCache;
 import com.luohuo.flex.im.core.user.dao.UserFriendDao;
 import com.luohuo.flex.im.domain.entity.*;
+import com.luohuo.flex.im.domain.entity.msg.TextMsgReq;
 import com.luohuo.flex.im.domain.enums.*;
 import com.luohuo.flex.im.domain.vo.request.*;
 import jakarta.annotation.Nullable;
@@ -72,7 +76,7 @@ public class ChatServiceImpl implements ChatService {
     @Transactional
     public Long sendMsg(ChatMessageReq request, Long uid) {
         check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid);
-		aiDispatchPrecheckService.preCheck(request.getRoomId(), uid);
+		aiDispatchPrecheckService.preCheck(request.getRoomId(), uid, extractOriginalText(request.getBody()));
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
 
@@ -92,6 +96,33 @@ public class ChatServiceImpl implements ChatService {
         SpringUtils.publishEvent(new MessageSendEvent(this, new ChatMsgSendDto(msgId, uid)));
         return msgId;
     }
+
+	private String extractOriginalText(Object body) {
+		if (body == null) {
+			return null;
+		}
+		if (body instanceof TextMsgReq textMsgReq) {
+			return StrUtil.trim(textMsgReq.getContent());
+		}
+		if (body instanceof String str) {
+			return StrUtil.trim(str);
+		}
+		if (body instanceof Map<?, ?> map) {
+			Object content = map.get("content");
+			if (content != null) {
+				return StrUtil.trim(String.valueOf(content));
+			}
+		}
+		try {
+			JSONObject jsonObject = JSONUtil.parseObj(body);
+			String content = jsonObject.getStr("content");
+			if (StrUtil.isNotBlank(content)) {
+				return StrUtil.trim(content);
+			}
+		} catch (Exception ignored) {
+		}
+		return StrUtil.trim(String.valueOf(body));
+	}
 
     private void checkDeFriend(Boolean isSend, Boolean isTemp, Long roomId, Long uid) {
         Room room = roomCache.get(roomId);

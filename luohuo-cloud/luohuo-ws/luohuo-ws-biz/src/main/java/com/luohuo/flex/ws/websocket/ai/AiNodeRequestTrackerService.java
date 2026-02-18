@@ -51,6 +51,8 @@ public class AiNodeRequestTrackerService {
 		reply.setAiUserId(req.getAiUserId());
 		reply.setNodeId(nodeId);
 		reply.setContent(finalText);
+		reply.setOriginalText(req.getOriginalText());
+		reply.setFinalText(req.getFinalText());
 		reply.setTimestamp(System.currentTimeMillis());
 		return reply;
 	}

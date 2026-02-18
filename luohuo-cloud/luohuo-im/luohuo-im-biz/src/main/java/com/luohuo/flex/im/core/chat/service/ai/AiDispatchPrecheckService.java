@@ -37,7 +37,7 @@ public class AiDispatchPrecheckService {
 	 * 仅对 AI 单聊做可达性预检，离线直接失败
 	 * @return 节点ID，用于后续请求投递
 	 */
-	public String preCheck(Long roomId, Long senderUid) {
+	public String preCheck(Long roomId, Long senderUid, String originalText) {
 		Room room = roomCache.get(roomId);
 		if (room == null || !room.isRoomFriend()) {
 			return null;
@@ -73,7 +73,7 @@ public class AiDispatchPrecheckService {
 
 		Long ownerUid = resolveOwnerUid(targetUid, nodeId);
 		// 审批检查
-		aiApprovalService.ensureAccess(targetUid, ownerUid, senderUid);
+		aiApprovalService.ensureAccess(targetUid, ownerUid, senderUid, originalText);
 
 		// 限流检查（在审批通过后）
 		aiRateLimiterService.checkRateLimit(senderUid, nodeId, targetUid);

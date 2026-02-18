@@ -27,5 +27,13 @@ public class AiNodeFinalReplyDTO extends TenantDTO {
 	private Long aiUserId;
 	private String nodeId;
 	private String content;
+	/**
+	 * 原始请求文本（用户输入）
+	 */
+	private String originalText;
+	/**
+	 * 最终执行文本（可能为 owner 改写）
+	 */
+	private String finalText;
 	private Long timestamp;
 }

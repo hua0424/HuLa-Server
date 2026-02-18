@@ -69,6 +69,13 @@ public class AiNodeCacheKeyBuilder {
 	}
 
 	/**
+	 * owner 审批改写文本（仅下一次请求生效）
+	 */
+	public static CacheKey buildAiApprovalRewriteNext(Long aiUserId, Long requesterUid) {
+		return new AiApprovalRewriteNext().key(aiUserId, requesterUid);
+	}
+
+	/**
 	 * AI 回复去重（requestId）
 	 */
 	public static CacheKey buildAiReplyDedup(String requestId) {
@@ -406,6 +413,33 @@ public class AiNodeCacheKeyBuilder {
 		@Override
 		public Duration getExpire() {
 			return Duration.ofDays(7);
+		}
+	}
+
+	public static class AiApprovalRewriteNext implements CacheKeyBuilder {
+		@Override
+		public String getPrefix() {
+			return "luohuo";
+		}
+
+		@Override
+		public String getModular() {
+			return "router";
+		}
+
+		@Override
+		public String getTable() {
+			return "ai-approval-rewrite-next";
+		}
+
+		@Override
+		public ValueType getValueType() {
+			return ValueType.string;
+		}
+
+		@Override
+		public Duration getExpire() {
+			return Duration.ofDays(1);
 		}
 	}
 

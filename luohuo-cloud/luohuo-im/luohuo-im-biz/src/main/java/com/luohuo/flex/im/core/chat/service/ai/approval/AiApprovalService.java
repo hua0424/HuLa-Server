@@ -39,7 +39,7 @@ public class AiApprovalService {
 		this.cachePlusOps = cachePlusOps;
 	}
 
-	public void ensureAccess(Long aiUserId, Long ownerUid, Long requesterUid) {
+	public void ensureAccess(Long aiUserId, Long ownerUid, Long requesterUid, String originalText) {
 		if (aiUserId == null || ownerUid == null || requesterUid == null) {
 			return;
 		}
@@ -79,6 +79,8 @@ public class AiApprovalService {
 				.role(AiApprovalRoleEnum.VIEWER.getCode())
 				.createdAt(now)
 				.expireAt(now + ttlMillis)
+				.originalText(originalText)
+				.finalText(originalText)
 				.build();
 
 		CacheKey requestKey = AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId);
@@ -181,6 +183,7 @@ public class AiApprovalService {
 		// 清理 Redis 缓存
 		cachePlusOps.del(AiNodeCacheKeyBuilder.buildAiApprovalPending(record.getAiUserId(), record.getRequesterUid()));
 		cachePlusOps.sRem(AiNodeCacheKeyBuilder.buildAiApprovalOwnerPending(record.getOwnerUid()), requestId);
+		cachePlusOps.del(AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(record.getAiUserId(), record.getRequesterUid()));
 		cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId), record);
 
 		return record;
@@ -216,6 +219,20 @@ public class AiApprovalService {
 		return result;
 	}
 
+	/**
+	 * 消费一次性的 owner 改写文本（用于下一次请求投递）
+	 */
+	public String consumeRewriteText(Long aiUserId, Long requesterUid) {
+		CacheKey rewriteKey = AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(aiUserId, requesterUid);
+		CacheResult<String> rewriteResult = cachePlusOps.get(rewriteKey);
+		String rewrittenText = rewriteResult == null ? null : rewriteResult.asString();
+		if (StrUtil.isBlank(rewrittenText)) {
+			return null;
+		}
+		cachePlusOps.del(rewriteKey);
+		return rewrittenText;
+	}
+
 	private AiApprovalRequestRecord decide(Long ownerUid, String requestId, AiApprovalStatusEnum status, String role, String reason, String rewrittenText) {
 		AiApprovalRequestRecord record = getRequestRecord(requestId);
 		if (record == null) {
@@ -249,8 +266,16 @@ public class AiApprovalService {
 					.approvedBy(ownerUid)
 					.build();
 			cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiApprovalGrant(record.getAiUserId(), record.getRequesterUid()), grant);
+
+			// owner 改写文本仅作用于“下一次”请求投递，消费后删除
+			if (StrUtil.isNotBlank(record.getFinalText()) && !StrUtil.equals(record.getFinalText(), record.getOriginalText())) {
+				cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(record.getAiUserId(), record.getRequesterUid()), record.getFinalText());
+			} else {
+				cachePlusOps.del(AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(record.getAiUserId(), record.getRequesterUid()));
+			}
 		} else {
 			cachePlusOps.del(AiNodeCacheKeyBuilder.buildAiApprovalGrant(record.getAiUserId(), record.getRequesterUid()));
+			cachePlusOps.del(AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(record.getAiUserId(), record.getRequesterUid()));
 		}
 
 		cachePlusOps.set(AiNodeCacheKeyBuilder.buildAiApprovalRequest(requestId), record);

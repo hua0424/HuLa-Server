@@ -47,10 +47,17 @@ public class AiNodeReplyConsumer implements RocketMQListener<AiNodeFinalReplyDTO
 			ContextUtil.setUid(dto.getAiUserId());
 		}
 		try {
+			String replyContent = dto.getContent();
+			if (StrUtil.isNotBlank(dto.getOriginalText())
+					&& StrUtil.isNotBlank(dto.getFinalText())
+					&& !StrUtil.equals(dto.getOriginalText(), dto.getFinalText())) {
+				replyContent = "⚠️ 你的请求已由管理员进行策略调整后执行。\n\n" + replyContent;
+			}
+
 			ChatMessageReq req = new ChatMessageReq();
 			req.setRoomId(dto.getRoomId());
 			req.setMsgType(MessageTypeEnum.BOT.getType());
-			req.setBody(TextMsgReq.builder().content(dto.getContent()).build());
+			req.setBody(TextMsgReq.builder().content(replyContent).build());
 			req.setSkip(true);
 			req.setPushMessage(true);
 			Long msgId = chatService.sendMsg(req, dto.getAiUserId());
