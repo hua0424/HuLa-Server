@@ -226,7 +226,8 @@ public class AiApprovalService {
 		CacheKey rewriteKey = AiNodeCacheKeyBuilder.buildAiApprovalRewriteNext(aiUserId, requesterUid);
 		CacheResult<String> rewriteResult = cachePlusOps.get(rewriteKey);
 		String rewrittenText = rewriteResult == null ? null : rewriteResult.asString();
-		if (StrUtil.isBlank(rewrittenText)) {
+		if (StrUtil.isBlank(rewrittenText) || StrUtil.equalsIgnoreCase(rewrittenText, "null")) {
+			cachePlusOps.del(rewriteKey);
 			return null;
 		}
 		cachePlusOps.del(rewriteKey);
