@@ -7,7 +7,6 @@ import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.common.event.MessageSendEvent;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
-import com.luohuo.flex.im.core.chat.service.MessageService;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.im.domain.MsgSendMessageDTO;
@@ -47,9 +46,6 @@ public class MessageSendListener {
 	private UserDao userDao;
     @Resource
     private MQProducer mqProducer;
-	@Resource
-	private MessageService messageService;
-
     @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT, classes = MessageSendEvent.class, fallbackExecution = true)
     public void messageRoute(MessageSendEvent event) {
         Long msgId = event.getChatMsgSendDto().getMsgId();
