@@ -162,14 +162,30 @@ public class DefUserManagerImpl extends SuperCacheManagerImpl<DefUserMapper, Def
         ArgumentAssert.notEmpty(defUsers, "待删除数据不存在");
         List<CacheKey> keyList = new ArrayList<>();
         for (DefUser defUser : defUsers) {
-            CacheKey idCardKey = DefUserIdCardCacheKeyBuilder.builder(defUser.getIdCard());
-            CacheKey mobileKey = DefUserMobileCacheKeyBuilder.builder(defUser.getMobile());
-            CacheKey emailKey = DefUserEmailCacheKeyBuilder.builder(defUser.getEmail());
-            CacheKey usernameKey = DefUserUserNameCacheKeyBuilder.builder(defUser.getUsername());
-            keyList.add(idCardKey);
-            keyList.add(mobileKey);
-            keyList.add(emailKey);
-            keyList.add(usernameKey);
+            Integer loginType = defUser.getSystemType();
+
+            // 兼容老 key（无 systemType 前缀）
+            CacheKey legacyIdCardKey = DefUserIdCardCacheKeyBuilder.builder(defUser.getIdCard());
+            CacheKey legacyMobileKey = DefUserMobileCacheKeyBuilder.builder(defUser.getMobile());
+            CacheKey legacyEmailKey = DefUserEmailCacheKeyBuilder.builder(defUser.getEmail());
+            CacheKey legacyUsernameKey = DefUserUserNameCacheKeyBuilder.builder(defUser.getUsername());
+            keyList.add(legacyIdCardKey);
+            keyList.add(legacyMobileKey);
+            keyList.add(legacyEmailKey);
+            keyList.add(legacyUsernameKey);
+
+            // 当前使用的 key（带 systemType 前缀）
+            if (loginType != null) {
+                String loginTypePrefix = loginType.toString();
+                CacheKey typedIdCardKey = DefUserIdCardCacheKeyBuilder.builder(ToolsUtil.combineStrings(loginTypePrefix, defUser.getIdCard()));
+                CacheKey typedMobileKey = DefUserMobileCacheKeyBuilder.builder(ToolsUtil.combineStrings(loginTypePrefix, defUser.getMobile()));
+                CacheKey typedEmailKey = DefUserEmailCacheKeyBuilder.builder(ToolsUtil.combineStrings(loginTypePrefix, defUser.getEmail()));
+                CacheKey typedUsernameKey = DefUserUserNameCacheKeyBuilder.builder(ToolsUtil.combineStrings(loginTypePrefix, defUser.getUsername()));
+                keyList.add(typedIdCardKey);
+                keyList.add(typedMobileKey);
+                keyList.add(typedEmailKey);
+                keyList.add(typedUsernameKey);
+            }
         }
 
         cacheOps.del(keyList);

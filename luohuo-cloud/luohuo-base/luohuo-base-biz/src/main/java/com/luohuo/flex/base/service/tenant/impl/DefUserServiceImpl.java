@@ -162,7 +162,7 @@ public class DefUserServiceImpl extends SuperCacheServiceImpl<DefUserManager, Lo
     @Transactional(rollbackFor = Exception.class)
     @Override
     public String registerByEmail(DefUser defUser) {
-        ArgumentAssert.isFalse(checkMobile(defUser.getEmail(), null), "邮箱：{}已经存在", defUser.getMobile());
+        ArgumentAssert.isFalse(checkEmail(defUser.getEmail(), null), "邮箱：{}已经存在", defUser.getEmail());
 
         // 先设置基本信息（不设置账号）
         defUser.setTenantId(1L);
