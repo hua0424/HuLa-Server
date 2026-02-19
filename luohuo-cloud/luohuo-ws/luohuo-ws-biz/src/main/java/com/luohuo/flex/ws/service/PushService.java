@@ -199,3 +199,38 @@ public class PushService {
 		});
 	}
 }
+
+	/**
+	 * 发送 AI 节点审批通过通知
+	 */
+	public void sendAiNodeApprovedNotification(Long ownerId, Long aiUserId, String aiUserName) {
+		WsBaseResp<Object> msg = new WsBaseResp<>();
+		msg.setType("aiNodeApproved");
+		msg.setData(java.util.Map.of(
+			"aiUserId", aiUserId,
+			"aiUserName", aiUserName != null ? aiUserName : "AI Assistant",
+			"timestamp", System.currentTimeMillis()
+		));
+		msg.setTimestamp(System.currentTimeMillis());
+		
+		sendPushMsg(msg, ownerId, ownerId);
+		log.info("[AI-REG] Sent approval notification: ownerId={}, aiUserId={}", ownerId, aiUserId);
+	}
+
+	/**
+	 * 发送新 AI 节点申请通知给 Owner
+	 */
+	public void sendAiNodePendingNotification(Long ownerId, String nodeId, String nodeName) {
+		WsBaseResp<Object> msg = new WsBaseResp<>();
+		msg.setType("aiNodePending");
+		msg.setData(java.util.Map.of(
+			"nodeId", nodeId,
+			"nodeName", nodeName != null ? nodeName : nodeId,
+			"timestamp", System.currentTimeMillis()
+		));
+		msg.setTimestamp(System.currentTimeMillis());
+		
+		sendPushMsg(msg, ownerId, ownerId);
+		log.info("[AI-REG] Sent pending notification: ownerId={}, nodeId={}", ownerId, nodeId);
+	}
+}

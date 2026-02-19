@@ -1,6 +1,7 @@
 package com.luohuo.flex.ws.websocket.ai;
 
 import cn.hutool.core.util.StrUtil;
+import com.luohuo.flex.ws.websocket.ai.AiNodeRegistrationService.RegistrationResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -31,6 +32,7 @@ public class AiNodeWebSocketHandler implements WebSocketHandler {
 	private final AiNodeSessionManager aiNodeSessionManager;
 	private final AiNodeRegistryService aiNodeRegistryService;
 	private final AiNodeMessageService aiNodeMessageService;
+	private final AiNodeRegistrationService registrationService;
 
 	@org.springframework.beans.factory.annotation.Value("${luohuo.node-id:ws-node}")
 	private String serverInstanceId;
@@ -45,6 +47,44 @@ public class AiNodeWebSocketHandler implements WebSocketHandler {
 		} catch (Exception ex) {
 			log.warn("[AI-LINK] event=ai_node_handshake_error, sessionId={}, error={}", session.getId(), ex.getMessage());
 			return session.close(BAD_PROTOCOL);
+		}
+
+		// 检查是否需要注册审批
+		// 如果 aiUserId 为空，说明是首次连接，需要检查是否已审批
+		if (metadata.getAiUserId() == null) {
+			// 检查是否已有映射
+			Long existingAiUserId = registrationService.getAiUserId(metadata.getNodeId());
+			if (existingAiUserId != null) {
+				// 已有审批通过的映射，更新 metadata
+				metadata = AiNodeSessionMetadata.builder()
+						.nodeId(metadata.getNodeId())
+						.ownerId(metadata.getOwnerId())
+						.mode(metadata.getMode())
+						.aiUserId(existingAiUserId)
+						.serverInstanceId(metadata.getServerInstanceId())
+						.connectionId(metadata.getConnectionId())
+						.connectedAt(metadata.getConnectedAt())
+						.lastSeen(metadata.getLastSeen())
+						.clientVersion(metadata.getClientVersion())
+						.capabilities(metadata.getCapabilities())
+						.build();
+			} else {
+				// 无 aiUserId 且无映射，说明需要审批
+				// 先注册为待审批状态
+				RegistrationResult regResult = registrationService.register(
+						metadata.getNodeId(),
+						metadata.getOwnerId(),
+						metadata.getNodeId(), // nodeName
+						metadata.getMode());
+				
+				if (regResult.isPending()) {
+					// 通知节点等待审批
+					String waitMsg = "{\"type\":\"ai_approval_result\",\"nodeId\":\"" + metadata.getNodeId() + 
+							"\",\"result\":\"pending\",\"message\":\"Waiting for owner approval\",\"timestamp\":" + System.currentTimeMillis() + "}";
+					return session.send(Mono.just(session.textMessage(waitMsg)))
+							.then(session.close());
+				}
+			}
 		}
 
 		aiNodeSessionManager.register(session, metadata);

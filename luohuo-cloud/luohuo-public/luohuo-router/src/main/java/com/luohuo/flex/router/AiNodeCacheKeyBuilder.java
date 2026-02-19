@@ -82,6 +82,20 @@ public class AiNodeCacheKeyBuilder {
 		return new AiReplyDedup().key(requestId);
 	}
 
+	/**
+	 * AI 节点待审批注册（ownerId + nodeId）
+	 */
+	public static CacheKey buildAiNodePending(Long ownerId, String nodeId) {
+		return new AiNodePending().key(ownerId, nodeId);
+	}
+
+	/**
+	 * AI 节点待审批注册 pattern（ownerId 开头的所有 key）
+	 */
+	public static String buildAiNodePendingPattern(Long ownerId) {
+		return "luohuo:router:ai-node-pending:" + ownerId + ":*";
+	}
+
 	// ==================== 限流相关 Keys ====================
 
 	/**
@@ -467,6 +481,36 @@ public class AiNodeCacheKeyBuilder {
 		@Override
 		public Duration getExpire() {
 			return Duration.ofDays(1);
+		}
+	}
+
+	/**
+	 * AI 节点待审批注册
+	 */
+	public static class AiNodePending implements CacheKeyBuilder {
+		@Override
+		public String getPrefix() {
+			return "luohuo";
+		}
+
+		@Override
+		public String getModular() {
+			return "router";
+		}
+
+		@Override
+		public String getTable() {
+			return "ai-node-pending";
+		}
+
+		@Override
+		public ValueType getValueType() {
+			return ValueType.obj;
+		}
+
+		@Override
+		public Duration getExpire() {
+			return Duration.ofMinutes(10);
 		}
 	}
 }
