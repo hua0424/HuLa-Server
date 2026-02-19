@@ -22,6 +22,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.CollectionUtils;
 import com.luohuo.basic.validator.utils.AssertUtil;
 import com.luohuo.flex.model.redis.annotation.RedissonLock;
@@ -184,12 +186,35 @@ public class FriendServiceImpl implements FriendService, InitializingBean {
 		RoomFriend roomFriend = roomService.createFriendRoom(Arrays.asList(uid, DefValConstants.DEF_BOT_ID));
 		// 创建双方好友关系
 		createFriend(roomFriend.getRoomId(), uid, DefValConstants.DEF_BOT_ID);
-		// 发送一条同意消息。。我们已经是好友了，开始聊天吧
-		chatService.sendMsg(MessageAdapter.buildAgreeMsg(roomFriend.getRoomId(), true), uid);
-		// 系统账号在群内发送一条欢迎消息
-		SummeryInfoDTO user = userSummaryCache.get(uid);
-		Long total = cachePlusOps.inc("luohuo:user:total_count", 0, TimeUnit.DAYS); // 查询系统总注册人员
-		chatService.sendMsg(MessageAdapter.buildAgreeMsg4Group(DefValConstants.DEF_ROOM_ID, total, user.getName()), DefValConstants.DEF_BOT_ID);
+
+		// 注册链路降级：欢迎消息放到主事务提交后再发，避免 AI 离线导致注册事务回滚
+		if (TransactionSynchronizationManager.isSynchronizationActive()) {
+			TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+				@Override
+				public void afterCommit() {
+					safeSendSystemWelcome(uid, roomFriend.getRoomId());
+				}
+			});
+		} else {
+			safeSendSystemWelcome(uid, roomFriend.getRoomId());
+		}
+	}
+
+	private void safeSendSystemWelcome(Long uid, Long roomId) {
+		try {
+			chatService.sendMsg(MessageAdapter.buildAgreeMsg(roomId, true), uid);
+		} catch (Exception e) {
+			log.warn("发送系统好友欢迎消息失败，忽略。uid={}, roomId={}, err={}", uid, roomId, e.getMessage());
+		}
+
+		try {
+			SummeryInfoDTO user = userSummaryCache.get(uid);
+			Long total = cachePlusOps.inc("luohuo:user:total_count", 0, TimeUnit.DAYS); // 查询系统总注册人员
+			String userName = user != null ? user.getName() : String.valueOf(uid);
+			chatService.sendMsg(MessageAdapter.buildAgreeMsg4Group(DefValConstants.DEF_ROOM_ID, total, userName), DefValConstants.DEF_BOT_ID);
+		} catch (Exception e) {
+			log.warn("发送系统群欢迎消息失败，忽略。uid={}, err={}", uid, e.getMessage());
+		}
 	}
 
     /**

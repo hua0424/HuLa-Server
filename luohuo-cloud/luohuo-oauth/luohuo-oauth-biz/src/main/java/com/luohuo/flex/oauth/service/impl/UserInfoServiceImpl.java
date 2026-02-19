@@ -1,6 +1,8 @@
 package com.luohuo.flex.oauth.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.StrUtil;
+import com.luohuo.basic.base.R;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.base.vo.save.user.BaseEmployeeOrgRelSaveVO;
 import com.luohuo.flex.base.vo.save.user.BaseEmployeeRoleRelSaveVO;
@@ -121,8 +123,14 @@ public class UserInfoServiceImpl implements UserInfoService {
 				userRegisterVo.setAvatar(defUser.getAvatar());
 				userRegisterVo.setTenantId(defUser.getTenantId());
 				userRegisterVo.setUserType(UserTypeEnum.NORMAL.getValue());
-				if(!imUserApi.register(userRegisterVo).getData()){
-					throw new BizException("该邮箱已被其他账号绑定");
+
+				R<Boolean> registerResult = imUserApi.register(userRegisterVo);
+				if (registerResult == null || !Boolean.TRUE.equals(registerResult.getData())) {
+					String errMsg = registerResult != null ? registerResult.getMsg() : null;
+					if (StrUtil.isBlank(errMsg)) {
+						errMsg = "IM 用户注册失败，请稍后重试";
+					}
+					throw new BizException(errMsg);
 				}
 				yield defUser.getEmail();
 			}
