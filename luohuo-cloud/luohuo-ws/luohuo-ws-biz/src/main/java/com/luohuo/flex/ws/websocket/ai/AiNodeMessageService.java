@@ -7,6 +7,8 @@ import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.model.entity.dto.AiNodeFinalReplyDTO;
 import com.luohuo.flex.router.AiNodeCacheKeyBuilder;
+import com.luohuo.flex.ws.service.PushService;
+import com.luohuo.flex.model.entity.WsBaseResp;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
@@ -26,6 +28,7 @@ public class AiNodeMessageService {
 	private final AiNodeSessionManager aiNodeSessionManager;
 	private final RocketMQTemplate rocketMQTemplate;
 	private final CachePlusOps cachePlusOps;
+	private final PushService pushService;
 
 	public void handleMessage(AiNodeSessionMetadata metadata, String payload) {
 		JSONObject json;
@@ -44,10 +47,32 @@ public class AiNodeMessageService {
 			case "ai_reply_chunk" -> {
 				aiNodeRegistryService.touch(metadata);
 				String requestId = json.getStr("requestId");
+				String streamId = json.getStr("streamId", requestId);
+				int seq = json.getInt("seq", 0);
 				boolean isFinal = Boolean.TRUE.equals(json.getBool("isFinal"));
 				String content = json.getStr("content", "");
 				log.debug("[AI-LINK] event=ai_reply_chunk, nodeId={}, requestId={}, seq={}, isFinal={}",
-						metadata.getNodeId(), requestId, json.getInt("seq"), isFinal);
+						metadata.getNodeId(), requestId, seq, isFinal);
+				
+				// 实时推送chunk给客户端
+				var requestDTO = aiNodeRequestTrackerService.getRequest(requestId);
+				if (requestDTO != null) {
+					WsBaseResp<Object> chunkResp = new WsBaseResp<>();
+					chunkResp.setType("aiStreamChunk");
+					chunkResp.setData(java.util.Map.of(
+						"requestId", requestId,
+						"streamId", streamId,
+						"seq", seq,
+						"content", content != null ? content : "",
+						"isFinal", isFinal,
+						"timestamp", System.currentTimeMillis(),
+						"roomId", requestDTO.getRoomId() != null ? requestDTO.getRoomId() : "",
+						"aiUserId", requestDTO.getAiUserId() != null ? requestDTO.getAiUserId().toString() : ""
+					));
+					pushService.sendPushMsg(chunkResp, requestDTO.getFromUserId(), requestDTO.getFromUserId());
+					log.debug("[AI-LINK] event=ai_stream_pushed, requestId={}, seq={}, isFinal={}", requestId, seq, isFinal);
+				}
+				
 				AiNodeFinalReplyDTO reply = aiNodeRequestTrackerService.appendChunk(requestId, content, isFinal, metadata.getNodeId());
 				if (reply != null) {
 					Boolean exists = cachePlusOps.exists(AiNodeCacheKeyBuilder.buildAiReplyDedup(requestId));

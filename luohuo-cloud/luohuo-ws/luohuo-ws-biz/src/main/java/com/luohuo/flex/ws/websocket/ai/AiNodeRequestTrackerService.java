@@ -26,6 +26,10 @@ public class AiNodeRequestTrackerService {
 		chunkBufferMap.put(requestDTO.getRequestId(), new StringBuilder());
 	}
 
+	public AiNodeRequestDTO getRequest(String requestId) {
+		return requestMap.get(requestId);
+	}
+
 	public AiNodeFinalReplyDTO appendChunk(String requestId, String content, boolean isFinal, String nodeId) {
 		AiNodeRequestDTO req = requestMap.get(requestId);
 		if (req == null) {

@@ -1,0 +1,4 @@
+[luohuo-ws-server:19778:] 2026-02-18 05:12:26.216[ INFO] 19262 [] [main:18784] [c.l.b.m.r.c.EarthRedisMQConsumerAutoConfiguration.lambda$redisMessageListenerContainer$0:57] [redisMessageListenerContainer][注册 Channel(ws-node-down) 对应的监听器(com.luohuo.flex.ws.websocket.nacos.listener.NodeDownMessageListener)]
+[luohuo-ws-server:19778:] 2026-02-18 05:12:26.988[ WARN] 19262 [] [main:19556] [com.luohuo.basic.cache.RedisAutoConfigure.cacheOps:118] 检查到缓存采用了 Redis模式
+[luohuo-ws-server:19778:] 2026-02-18 06:30:48.557[ INFO] 690 [] [main:23036] [c.l.b.m.r.c.EarthRedisMQConsumerAutoConfiguration.lambda$redisMessageListenerContainer$0:57] [redisMessageListenerContainer][注册 Channel(ws-node-down) 对应的监听器(com.luohuo.flex.ws.websocket.nacos.listener.NodeDownMessageListener)]
+[luohuo-ws-server:19778:] 2026-02-18 06:30:49.452[ WARN] 690 [] [main:23931] [com.luohuo.basic.cache.RedisAutoConfigure.cacheOps:118] 检查到缓存采用了 Redis模式
