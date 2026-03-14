@@ -141,6 +141,10 @@ public class TokenContextFilter implements WebFilter, Ordered {
         if (StrUtil.isBlank(token)) {
             token = request.getQueryParams().getFirst(tokenName);
         }
+        // URL query fallback（小写 "token"，供浏览器 WS 等场景使用）
+        if (StrUtil.isBlank(token)) {
+            token = request.getQueryParams().getFirst("token");
+        }
 
         SaSession tokenSession = StpUtil.getTokenSessionByToken(token);
         log.info("{}", tokenSession);
