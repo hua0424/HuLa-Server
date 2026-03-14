@@ -1,5 +1,5 @@
 server:
-  port: 18760
+  # port: 18760  # 各服务通过 JVM -Dserver.port 单独指定
   # 优雅停机
   shutdown: GRACEFUL
   servlet:
@@ -23,6 +23,11 @@ luohuo:
     retry:
       max-count: 3      # 最大重试次数
       delay-seconds: 3  # 多久时候开始重试
+    # WS线程池字段(ThreadPoolProperties)
+    core-size: 4
+    max-size: 16
+    queue-capacity: 1024
+    keep-alive: 60
   # 微信扫码配置
   wx:
     mp:
@@ -221,6 +226,18 @@ spring:
       max-file-size: 512MB
       max-request-size: 512MB
 
+  # 邮件（IM服务依赖JavaMailSender，开发测试环境占位）
+  mail:
+    host: smtp.163.com
+    port: 465
+    username: dev@placeholder.com
+    password: placeholder
+    properties:
+      mail:
+        smtp:
+          ssl:
+            enable: true
+          auth: true
 management:
   endpoints:
     web:
@@ -289,3 +306,19 @@ p6spy:
   config:
     # comma separated list of strings to exclude
     exclude: secure_invoke_record
+
+# 第三方社交登录 OAuth（开发测试环境占位值）
+gitee:
+  client-id: placeholder
+  client-secret: placeholder
+  redirect-uri: http://localhost:18761/oauth/gitee/callback
+
+github:
+  client-id: placeholder
+  client-secret: placeholder
+  redirect-uri: http://localhost:18761/oauth/github/callback
+
+gitcode:
+  client-id: placeholder
+  client-secret: placeholder
+  redirect-uri: http://localhost:18761/oauth/gitcode/callback

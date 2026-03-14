@@ -1,0 +1,50 @@
+server:
+  servlet:
+    # 网关虚拟 context-path，由 ContextPathFilter 剥离 /api 前缀后再匹配路由
+    context-path: /api
+
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: oauth
+          uri: lb://luohuo-oauth-server
+          predicates:
+            - Path=/oauth/**
+          filters:
+            - StripPrefix=1
+
+        - id: im
+          uri: lb://luohuo-im-server
+          predicates:
+            - Path=/im/**
+          filters:
+            - StripPrefix=1
+
+        - id: ws
+          uri: lb://luohuo-ws-server
+          predicates:
+            - Path=/ws/**
+          filters:
+            - StripPrefix=1
+
+        - id: base
+          uri: lb://luohuo-base-server
+          predicates:
+            - Path=/base/**
+          filters:
+            - StripPrefix=1
+
+        - id: system
+          uri: lb://luohuo-system-server
+          predicates:
+            - Path=/system/**
+          filters:
+            - StripPrefix=1
+
+        - id: ai
+          uri: lb://luohuo-ai-server
+          predicates:
+            - Path=/ai/**
+          filters:
+            - StripPrefix=1

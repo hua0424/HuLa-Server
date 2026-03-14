@@ -21,6 +21,7 @@ import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.cors.reactive.CorsUtils;
 import org.springframework.web.server.WebFilter;
 import reactor.core.publisher.Mono;
@@ -37,6 +38,9 @@ import java.util.List;
 public class CorsConfiguration {
     private static final String ALL = "*";
     private static final String MAX_AGE = "18000L";
+
+    @Value("#{'${luohuo.cors.allowed-origins:http://localhost:5310}'.split(',')}")
+    private List<String> allowedOrigins;
 
     @Bean
     public RouteDefinitionLocator discoveryClientRouteDefinitionLocator(ReactiveDiscoveryClient discoveryClient,
@@ -57,14 +61,15 @@ public class CorsConfiguration {
                 return chain.filter(ctx);
             }
             HttpHeaders requestHeaders = request.getHeaders();
-            ServerHttpResponse response = ctx.getResponse();
-            HttpMethod requestMethod = requestHeaders.getAccessControlRequestMethod();
-            HttpHeaders headers = response.getHeaders();
-            headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, requestHeaders.getOrigin());
-            headers.addAll(HttpHeaders.ACCESS_CONTROL_ALLOW_HEADERS, requestHeaders.getAccessControlRequestHeaders());
-            if (requestMethod != null) {
-                headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS, requestMethod.name());
+            String origin = requestHeaders.getOrigin();
+            if (!allowedOrigins.contains(origin)) {
+                return Mono.empty();
             }
+            ServerHttpResponse response = ctx.getResponse();
+            HttpHeaders headers = response.getHeaders();
+            headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+            headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, PUT, DELETE, OPTIONS");
+            headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_HEADERS, "Content-Type, Authorization, Token");
             headers.add(HttpHeaders.ACCESS_CONTROL_ALLOW_CREDENTIALS, "true");
             headers.add(HttpHeaders.ACCESS_CONTROL_EXPOSE_HEADERS, ALL);
             headers.add(HttpHeaders.ACCESS_CONTROL_MAX_AGE, MAX_AGE);
