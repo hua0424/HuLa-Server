@@ -1,0 +1,91 @@
+package com.luohuo.flex.im.controller.user;
+
+import com.luohuo.basic.base.R;
+import com.luohuo.basic.context.ContextUtil;
+import com.luohuo.flex.im.core.user.service.AiclawService;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.annotation.Resource;
+import jakarta.validation.Valid;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+/**
+ * AI助理管理
+ */
+@RestController
+@RequestMapping("/aiclaw")
+@Tag(name = "AI助理管理")
+public class AiclawController {
+
+	@Resource
+	private AiclawService aiclawService;
+
+	@PostMapping("/create")
+	@Operation(summary = "创建AI助理，返回加密激活 token")
+	public R<AiclawCreateResp> create(@Valid @RequestBody AiclawCreateReq req) {
+		return R.success(aiclawService.create(req, ContextUtil.getUid()));
+	}
+
+	@PostMapping("/anyTenant/activate")
+	@Operation(summary = "激活AI助理（plugins 调用，无需登录态）")
+	public R<AiclawActivateResp> activate(@Valid @RequestBody AiclawActivateReq req) {
+		return R.success(aiclawService.activate(req));
+	}
+
+	@GetMapping("/list")
+	@Operation(summary = "获取AI助理列表")
+	public R<List<AiclawListResp>> list() {
+		return R.success(aiclawService.list(ContextUtil.getUid()));
+	}
+
+	@GetMapping("/{uid}/activation-token")
+	@Operation(summary = "获取激活 token（未激活时可查看）")
+	public R<AiclawTokenResp> getActivationToken(@PathVariable Long uid) {
+		return R.success(aiclawService.getActivationToken(uid, ContextUtil.getUid()));
+	}
+
+	@PostMapping("/{uid}/refresh-activation")
+	@Operation(summary = "重新生成激活 token（连接 token 也会更新）")
+	public R<AiclawTokenResp> refreshActivation(@PathVariable Long uid) {
+		return R.success(aiclawService.refreshActivation(uid, ContextUtil.getUid()));
+	}
+
+	@PutMapping("/{uid}/profile")
+	@Operation(summary = "修改AI助理资料")
+	public R<Void> updateProfile(@PathVariable Long uid, @Valid @RequestBody AiclawUpdateReq req) {
+		req.setUid(uid);
+		aiclawService.updateProfile(req, ContextUtil.getUid());
+		return R.success();
+	}
+
+	@PostMapping("/{uid}/deactivate")
+	@Operation(summary = "停用AI助理（触发24h注销）")
+	public R<Void> deactivate(@PathVariable Long uid) {
+		aiclawService.deactivate(uid, ContextUtil.getUid());
+		return R.success();
+	}
+
+	@PostMapping("/{uid}/restore")
+	@Operation(summary = "恢复AI助理（24h内）")
+	public R<Void> restore(@PathVariable Long uid) {
+		aiclawService.restore(uid, ContextUtil.getUid());
+		return R.success();
+	}
+
+	@PostMapping("/{uid}/auth-confirm")
+	@Operation(summary = "机器码变更授权确认")
+	public R<Void> authConfirm(@PathVariable Long uid, @Valid @RequestBody AiclawAuthConfirmReq req) {
+		aiclawService.authConfirm(uid, req, ContextUtil.getUid());
+		return R.success();
+	}
+}

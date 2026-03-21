@@ -6,6 +6,9 @@ import cn.dev33.satoken.session.SaSession;
 import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.URLUtil;
+import cn.hutool.crypto.SecureUtil;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import com.luohuo.basic.exception.code.ResponseEnum;
 import com.luohuo.flex.common.utils.IPUtils;
 import lombok.RequiredArgsConstructor;
@@ -13,6 +16,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -46,6 +50,9 @@ import static com.luohuo.basic.context.ContextConstants.*;
 public class TokenContextFilter implements WebFilter, Ordered {
     private final IgnoreProperties ignoreProperties;
     protected final SaTokenConfig saTokenConfig;
+    private final StringRedisTemplate stringRedisTemplate;
+
+    private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
 
     @Value("${spring.profiles.active:dev}")
     protected String profiles;
@@ -146,6 +153,12 @@ public class TokenContextFilter implements WebFilter, Ordered {
             token = request.getQueryParams().getFirst("token");
         }
 
+        // --- aiclaw token 分支：先查 Redis 前缀，命中则走 aiclaw 校验，否则 fallback SaToken ---
+        if (isAiclawToken(token) && hasAiclawCache(token)) {
+            return handleAiclawToken(token, request, mutate, exchange, chain);
+        }
+
+        // --- 原有 SaToken 逻辑 ---
         SaSession tokenSession = StpUtil.getTokenSessionByToken(token);
         log.info("{}", tokenSession);
 
@@ -185,6 +198,74 @@ public class TokenContextFilter implements WebFilter, Ordered {
         String valueStr = value.toString();
         String valueEncode = URLUtil.encode(valueStr);
         mutate.header(name, valueEncode);
+    }
+
+    /**
+     * 判断 token 是否符合 UUID 格式（快速预检，避免对非 UUID 格式的 SaToken 查 Redis）
+     */
+    private boolean isAiclawToken(String token) {
+        return token != null && token.length() == 36 && token.charAt(8) == '-'
+                && token.charAt(13) == '-' && token.charAt(18) == '-' && token.charAt(23) == '-';
+    }
+
+    /**
+     * 检查 Redis 中是否存在该 token 前缀的 aiclaw 缓存（确认走 aiclaw 分支，避免误判 SaToken）
+     */
+    private boolean hasAiclawCache(String token) {
+        String prefix = token.substring(0, 8);
+        return Boolean.TRUE.equals(stringRedisTemplate.hasKey(AICLAW_TOKEN_CACHE_PREFIX + prefix));
+    }
+
+    /**
+     * 处理 aiclaw token 校验（Redis 缓存 + SHA-256 快速验证）
+     */
+    private Mono<Void> handleAiclawToken(String token, ServerHttpRequest request,
+                                          ServerHttpRequest.Builder mutate,
+                                          ServerWebExchange exchange, WebFilterChain chain) {
+        String prefix = token.substring(0, 8);
+        String cacheKey = AICLAW_TOKEN_CACHE_PREFIX + prefix;
+        String cachedJson = stringRedisTemplate.opsForValue().get(cacheKey);
+
+        if (cachedJson == null) {
+            throw new UnauthorizedException(ResponseEnum.JWT_TOKEN_EXCEED.getCode(), "aiclaw token无效");
+        }
+
+        JSONObject info = JSONUtil.parseObj(cachedJson);
+        String tokenSha256 = info.getStr("tokenSha256");
+
+        // SHA-256 快速校验
+        if (tokenSha256 == null || !tokenSha256.equals(SecureUtil.sha256(token))) {
+            throw new UnauthorizedException(ResponseEnum.JWT_TOKEN_EXCEED.getCode(), "aiclaw token无效");
+        }
+
+        Integer authStatus = info.getInt("authStatus");
+        if (authStatus != null && authStatus == 2) {
+            throw new UnauthorizedException(ResponseEnum.JWT_TOKEN_EXCEED.getCode(), "AI助理已停用");
+        }
+        if (authStatus != null && authStatus == 0) {
+            throw new UnauthorizedException(ResponseEnum.JWT_TOKEN_EXCEED.getCode(), "AI助理未激活，请先执行 aichat activate");
+        }
+
+        Long uid = info.getLong("uid");
+        Long tenantId = info.getLong("tenantId", 1L);
+
+        mutate.header(U_ID_HEADER, String.valueOf(uid));
+        mutate.header(USER_ID_HEADER, String.valueOf(uid));
+        mutate.header(HEADER_TENANT_ID, String.valueOf(tenantId));
+
+        // 检查机器码是否变更
+        String storedMachineCode = info.getStr("machineCode");
+        String clientId = request.getQueryParams().getFirst("clientId");
+        if (StrUtil.isNotBlank(storedMachineCode) && StrUtil.isNotBlank(clientId)
+                && !storedMachineCode.equals(clientId)) {
+            mutate.header("X-Aiclaw-Machine-Changed", "true");
+            mutate.header("X-Aiclaw-Owner-Uid", String.valueOf(info.getLong("ownerUid")));
+        }
+
+        // 认证成功，刷新 TTL
+        stringRedisTemplate.expire(cacheKey, java.time.Duration.ofDays(7));
+
+        return null; // 继续 filter chain
     }
 
     protected Mono<Void> errorResponse(ServerHttpResponse response, String errMsg, int errCode) {

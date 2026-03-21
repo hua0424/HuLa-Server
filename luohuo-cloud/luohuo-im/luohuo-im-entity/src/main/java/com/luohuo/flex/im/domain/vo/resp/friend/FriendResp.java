@@ -41,4 +41,7 @@ public class FriendResp implements Serializable {
 
 	@Schema(description ="好友头像")
 	private String avatar;
+
+	@Schema(description ="用户类型 1系统 2机器人 3普通 4AI助理")
+	private Integer userType;
 }

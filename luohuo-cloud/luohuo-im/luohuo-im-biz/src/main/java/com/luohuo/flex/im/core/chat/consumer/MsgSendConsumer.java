@@ -60,6 +60,13 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 
     @Override
     public void onMessage(MsgSendMessageDTO dto) {
+        // 恢复租户上下文（@SecureInvoke 异步线程丢失 ThreadLocal，从 DTO 中恢复）
+        if (dto.getTenantId() != null) {
+            com.luohuo.basic.context.ContextUtil.setTenantId(dto.getTenantId());
+        }
+        if (dto.getUid() != null) {
+            com.luohuo.basic.context.ContextUtil.setUid(dto.getUid());
+        }
         Message message = messageDao.getById(dto.getMsgId());
         if (Objects.isNull(message)) {
             return;
