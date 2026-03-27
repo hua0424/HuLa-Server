@@ -5,6 +5,7 @@ import com.luohuo.flex.im.core.user.mapper.AiclawMapper;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
@@ -30,5 +31,15 @@ public class AiclawDao extends ServiceImpl<AiclawMapper, Aiclaw> {
 				.eq(Aiclaw::getOwnerUid, ownerUid)
 				.eq(Aiclaw::getUid, uid)
 				.one();
+	}
+
+	/**
+	 * 查询已停用超过 24h 的 aiclaw 记录
+	 */
+	public List<Aiclaw> listExpiredDeactivated(LocalDateTime cutoff) {
+		return lambdaQuery()
+				.eq(Aiclaw::getAuthStatus, 2)
+				.lt(Aiclaw::getDeactivatedAt, cutoff)
+				.list();
 	}
 }

@@ -36,6 +36,9 @@ public class AiclawListResp implements Serializable {
 	@Schema(description = "claw 类型")
 	private String adapterType;
 
+	@Schema(description = "对外人设（系统 prompt），可为空")
+	private String publicPersona;
+
 	@Schema(description = "创建时间")
 	private LocalDateTime createTime;
 }

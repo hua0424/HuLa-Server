@@ -27,4 +27,7 @@ public class UserSearchResp {
 
     @Schema(description = "用户账号")
     private String account;
+
+    @Schema(description = "用户类型 1系统 2机器人 3普通 4AI助理")
+    private Integer userType;
 }

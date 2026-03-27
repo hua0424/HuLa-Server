@@ -6,22 +6,39 @@ import cn.hutool.crypto.digest.BCrypt;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.luohuo.basic.exception.BizException;
+import com.luohuo.flex.im.core.chat.dao.MessageDao;
+import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
+import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
+import com.luohuo.flex.common.OnlineService;
 import com.luohuo.flex.im.core.user.dao.AiclawDao;
+import com.luohuo.flex.im.core.user.dao.AiclawFriendExtDao;
 import com.luohuo.flex.im.core.user.dao.UserDao;
+import com.luohuo.flex.im.core.user.dao.UserFriendDao;
 import com.luohuo.flex.im.core.user.service.AiclawService;
 import com.luohuo.flex.im.core.user.service.FriendService;
+import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
+import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.entity.User;
+import com.luohuo.flex.im.domain.entity.UserFriend;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
+import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
+import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
+import com.luohuo.flex.im.domain.vo.request.ChatMessagePageReq;
+import com.luohuo.flex.im.domain.entity.AiclawFriendExt;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
+import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import com.luohuo.flex.im.enums.UserTypeEnum;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,8 +61,15 @@ public class AiclawServiceImpl implements AiclawService {
 
 	private final AiclawDao aiclawDao;
 	private final UserDao userDao;
+	private final UserFriendDao userFriendDao;
 	private final FriendService friendService;
 	private final RoomService roomService;
+	private final ChatService chatService;
+	private final RoomFriendDao roomFriendDao;
+	private final MessageDao messageDao;
+	private final OnlineService onlineService;
+	private final AiclawFriendExtDao aiclawFriendExtDao;
+	private final UserSummaryCache userSummaryCache;
 	private final AiclawCryptoService cryptoService;
 	private final StringRedisTemplate stringRedisTemplate;
 
@@ -250,6 +274,7 @@ public class AiclawServiceImpl implements AiclawService {
 					.description(u != null ? u.getResume() : null)
 					.authStatus(a.getAuthStatus())
 					.adapterType(a.getAdapterType())
+					.publicPersona(a.getPublicPersona())
 					.createTime(a.getCreateTime())
 					.build();
 		}).collect(Collectors.toList());
@@ -271,6 +296,168 @@ public class AiclawServiceImpl implements AiclawService {
 			update.setResume(req.getDescription());
 		}
 		userDao.updateById(update);
+	}
+
+	@Override
+	public void setPersona(Long aiclawUid, String publicPersona, Long ownerUid) {
+		Aiclaw aiclaw = getOwnedAiclaw(aiclawUid, ownerUid);
+		Aiclaw update = new Aiclaw();
+		update.setId(aiclaw.getId());
+		update.setPublicPersona(publicPersona.isEmpty() ? null : publicPersona);
+		aiclawDao.updateById(update);
+		log.info("aiclaw persona updated: uid={}", aiclawUid);
+	}
+
+	// ==================== 对话记录 ====================
+
+	@Override
+	public List<AiclawConversationResp> getConversations(Long aiclawUid, Long ownerUid) {
+		getOwnedAiclaw(aiclawUid, ownerUid);
+
+		// 查 aiclaw 作为 uid 一方的所有好友记录（不含 owner）
+		List<UserFriend> friends = userFriendDao.list(
+				new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<UserFriend>()
+						.eq(UserFriend::getUid, aiclawUid)
+						.ne(UserFriend::getFriendUid, ownerUid));
+
+		if (friends.isEmpty()) {
+			return Collections.emptyList();
+		}
+
+		// 查每个好友与 aiclaw 的聊天房间 + 最后一条消息
+		List<AiclawConversationResp> result = new ArrayList<>();
+		for (UserFriend friend : friends) {
+			Long friendUid = friend.getFriendUid();
+			Long roomId = friend.getRoomId();
+			if (roomId == null) continue;
+
+			// 查最后一条消息（取该房间最新1条）
+			CursorPageBaseResp<Message> page = messageDao.getCursorPage(roomId,
+					new CursorPageBaseReq() {{ setPageSize(1); }}, null);
+			if (page.isEmpty()) continue;
+
+			Message lastMsg = page.getList().get(0);
+			SummeryInfoDTO friendInfo = userSummaryCache.get(friendUid);
+
+			result.add(AiclawConversationResp.builder()
+					.friendUid(friendUid)
+					.friendName(friendInfo != null ? friendInfo.getName() : null)
+					.friendAvatar(friendInfo != null ? friendInfo.getAvatar() : null)
+					.roomId(roomId)
+					.lastMessage(AiclawConversationResp.LastMessage.builder()
+							.content(lastMsg.getContent())
+							.sendTime(lastMsg.getCreateTime() != null
+									? lastMsg.getCreateTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+									: null)
+							.type(lastMsg.getType())
+							.build())
+					.build());
+		}
+
+		// 按最后消息时间倒序
+		result.sort((a, b) -> Long.compare(
+				b.getLastMessage().getSendTime() != null ? b.getLastMessage().getSendTime() : 0,
+				a.getLastMessage().getSendTime() != null ? a.getLastMessage().getSendTime() : 0));
+		return result;
+	}
+
+	@Override
+	public CursorPageBaseResp<ChatMessageResp> getConversationMessages(Long aiclawUid, Long friendUid,
+																		CursorPageBaseReq pageReq, Long ownerUid) {
+		getOwnedAiclaw(aiclawUid, ownerUid);
+
+		// 查聊天房间
+		Long minUid = Math.min(aiclawUid, friendUid);
+		Long maxUid = Math.max(aiclawUid, friendUid);
+		RoomFriend rf = roomFriendDao.getByKey(minUid + "," + maxUid);
+		if (rf == null) {
+			throw new BizException("该用户不是AI助理的好友");
+		}
+
+		// 复用现有消息分页查询（skip=true 跳过权限检查，传 ownerUid 避免 getLastMsgId 的空检查）
+		ChatMessagePageReq msgReq = ChatMessagePageReq.builder()
+				.roomId(rf.getRoomId())
+				.skip(true)
+				.build();
+		msgReq.setPageSize(pageReq.getPageSize());
+		msgReq.setCursor(pageReq.getCursor());
+		return chatService.getMsgPage(msgReq, ownerUid);
+	}
+
+	// ==================== 好友管理 ====================
+
+	@Override
+	public List<AiclawFriendResp> getFriends(Long aiclawUid, Long ownerUid) {
+		getOwnedAiclaw(aiclawUid, ownerUid);
+
+		// 查 aiclaw 作为 uid 的所有好友记录（不含 owner）
+		List<UserFriend> friends = userFriendDao.list(
+				new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<UserFriend>()
+						.eq(UserFriend::getUid, aiclawUid)
+						.ne(UserFriend::getFriendUid, ownerUid));
+
+		if (friends.isEmpty()) {
+			return Collections.emptyList();
+		}
+
+		// 批量获取好友信息和在线状态
+		List<Long> friendUids = friends.stream().map(UserFriend::getFriendUid).collect(Collectors.toList());
+		Set<Long> onlineSet = onlineService.getOnlineUsersList(friendUids);
+
+		// 批量获取 relation_desc
+		List<AiclawFriendExt> extList = aiclawFriendExtDao.listByAiclaw(aiclawUid);
+		Map<Long, String> relDescMap = extList.stream()
+				.collect(Collectors.toMap(AiclawFriendExt::getFriendUid, e -> e.getRelationDesc() != null ? e.getRelationDesc() : "", (a, b) -> a));
+
+		return friendUids.stream().map(friendUid -> {
+			SummeryInfoDTO info = userSummaryCache.get(friendUid);
+			return AiclawFriendResp.builder()
+					.uid(friendUid)
+					.name(info != null ? info.getName() : null)
+					.avatar(info != null ? info.getAvatar() : null)
+					.account(info != null ? info.getAccount() : null)
+					.activeStatus(onlineSet.contains(friendUid) ? 1 : 2)
+					.userType(info != null ? info.getUserType() : null)
+					.relationDesc(relDescMap.containsKey(friendUid) && !relDescMap.get(friendUid).isEmpty()
+							? relDescMap.get(friendUid) : null)
+					.build();
+		}).collect(Collectors.toList());
+	}
+
+	@Override
+	@Transactional(rollbackFor = Exception.class)
+	public void removeFriend(Long aiclawUid, Long friendUid, Long ownerUid) {
+		getOwnedAiclaw(aiclawUid, ownerUid);
+
+		// 校验好友关系存在
+		UserFriend uf = userFriendDao.getByFriend(aiclawUid, friendUid);
+		if (uf == null) {
+			throw new BizException("该用户不是AI助理的好友");
+		}
+
+		// 复用现有好友删除逻辑（处理好友记录删除、房间禁用、缓存清理、WS 通知）
+		friendService.deleteFriend(aiclawUid, friendUid);
+
+		// 额外清理 im_aiclaw_friend_ext
+		AiclawFriendExt ext = aiclawFriendExtDao.getByAiclawAndFriend(aiclawUid, friendUid);
+		if (ext != null) {
+			aiclawFriendExtDao.removeById(ext.getId());
+		}
+
+		log.info("aiclaw friend removed: aiclawUid={}, friendUid={}", aiclawUid, friendUid);
+	}
+
+	@Override
+	public void setRelation(Long aiclawUid, Long friendUid, String relationDesc, Long ownerUid) {
+		getOwnedAiclaw(aiclawUid, ownerUid);
+
+		AiclawFriendExt ext = aiclawFriendExtDao.getByAiclawAndFriend(aiclawUid, friendUid);
+		if (ext == null) {
+			throw new BizException("该用户不是AI助理的好友");
+		}
+		ext.setRelationDesc(relationDesc.isEmpty() ? null : relationDesc);
+		aiclawFriendExtDao.updateById(ext);
+		log.info("aiclaw relation updated: aiclawUid={}, friendUid={}", aiclawUid, friendUid);
 	}
 
 	// ==================== Token 重置 ====================
@@ -328,6 +515,51 @@ public class AiclawServiceImpl implements AiclawService {
 			log.info("aiclaw auth confirmed: uid={}", aiclawUid);
 		} else {
 			log.info("aiclaw auth rejected: uid={}", aiclawUid);
+		}
+	}
+
+	// ==================== 延迟注销 ====================
+
+	@Override
+	@Transactional(rollbackFor = Exception.class)
+	public void purgeExpiredDeactivated() {
+		List<Aiclaw> expired = aiclawDao.listExpiredDeactivated(LocalDateTime.now().minusHours(24));
+		for (Aiclaw aiclaw : expired) {
+			Long aiclawUid = aiclaw.getUid();
+			log.info("purging expired aiclaw: uid={}", aiclawUid);
+
+			// 1. 删除所有好友关系（含 owner）
+			List<UserFriend> friends = userFriendDao.list(
+					new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<UserFriend>()
+							.eq(UserFriend::getUid, aiclawUid)
+							.or().eq(UserFriend::getFriendUid, aiclawUid));
+			for (UserFriend f : friends) {
+				Long otherUid = f.getUid().equals(aiclawUid) ? f.getFriendUid() : f.getUid();
+				friendService.deleteFriend(aiclawUid, otherUid);
+			}
+
+			// 2. 删除 im_aiclaw_friend_ext 所有相关记录
+			List<AiclawFriendExt> extList = aiclawFriendExtDao.listByAiclaw(aiclawUid);
+			if (!extList.isEmpty()) {
+				aiclawFriendExtDao.removeByIds(extList.stream().map(AiclawFriendExt::getId).collect(Collectors.toList()));
+			}
+
+			// 3. 软删除 im_aiclaw
+			aiclawDao.removeById(aiclaw.getId());
+
+			// 4. 软删除 im_user
+			userDao.removeById(aiclawUid);
+
+			// 5. 清理 Redis Token 缓存
+			deleteTokenCache(aiclaw.getTokenPrefix());
+
+			// 6. 清理用户缓存
+			userSummaryCache.delete(aiclawUid);
+
+			log.info("aiclaw purged: uid={}", aiclawUid);
+		}
+		if (!expired.isEmpty()) {
+			log.info("purged {} expired aiclaw(s)", expired.size());
 		}
 	}
 

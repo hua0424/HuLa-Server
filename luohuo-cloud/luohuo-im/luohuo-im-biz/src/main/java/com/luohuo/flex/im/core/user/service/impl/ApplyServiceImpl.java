@@ -18,6 +18,10 @@ import com.luohuo.flex.im.core.chat.dao.RoomGroupDao;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomAppService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
+import com.luohuo.flex.im.core.user.dao.AiclawFriendExtDao;
+import com.luohuo.flex.im.domain.entity.Aiclaw;
+import com.luohuo.flex.im.domain.entity.AiclawFriendExt;
 import com.luohuo.flex.im.core.chat.service.adapter.MemberAdapter;
 import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -47,6 +51,7 @@ import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.im.domain.vo.req.friend.FriendApplyReq;
 import com.luohuo.flex.im.domain.vo.request.RoomApplyReq;
 import com.luohuo.flex.im.domain.vo.request.member.ApplyReq;
+import com.luohuo.flex.im.enums.UserTypeEnum;
 import com.luohuo.flex.model.redis.annotation.RedissonLock;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -84,6 +89,8 @@ public class ApplyServiceImpl implements ApplyService {
 	private CachePlusOps cachePlusOps;
 	private RoomAppService roomAppService;
 	private TransactionTemplate transactionTemplate;
+	private AiclawDao aiclawDao;
+	private AiclawFriendExtDao aiclawFriendExtDao;
 
     /**
      * 申请好友
@@ -112,13 +119,24 @@ public class ApplyServiceImpl implements ApplyService {
         UserApply newApply = FriendAdapter.buildFriendApply(uid, request);
         userApplyDao.save(newApply);
 
+		// 如果 target 是 aiclaw，ADD_ME 通知发给 owner
+		Long targetUid = request.getTargetUid();
+		Long notifyUid = targetUid;
+		SummeryInfoDTO targetInfo = userSummaryCache.get(targetUid);
+		if (targetInfo != null && Objects.equals(targetInfo.getUserType(), UserTypeEnum.AICLAW.getValue())) {
+			Aiclaw aiclaw = aiclawDao.getByUid(targetUid);
+			if (aiclaw != null) {
+				notifyUid = aiclaw.getOwnerUid();
+			}
+		}
+
 		noticeService.createNotice(
 			RoomTypeEnum.FRIEND,
 			NoticeTypeEnum.ADD_ME,
 			uid,
-			request.getTargetUid(),
+			notifyUid,
 			newApply.getId(),
-			request.getTargetUid(),
+			targetUid,
 			request.getMsg()
 		);
 
@@ -128,7 +146,7 @@ public class ApplyServiceImpl implements ApplyService {
 			uid,
 			uid,
 			newApply.getId(),
-			request.getTargetUid(),
+			targetUid,
 			request.getMsg()
 		);
 
@@ -233,12 +251,31 @@ public class ApplyServiceImpl implements ApplyService {
 				invite.setStatus(request.getState());
 				if(invite.getType().equals(RoomTypeEnum.FRIEND.getType())){
 					AssertUtil.equal(invite.getStatus(), ACCEPTED.getStatus(), "已同意好友申请");
+
+					// 判断 target 是否为 aiclaw：好友关系建在 申请人↔aiclaw 之间
+					Long targetId = invite.getTargetId();
+					SummeryInfoDTO targetInfo = userSummaryCache.get(targetId);
+					boolean isAiclawApply = targetInfo != null
+							&& Objects.equals(targetInfo.getUserType(), UserTypeEnum.AICLAW.getValue());
+
+					// aiclaw 场景：校验审批人是 owner
+					if (isAiclawApply) {
+						Aiclaw aiclaw = aiclawDao.getByUid(targetId);
+						if (aiclaw == null || !Objects.equals(aiclaw.getOwnerUid(), uid)) {
+							throw new BizException("无权审批该AI助理的好友申请");
+						}
+					}
+
+					// 确定好友双方：aiclaw 场景为 申请人↔aiclaw，普通场景为 审批人↔申请人
+					Long friendSideA = isAiclawApply ? targetId : uid;
+					Long friendSideB = invite.getUid();
+
 					// 同意申请
 					AtomicReference<Long> atomicRoomId = new AtomicReference(0L);
 					AtomicReference<Boolean> atomicIsFromTempSession = new AtomicReference(false);
 					transactionTemplate.execute(e -> {
 						userApplyDao.agree(request.getApplyId());
-						UserFriend userFriend = userFriendDao.getByFriend(uid, invite.getUid());
+						UserFriend userFriend = userFriendDao.getByFriend(friendSideA, friendSideB);
 						atomicIsFromTempSession.set(userFriend != null && userFriend.getIsTemp());
 						// 如果是从临时会话升级，则修改会话状态；否则创建新会话
 						if (atomicIsFromTempSession.get()) {
@@ -246,11 +283,21 @@ public class ApplyServiceImpl implements ApplyService {
 							userFriendDao.updateById(userFriend);
 						} else {
 							// 创建一个聊天房间
-							RoomFriend roomFriend = roomService.createFriendRoom(Arrays.asList(uid, invite.getUid()));
+							RoomFriend roomFriend = roomService.createFriendRoom(Arrays.asList(friendSideA, friendSideB));
 
 							// 创建双方好友关系
-							friendService.createFriend(roomFriend.getRoomId(), uid, invite.getUid());
+							friendService.createFriend(roomFriend.getRoomId(), friendSideA, friendSideB);
 							atomicRoomId.set(roomFriend.getRoomId());
+
+							// aiclaw 场景：初始化 im_aiclaw_friend_ext（relation_desc 留空）
+							if (isAiclawApply) {
+								AiclawFriendExt ext = AiclawFriendExt.builder()
+										.aiclawUid(friendSideA)
+										.friendUid(friendSideB)
+										.tenantId(1L)
+										.build();
+								aiclawFriendExtDao.save(ext);
+							}
 						}
 						// 更新邀请状态
 						userApplyDao.updateById(invite);
@@ -260,14 +307,14 @@ public class ApplyServiceImpl implements ApplyService {
 					// 如果是从临时会话升级，则修改会话状态；否则创建新会话
 					if (!atomicIsFromTempSession.get()) {
 						// 添加双方好友主动关系、被动关系
-						cachePlusOps.sAdd(FriendCacheKeyBuilder.userFriendsKey(uid), invite.getUid());
-						cachePlusOps.sAdd(FriendCacheKeyBuilder.reverseFriendsKey(invite.getUid()), uid);
-						cachePlusOps.sAdd(FriendCacheKeyBuilder.userFriendsKey(invite.getUid()), uid);
-						cachePlusOps.sAdd(FriendCacheKeyBuilder.reverseFriendsKey(uid), invite.getUid());
+						cachePlusOps.sAdd(FriendCacheKeyBuilder.userFriendsKey(friendSideA), friendSideB);
+						cachePlusOps.sAdd(FriendCacheKeyBuilder.reverseFriendsKey(friendSideB), friendSideA);
+						cachePlusOps.sAdd(FriendCacheKeyBuilder.userFriendsKey(friendSideB), friendSideA);
+						cachePlusOps.sAdd(FriendCacheKeyBuilder.reverseFriendsKey(friendSideA), friendSideB);
 						friendService.warmUpRoomMemberCache(Arrays.asList(atomicRoomId.get()));
 
 						// 发送一条同意消息。。我们已经是好友了，开始聊天吧
-						chatService.sendMsg(MessageAdapter.buildAgreeMsg(atomicRoomId.get(), true), uid);
+						chatService.sendMsg(MessageAdapter.buildAgreeMsg(atomicRoomId.get(), true), friendSideA);
 					}
 
 					// 通过好友申请

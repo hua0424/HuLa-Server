@@ -73,6 +73,12 @@ public class Aiclaw extends Entity<Long> {
 	private String adapterConfig;
 
 	/**
+	 * 对外人设（系统 prompt），可为空
+	 */
+	@TableField("public_persona")
+	private String publicPersona;
+
+	/**
 	 * 停用时间（用于延迟注销）
 	 */
 	@TableField("deactivated_at")

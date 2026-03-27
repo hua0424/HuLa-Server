@@ -45,6 +45,8 @@ public class ChatMessageResp implements Serializable {
         private Object body;
 		@Schema(description = "扩展标记统计（type为MessageMarkTypeEnum的type字段）")
 		private Map<Integer, MarkItem> messageMarks;
+		@Schema(description = "aiclaw 扩展信息，仅推送给 aiclaw 用户时附加")
+		private AiclawExt aiclaw;
     }
 
 	@Data
@@ -54,5 +56,20 @@ public class ChatMessageResp implements Serializable {
 		private Integer count;
 		@Schema(description = "当前用户是否标记")
 		private Boolean userMarked;
+	}
+
+	@Data
+	@Builder
+	@AllArgsConstructor
+	@NoArgsConstructor
+	public static class AiclawExt implements Serializable {
+		@Schema(description = "发送者昵称")
+		private String senderName;
+		@Schema(description = "是否为 aiclaw 的 owner")
+		private Boolean isOwner;
+		@Schema(description = "对外人设（系统 prompt）")
+		private String publicPersona;
+		@Schema(description = "关系说明")
+		private String relationDesc;
 	}
 }

@@ -33,12 +33,14 @@ import com.luohuo.basic.validator.utils.AssertUtil;
 import com.luohuo.flex.common.cache.common.CaptchaCacheKeyBuilder;
 import com.luohuo.flex.im.common.event.UserBlackEvent;
 import com.luohuo.flex.im.common.utils.sensitiveword.SensitiveWordBs;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
 import com.luohuo.flex.im.core.user.dao.BlackDao;
 import com.luohuo.flex.im.core.user.dao.ItemConfigDao;
 import com.luohuo.flex.im.core.user.dao.UserBackpackDao;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.im.domain.dto.ItemInfoDTO;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
+import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.Black;
 import com.luohuo.flex.im.domain.entity.ItemConfig;
 import com.luohuo.flex.im.domain.entity.User;
@@ -46,6 +48,7 @@ import com.luohuo.flex.im.domain.entity.UserBackpack;
 import com.luohuo.flex.im.domain.enums.BlackTypeEnum;
 import com.luohuo.flex.im.domain.enums.ItemEnum;
 import com.luohuo.flex.im.domain.enums.ItemTypeEnum;
+import com.luohuo.flex.im.enums.UserTypeEnum;
 import com.luohuo.flex.model.vo.query.BindEmailReq;
 import com.luohuo.flex.im.domain.vo.resp.user.BadgeResp;
 import com.luohuo.flex.im.domain.vo.resp.user.UserInfoResp;
@@ -82,6 +85,7 @@ public class UserServiceImpl implements UserService {
     private final UserSummaryCache userSummaryCache;
     private final SensitiveWordBs sensitiveWordBs;
     private final FeedService feedService;
+    private final AiclawDao aiclawDao;
 
 	@Override
 	public Boolean refreshIpInfo(Long uid, IpInfo ipInfo) {
@@ -121,7 +125,16 @@ public class UserServiceImpl implements UserService {
     public UserInfoResp getUserInfo(Long uid) {
         SummeryInfoDTO userInfo = userSummaryCache.get(uid);
         Integer countByValidItemId = userBackpackDao.getCountByValidItemId(uid, ItemEnum.MODIFY_NAME_CARD.getId());
-		return UserAdapter.buildUserInfoResp(userInfo, countByValidItemId);
+		UserInfoResp resp = UserAdapter.buildUserInfoResp(userInfo, countByValidItemId);
+		// aiclaw 用户附加 ownerInfo
+		if (Objects.equals(userInfo.getUserType(), UserTypeEnum.AICLAW.getValue())) {
+			Aiclaw aiclaw = aiclawDao.getByUid(uid);
+			if (aiclaw != null) {
+				SummeryInfoDTO ownerInfo = userSummaryCache.get(aiclaw.getOwnerUid());
+				UserAdapter.fillOwnerInfo(resp, ownerInfo);
+			}
+		}
+		return resp;
     }
 
 	@Override
@@ -575,6 +588,7 @@ public class UserServiceImpl implements UserService {
                         .name(user.getName())
                         .avatar(user.getAvatar())
                         .account(user.getAccount())
+                        .userType(user.getUserType())
                         .build())
                 .collect(Collectors.toList());
 

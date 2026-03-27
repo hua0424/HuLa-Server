@@ -6,11 +6,18 @@ import com.luohuo.flex.im.core.user.service.AiclawService;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawPersonaReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawRelationReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
+import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
+import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
+import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
@@ -65,6 +72,47 @@ public class AiclawController {
 	public R<Void> updateProfile(@PathVariable Long uid, @Valid @RequestBody AiclawUpdateReq req) {
 		req.setUid(uid);
 		aiclawService.updateProfile(req, ContextUtil.getUid());
+		return R.success();
+	}
+
+	@GetMapping("/{uid}/conversations")
+	@Operation(summary = "获取AI助理的对话列表")
+	public R<List<AiclawConversationResp>> getConversations(@PathVariable Long uid) {
+		return R.success(aiclawService.getConversations(uid, ContextUtil.getUid()));
+	}
+
+	@GetMapping("/{uid}/conversations/{friendUid}/messages")
+	@Operation(summary = "获取AI助理与某用户的聊天记录")
+	public R<CursorPageBaseResp<ChatMessageResp>> getConversationMessages(
+			@PathVariable Long uid, @PathVariable Long friendUid, @Valid CursorPageBaseReq pageReq) {
+		return R.success(aiclawService.getConversationMessages(uid, friendUid, pageReq, ContextUtil.getUid()));
+	}
+
+	@PutMapping("/{uid}/persona")
+	@Operation(summary = "设置AI助理对外人设")
+	public R<Void> setPersona(@PathVariable Long uid, @Valid @RequestBody AiclawPersonaReq req) {
+		aiclawService.setPersona(uid, req.getPublicPersona(), ContextUtil.getUid());
+		return R.success();
+	}
+
+	@GetMapping("/{uid}/friends")
+	@Operation(summary = "获取AI助理好友列表")
+	public R<List<AiclawFriendResp>> getFriends(@PathVariable Long uid) {
+		return R.success(aiclawService.getFriends(uid, ContextUtil.getUid()));
+	}
+
+	@DeleteMapping("/{uid}/friends/{friendUid}")
+	@Operation(summary = "移除AI助理好友")
+	public R<Void> removeFriend(@PathVariable Long uid, @PathVariable Long friendUid) {
+		aiclawService.removeFriend(uid, friendUid, ContextUtil.getUid());
+		return R.success();
+	}
+
+	@PutMapping("/{uid}/friends/{friendUid}/relation")
+	@Operation(summary = "设置AI助理好友关系说明")
+	public R<Void> setRelation(@PathVariable Long uid, @PathVariable Long friendUid,
+							   @Valid @RequestBody AiclawRelationReq req) {
+		aiclawService.setRelation(uid, friendUid, req.getRelationDesc(), ContextUtil.getUid());
 		return R.success();
 	}
 
