@@ -36,4 +36,7 @@ public class ChatMessageReq {
 
 	@Schema(description ="系统推送消息")
 	private boolean isPushMessage = false;
+
+	@Schema(description ="仅存库不推送（流式消息 stream_end 落库时使用，避免与流式推送重复）")
+	private boolean skipPush = false;
 }

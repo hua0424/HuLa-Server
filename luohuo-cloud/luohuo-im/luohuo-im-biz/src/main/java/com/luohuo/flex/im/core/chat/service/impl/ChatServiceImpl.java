@@ -85,8 +85,10 @@ public class ChatServiceImpl implements ChatService {
 			}
 		}
 
-        // 发布消息发送事件
-        SpringUtils.publishEvent(new MessageSendEvent(this, new ChatMsgSendDto(msgId, uid)));
+        // 发布消息发送事件（skipPush=true 时仅存库不推送，用于流式消息 stream_end 落库）
+        if (!request.isSkipPush()) {
+            SpringUtils.publishEvent(new MessageSendEvent(this, new ChatMsgSendDto(msgId, uid)));
+        }
         return msgId;
     }
 

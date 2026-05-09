@@ -1,7 +1,10 @@
 package com.luohuo.flex.im.domain.vo.resp.user;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import lombok.AllArgsConstructor;
+import lombok.Builder;
 import lombok.Data;
+import lombok.NoArgsConstructor;
 
 import java.io.Serializable;
 import java.time.LocalDateTime;
@@ -63,4 +66,23 @@ public class UserInfoResp implements Serializable {
 
     @Schema(description = "是否绑定GitCode")
     private Boolean linkedGitcode;
+
+    @Schema(description = "用户类型 1系统 2机器人 3普通 4AI助理")
+    private Integer userType;
+
+    @Schema(description = "AI助理的 owner 信息，仅 userType=4 时返回")
+    private OwnerInfo ownerInfo;
+
+    @Data
+    @Builder
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class OwnerInfo implements Serializable {
+        @Schema(description = "owner 用户ID")
+        private Long uid;
+        @Schema(description = "owner 昵称")
+        private String name;
+        @Schema(description = "owner 头像")
+        private String avatar;
+    }
 }

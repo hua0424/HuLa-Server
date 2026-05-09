@@ -62,7 +62,12 @@ public enum WSRespTypeEnum {
 	ScreenSharingStopped("ScreenSharingStopped", "关闭屏幕共享", null),
 	NetworkPoor("NetworkPoor", "网络状况不佳", null),
 	UserKicked("UserKicked", "踢出用户", null),
-	AllMuted("AllMuted", "全局静音", null)
+	AllMuted("AllMuted", "全局静音", null),
+
+	STREAM_START("streamStart", "流式消息开始", WSStreamStart.class),
+	STREAM_DELTA("streamDelta", "流式消息片段", WSStreamDelta.class),
+	STREAM_END("streamEnd", "流式消息结束", WSStreamEnd.class),
+	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class)
     ;
 
     private final String type;

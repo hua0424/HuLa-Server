@@ -252,6 +252,7 @@ public class FriendServiceImpl implements FriendService, InitializingBean {
 				resp.setName(friendUser.getName());
 				resp.setAccount(friendUser.getAccount());
 				resp.setAvatar(friendUser.getAvatar());
+				resp.setUserType(friendUser.getUserType());
 			}
 
 			return resp;

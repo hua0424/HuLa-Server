@@ -7,6 +7,13 @@ import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.dao.RoomDao;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
+import com.luohuo.flex.im.core.user.dao.AiclawFriendExtDao;
+import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
+import com.luohuo.flex.im.domain.entity.Aiclaw;
+import com.luohuo.flex.im.domain.entity.AiclawFriendExt;
+import com.luohuo.flex.im.enums.UserTypeEnum;
 import com.luohuo.flex.im.domain.MsgSendMessageDTO;
 import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.entity.Room;
@@ -57,9 +64,19 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 	private OnlineService onlineService;
     private PushService pushService;
 	private CachePlusOps cachePlusOps;
+	private AiclawDao aiclawDao;
+	private AiclawFriendExtDao aiclawFriendExtDao;
+	private UserSummaryCache userSummaryCache;
 
     @Override
     public void onMessage(MsgSendMessageDTO dto) {
+        // 恢复租户上下文（@SecureInvoke 异步线程丢失 ThreadLocal，从 DTO 中恢复）
+        if (dto.getTenantId() != null) {
+            com.luohuo.basic.context.ContextUtil.setTenantId(dto.getTenantId());
+        }
+        if (dto.getUid() != null) {
+            com.luohuo.basic.context.ContextUtil.setUid(dto.getUid());
+        }
         Message message = messageDao.getById(dto.getMsgId());
         if (Objects.isNull(message)) {
             return;
@@ -119,7 +136,35 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 			}
 			default -> {
 				// 常规消息处理
-				WsBaseResp<ChatMessageResp> wsBaseResp = WsAdapter.buildMsgSend(chatService.getMsgResp(message, null));
+				ChatMessageResp chatMessageResp = chatService.getMsgResp(message, null);
+				WsBaseResp<ChatMessageResp> wsBaseResp = WsAdapter.buildMsgSend(chatMessageResp);
+
+				// 单聊场景：检测是否有 aiclaw 目标，为其附加扩展字段
+				if (Objects.equals(room.getType(), RoomTypeEnum.FRIEND.getType())) {
+					RoomFriend rf = roomFriendDao.getByRoomId(room.getId());
+					Long aiclawUid = findAiclawUid(rf.getUid1(), rf.getUid2());
+					if (aiclawUid != null) {
+						Long senderUid = message.getFromUid();
+						// 为 aiclaw 构建带扩展字段的 payload
+						ChatMessageResp aiclawResp = chatService.getMsgResp(message, null);
+						fillAiclawExt(aiclawResp, aiclawUid, senderUid);
+						WsBaseResp<ChatMessageResp> aiclawWsResp = WsAdapter.buildMsgSend(aiclawResp);
+
+						// 分别推送：aiclaw 收带扩展的，其他人收原版
+						List<Long> normalUsers = new ArrayList<>(onlineUsersList);
+						normalUsers.remove(aiclawUid);
+						if (!normalUsers.isEmpty()) {
+							pushService.sendPushMsg(wsBaseResp, normalUsers, dto.getUid());
+						}
+						if (onlineUsersList.contains(aiclawUid)) {
+							pushService.sendPushMsg(aiclawWsResp, aiclawUid, dto.getUid());
+						}
+						asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
+						break;
+					}
+				}
+
+				// 非 aiclaw 场景：原有逻辑
 				pushService.sendPushMsg(wsBaseResp, new ArrayList<>(onlineUsersList), dto.getUid());
 				asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
 			}
@@ -133,6 +178,45 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 	 * @param memberUidList 推送的列表
 	 * @param cuid 操作人
 	 */
+	/**
+	 * 检查两个 uid 中是否有 aiclaw 用户，有则返回其 uid，否则返回 null
+	 */
+	private Long findAiclawUid(Long uid1, Long uid2) {
+		SummeryInfoDTO info1 = userSummaryCache.get(uid1);
+		if (info1 != null && Objects.equals(info1.getUserType(), UserTypeEnum.AICLAW.getValue())) {
+			return uid1;
+		}
+		SummeryInfoDTO info2 = userSummaryCache.get(uid2);
+		if (info2 != null && Objects.equals(info2.getUserType(), UserTypeEnum.AICLAW.getValue())) {
+			return uid2;
+		}
+		return null;
+	}
+
+	/**
+	 * 为推送给 aiclaw 的消息附加扩展字段
+	 */
+	private void fillAiclawExt(ChatMessageResp resp, Long aiclawUid, Long senderUid) {
+		Aiclaw aiclaw = aiclawDao.getByUid(aiclawUid);
+		if (aiclaw == null) return;
+
+		boolean isOwner = Objects.equals(senderUid, aiclaw.getOwnerUid());
+		SummeryInfoDTO senderInfo = userSummaryCache.get(senderUid);
+
+		ChatMessageResp.AiclawExt ext = ChatMessageResp.AiclawExt.builder()
+				.senderName(senderInfo != null ? senderInfo.getName() : null)
+				.isOwner(isOwner)
+				.build();
+
+		if (!isOwner) {
+			ext.setPublicPersona(aiclaw.getPublicPersona());
+			AiclawFriendExt friendExt = aiclawFriendExtDao.getByAiclawAndFriend(aiclawUid, senderUid);
+			ext.setRelationDesc(friendExt != null ? friendExt.getRelationDesc() : null);
+		}
+
+		resp.getMessage().setAiclaw(ext);
+	}
+
 	@Async
 	public void asyncSavePassageMsg(Long messageId, WsBaseResp<?> wsBaseResp, Set<Long> memberUidList, Long cuid) {
 		// 1. 发送重试消息

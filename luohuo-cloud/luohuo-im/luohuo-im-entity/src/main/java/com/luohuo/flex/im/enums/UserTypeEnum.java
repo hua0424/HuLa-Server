@@ -11,7 +11,8 @@ import java.util.Arrays;
 public enum UserTypeEnum  {
 	SYSTEM(1, "系统用户"),
 	BOT(2, "机器人"),
-	NORMAL(3, "普通用户");
+	NORMAL(3, "普通用户"),
+	AICLAW(4, "AI助理");
 
     public static final Integer[] ARRAYS = Arrays.stream(values()).map(UserTypeEnum::getValue).toArray(Integer[]::new);
 

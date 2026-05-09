@@ -40,11 +40,25 @@ public class UserAdapter {
         UserInfoResp userInfoResp = new UserInfoResp();
         BeanUtil.copyProperties(userInfo, userInfoResp);
         userInfoResp.setUid(userInfo.getUid());
+        userInfoResp.setUserType(userInfo.getUserType());
         userInfoResp.setModifyNameChance(countByValidItemId);
         userInfoResp.setLinkedGitee(cn.hutool.core.util.StrUtil.isNotBlank(userInfo.getGiteeId()));
         userInfoResp.setLinkedGithub(cn.hutool.core.util.StrUtil.isNotBlank(userInfo.getGithubId()));
         userInfoResp.setLinkedGitcode(cn.hutool.core.util.StrUtil.isNotBlank(userInfo.getGitcodeId()));
         return userInfoResp;
+    }
+
+    /**
+     * 为 aiclaw 用户填充 ownerInfo
+     */
+    public static void fillOwnerInfo(UserInfoResp resp, SummeryInfoDTO ownerInfo) {
+        if (ownerInfo != null) {
+            resp.setOwnerInfo(UserInfoResp.OwnerInfo.builder()
+                    .uid(ownerInfo.getUid())
+                    .name(ownerInfo.getName())
+                    .avatar(ownerInfo.getAvatar())
+                    .build());
+        }
     }
 
     public static List<BadgeResp> buildBadgeResp(List<ItemConfig> itemConfigs, List<UserBackpack> backpacks, User user) {

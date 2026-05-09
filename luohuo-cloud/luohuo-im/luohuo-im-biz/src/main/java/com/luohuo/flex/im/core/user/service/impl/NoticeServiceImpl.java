@@ -132,6 +132,14 @@ public class NoticeServiceImpl implements NoticeService {
 		SummeryInfoDTO receiver = userSummaryCache.get(notice.getReceiverId());
 		vo.setReceiverName(receiver.getName());
 		vo.setReceiverAvatar(receiver.getAvatar());
+
+		// receiverUserType 取实际被申请目标（operateId）的 userType
+		// aiclaw 场景：operateId=aiclaw uid（userType=4），receiverId=owner uid（已转发）
+		Long targetUid = notice.getOperateId() != null ? notice.getOperateId() : notice.getReceiverId();
+		SummeryInfoDTO targetUser = targetUid.equals(notice.getReceiverId())
+				? receiver
+				: userSummaryCache.get(targetUid);
+		vo.setReceiverUserType(targetUser != null ? targetUser.getUserType() : receiver.getUserType());
 		return vo;
 	}
 

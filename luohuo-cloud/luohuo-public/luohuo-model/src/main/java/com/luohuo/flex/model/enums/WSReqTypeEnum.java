@@ -32,6 +32,9 @@ public enum WSReqTypeEnum {
 	WEBRTC_SIGNAL(14,"信令消息"),
 	ACK(15, "消息确认接收ack"),
 	READ(16, "消息已读"),
+	STREAM_START(17, "流式消息开始"),
+	STREAM_DELTA(18, "流式消息片段"),
+	STREAM_END(19, "流式消息结束"),
     ;
 
     private final Integer type;
