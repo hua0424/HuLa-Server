@@ -12,3 +12,12 @@
 - 查看状态：`git submodule status`
 
 **切勿**直接在父仓库中对 `teamsdocs` 目录内的文件做 `git add` / `git commit` — 子模块目录在父仓库中只记录为一个提交指针，而不是文件内容。
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
