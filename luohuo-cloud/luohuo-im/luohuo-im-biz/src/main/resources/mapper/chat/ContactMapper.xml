@@ -2,6 +2,14 @@
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.luohuo.flex.im.core.chat.mapper.ContactMapper">
 
+    <!-- ISS-004: last_msg_id / active_time 同时加 IF 单调保护
+         - 与 ISS-003 的 refreshLastMsgId 同事务写入会让 last_msg_id 提前推进到新值,
+           Consumer 异步再 fire 时若直接 VALUES() 会出现:
+             a) 并发或乱序消费时旧 msgId 反向覆盖新 msgId
+             b) ISS-003 已写后 active_time 仍能 VALUES 覆盖,但若 Consumer 乱序到的是旧 sendTime,
+                会把 active_time 拉回旧值
+         - 各字段按自身单调维度独立保护(msgId / activeTime),保证幸福路径(=happy path)正常推进
+           的同时,出现乱序也只会"保留新值"而非"回退" -->
     <insert id="refreshOrCreateActiveTime">
         INSERT INTO im_contact (room_id, uid, last_msg_id, active_time, is_del) VALUES
         <foreach collection="memberUidList" item="uid" separator=",">
@@ -10,8 +18,8 @@
         ON DUPLICATE KEY UPDATE
         is_del = 0,
         hide = 0,
-        last_msg_id = VALUES(last_msg_id),
-        active_time = VALUES(active_time)
+        last_msg_id = IF(#{msgId} &gt; last_msg_id OR last_msg_id IS NULL, #{msgId}, last_msg_id),
+        active_time = IF(#{activeTime} &gt; active_time OR active_time IS NULL, #{activeTime}, active_time)
     </insert>
 
     <!--  执行这个sql是因为前端有消息没被收到，每次更新当前会话未收到的消息时只更新最小的id那个  -->
