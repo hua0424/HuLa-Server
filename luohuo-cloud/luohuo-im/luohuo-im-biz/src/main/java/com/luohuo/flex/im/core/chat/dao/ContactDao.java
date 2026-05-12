@@ -112,6 +112,28 @@ public class ContactDao extends ServiceImpl<ContactMapper, Contact> {
 		baseMapper.refreshOrCreate(roomId, uid);
 	}
 
+	/**
+	 * ISS-003: 同事务推进房间内指定成员的 contact.last_msg_id(只前进,不回退)。
+	 *
+	 * 与 {@link #refreshOrCreateActiveTime} 不同,本方法只负责游标推进:
+	 * - 内部走 INSERT ... ON DUPLICATE KEY UPDATE,Contact 行缺失时自动创建
+	 * - IF(#{msgId} > last_msg_id OR last_msg_id IS NULL) 保证幂等 + 单调递增,无需额外锁
+	 * - 不动 is_del / hide / active_time,由异步 refreshOrCreateActiveTime 维护
+	 *
+	 * 调用方需在 {@code @Transactional} 内同步调用,与 im_message 插入构成原子写。
+	 *
+	 * @param roomId        房间 id
+	 * @param msgId         新到的消息 id
+	 * @param memberUidList 需要推进游标的成员 uid 列表
+	 */
+	@TenantIgnore
+	public void refreshLastMsgId(Long roomId, Long msgId, List<Long> memberUidList) {
+		if (roomId == null || msgId == null || CollectionUtil.isEmpty(memberUidList)) {
+			return;
+		}
+		baseMapper.refreshLastMsgId(roomId, msgId, memberUidList);
+	}
+
 	public HashMap<String, Contact> getContactMapByUid(Long uid) {
 		// 1. 查出用户要展示的会话列表
 		List<Contact> contacts = getAllContactsByUid(uid);

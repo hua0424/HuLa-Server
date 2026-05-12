@@ -73,6 +73,9 @@ public class ChatServiceImpl implements ChatService {
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
 
+        // ISS-003: 同事务推进房间内所有成员的 contact.last_msg_id,避免写入路径与 /chat/msg/page 游标失同步
+        syncContactLastMsgId(request.getRoomId(), msgId);
+
 		// 临时会话单独处理一下消息计数器
 		if (request.isTemp()) {
 			Room room = roomCache.get(request.getRoomId());
@@ -85,11 +88,61 @@ public class ChatServiceImpl implements ChatService {
 			}
 		}
 
+        // TODO(ISS-00X): Room.last_msg_id 在 skipPush=true(stream_end)路径下不更新,最近会话列表会显示错误,另起 issue
         // 发布消息发送事件（skipPush=true 时仅存库不推送，用于流式消息 stream_end 落库）
         if (!request.isSkipPush()) {
             SpringUtils.publishEvent(new MessageSendEvent(this, new ChatMsgSendDto(msgId, uid)));
         }
         return msgId;
+    }
+
+    /**
+     * ISS-003: 同事务推进房间内所有成员的 {@code contact.last_msg_id}。
+     *
+     * <p>调用方:{@link #sendMsg},运行在 {@code @Transactional} 内,与 {@code im_message} 插入构成原子写。
+     * 这样 WS 推送后客户端调 {@code /chat/msg/page} 时游标已经推进,不会再因 {@code Message.id <= contact.last_msg_id}
+     * 漏返新消息。
+     *
+     * <p>设计要点:
+     * <ul>
+     *   <li>群聊使用 {@link GroupMemberCache#getMemberUidList(Long)},返回列表【包含 deFriend=true 的屏蔽成员】,
+     *       <b>是有意为之</b> — 屏蔽者取消屏蔽后应能看到屏蔽期间的消息,故也推进其 last_msg_id。
+     *       被 {@code removeByGroupId} 物理删除的踢出成员天然不在列表里。</li>
+     *   <li>单聊使用 {@link RoomFriend#getUid1()} / {@link RoomFriend#getUid2()} 双端。</li>
+     *   <li>数据异常(roomCache 缺 Room / roomFriendDao 缺 RoomFriend / GroupMemberCache 返回 null)时
+     *       <b>不能抛异常</b> — 抛了会回滚整个 {@code sendMsg},消息丢失。改为 {@code log.warn} + 防御性返回。</li>
+     *   <li>实际 INSERT...ON DUPLICATE KEY UPDATE 在 {@link ContactDao#refreshLastMsgId} 内,
+     *       同时覆盖「Contact 行缺失」「last_msg_id 为 NULL」「乱序 msgId」三种场景。</li>
+     * </ul>
+     */
+    private void syncContactLastMsgId(Long roomId, Long msgId) {
+        if (roomId == null || msgId == null) {
+            return;
+        }
+        Room room = roomCache.get(roomId);
+        if (room == null) {
+            log.warn("syncContactLastMsgId: room not found, roomId={}, msgId={}", roomId, msgId);
+            return;
+        }
+        List<Long> memberUidList;
+        if (room.isRoomGroup()) {
+            memberUidList = groupMemberCache.getMemberUidList(roomId);
+            if (CollectionUtil.isEmpty(memberUidList)) {
+                log.warn("syncContactLastMsgId: empty group member list, roomId={}, msgId={}", roomId, msgId);
+                return;
+            }
+        } else if (room.isRoomFriend()) {
+            RoomFriend roomFriend = roomFriendDao.getByRoomId(roomId);
+            if (roomFriend == null) {
+                log.warn("syncContactLastMsgId: room_friend not found, roomId={}, msgId={}", roomId, msgId);
+                return;
+            }
+            memberUidList = List.of(roomFriend.getUid1(), roomFriend.getUid2());
+        } else {
+            // 热点房间(HotRoom)等其他类型不参与 contact 维度的游标
+            return;
+        }
+        contactDao.refreshLastMsgId(roomId, msgId, memberUidList);
     }
 
     private void checkDeFriend(Boolean isSend, Boolean isTemp, Long roomId, Long uid) {

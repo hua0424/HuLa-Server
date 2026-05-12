@@ -31,4 +31,17 @@
         INSERT INTO im_contact (room_id, uid, is_del) VALUES (#{roomId},#{uid},0)
         ON DUPLICATE KEY UPDATE is_del = 0, hide = 0
     </insert>
+
+    <!-- ISS-003: 写入路径同事务推进 contact.last_msg_id,只前进,不回退
+         - INSERT 兼容「Contact 行缺失」(新加群成员未 create Contact 行)
+         - IF(#{msgId} > last_msg_id OR last_msg_id IS NULL) 兼容 NULL 与乱序两种场景
+         - 不动 is_del / hide / active_time,由异步 refreshOrCreateActiveTime 维护 -->
+    <insert id="refreshLastMsgId">
+        INSERT INTO im_contact (room_id, uid, last_msg_id, is_del) VALUES
+        <foreach collection="memberUidList" item="uid" separator=",">
+            (#{roomId},#{uid},#{msgId},0)
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        last_msg_id = IF(#{msgId} &gt; last_msg_id OR last_msg_id IS NULL, #{msgId}, last_msg_id)
+    </insert>
 </mapper>
