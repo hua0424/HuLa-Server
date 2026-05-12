@@ -62,6 +62,7 @@ public class ChatServiceImpl implements ChatService {
     private ContactService contactService;
     private ContactDao contactDao;
     private RoomCache roomCache;
+    private RoomDao roomDao;
     private GroupMemberDao groupMemberDao;
     /**
      * 发送消息
@@ -88,7 +89,10 @@ public class ChatServiceImpl implements ChatService {
 			}
 		}
 
-        // TODO(ISS-00X): Room.last_msg_id 在 skipPush=true(stream_end)路径下不更新,最近会话列表会显示错误,另起 issue
+        // ISS-005: 同事务推进 Room.last_msg_id / active_time,覆盖 skipPush=true(stream_end)路径。
+        // 走 RoomMapper.refreshActiveTime 的 IF 单调保护 SQL,与 MsgSendConsumer 异步路径竞态时不回退。
+        roomDao.refreshActiveTime(request.getRoomId(), msgId, LocalDateTime.now());
+
         // 发布消息发送事件（skipPush=true 时仅存库不推送，用于流式消息 stream_end 落库）
         if (!request.isSkipPush()) {
             SpringUtils.publishEvent(new MessageSendEvent(this, new ChatMsgSendDto(msgId, uid)));

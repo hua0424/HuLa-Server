@@ -33,4 +33,15 @@
         order by r.update_time desc,
                  g.id
     </select>
+
+    <!-- ISS-005: last_msg_id / active_time 同时加 IF 单调保护
+         - sendMsg 同事务 sync 写入 与 MsgSendConsumer 异步写入并发时,IF 防止旧 msgId / 旧 sendTime 覆盖新值
+         - skipPush=true(stream_end)路径不发 MessageSendEvent,由 sendMsg 兜底单独推进
+         - 与 ContactMapper.refreshOrCreateActiveTime(ISS-004)保持同构 -->
+    <update id="refreshActiveTime">
+        UPDATE im_room
+        SET last_msg_id = IF(#{msgId} &gt; last_msg_id OR last_msg_id IS NULL, #{msgId}, last_msg_id),
+            active_time = IF(#{msgTime} &gt; active_time OR active_time IS NULL, #{msgTime}, active_time)
+        WHERE id = #{roomId}
+    </update>
 </mapper>
