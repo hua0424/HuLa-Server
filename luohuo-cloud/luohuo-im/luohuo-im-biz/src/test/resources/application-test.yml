@@ -1,0 +1,8 @@
+spring:
+  datasource:
+    # url / username / password / driver-class-name 由 AbstractMapperIT 的 @DynamicPropertySource 注入
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
