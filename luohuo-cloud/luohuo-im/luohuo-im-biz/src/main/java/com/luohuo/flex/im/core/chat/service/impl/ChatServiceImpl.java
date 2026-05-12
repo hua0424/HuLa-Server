@@ -97,7 +97,7 @@ public class ChatServiceImpl implements ChatService {
     }
 
     /**
-     * ISS-003: 同事务推进房间内所有成员的 {@code contact.last_msg_id}。
+     * ISS-003 / ISS-006: 同事务推进房间内所有成员的 {@code contact.last_msg_id} 与 {@code contact.active_time}。
      *
      * <p>调用方:{@link #sendMsg},运行在 {@code @Transactional} 内,与 {@code im_message} 插入构成原子写。
      * 这样 WS 推送后客户端调 {@code /chat/msg/page} 时游标已经推进,不会再因 {@code Message.id <= contact.last_msg_id}
@@ -113,6 +113,8 @@ public class ChatServiceImpl implements ChatService {
      *       <b>不能抛异常</b> — 抛了会回滚整个 {@code sendMsg},消息丢失。改为 {@code log.warn} + 防御性返回。</li>
      *   <li>实际 INSERT...ON DUPLICATE KEY UPDATE 在 {@link ContactDao#refreshLastMsgId} 内,
      *       同时覆盖「Contact 行缺失」「last_msg_id 为 NULL」「乱序 msgId」三种场景。</li>
+     *   <li>ISS-006: 同步调用 {@link ContactDao#refreshOrCreateActiveTime} 让 sender 的最近会话列表也冒泡。
+     *       该方法 {@code @Async},实际异步执行;ISS-004 已为其加 IF 单调保护,与 AckConsumer 异步路径竞态时不回退。</li>
      * </ul>
      */
     private void syncContactLastMsgId(Long roomId, Long msgId) {
@@ -143,6 +145,9 @@ public class ChatServiceImpl implements ChatService {
             return;
         }
         contactDao.refreshLastMsgId(roomId, msgId, memberUidList);
+        // ISS-006: 推进所有成员(含 sender)的 active_time,让最近会话列表能冒泡。
+        // 受 ISS-004 的 IF 单调保护,与 AckConsumer 异步路径竞态时只保留新值,不回退。
+        contactDao.refreshOrCreateActiveTime(roomId, memberUidList, msgId, LocalDateTime.now());
     }
 
     private void checkDeFriend(Boolean isSend, Boolean isTemp, Long roomId, Long uid) {
