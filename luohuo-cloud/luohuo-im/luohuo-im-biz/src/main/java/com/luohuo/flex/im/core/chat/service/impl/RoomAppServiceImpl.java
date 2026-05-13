@@ -1309,17 +1309,19 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 					RoomBaseInfo roomBaseInfo = roomBaseInfoMap.get(roomId);
 					Contact contact = contactMap.get(StrUtil.format("{}_{}", uid, roomId));
 					if (ObjectUtil.isNotNull(contact)) {
+						resp.setId(contact.getId());
 						resp.setHide(contact.getHide());
 						resp.setShield(contact.getShield());
 						resp.setMuteNotification(contact.getMuteNotification());
 						resp.setTop(contact.getTop());
 					} else {
+						// ISS-009: contact 行不存在(热门房间合并/数据缺失场景),走只读默认值,
+						// 避免下方 resp.setId(contact.getId()) / contact.getShield() 触发 NPE
 						resp.setHide(true);
 						resp.setShield(true);
 						resp.setMuteNotification(2);
 						resp.setTop(false);
 					}
-					resp.setId(contact.getId());
 					resp.setDetailId(room.getId());
 					resp.setAvatar(roomBaseInfo.getAvatar());
 					resp.setRoomId(roomId);
@@ -1352,7 +1354,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 							}
 						}
 					}
-					resp.setUnreadCount(contact.getShield()?0: unReadCountMap.getOrDefault(roomId, 0));
+					resp.setUnreadCount(Boolean.TRUE.equals(resp.getShield()) ? 0 : unReadCountMap.getOrDefault(roomId, 0));
 					return resp;
 				}).sorted(Comparator.comparing(ChatRoomResp::getActiveTime).reversed())
 				.collect(Collectors.toList());
@@ -1383,12 +1385,18 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 		Map<Long, RoomFriend> roomFriendMap = roomFriendCache.getBatch(roomIds);
 		Set<Long> friendUidSet = ChatAdapter.getFriendUidSet(roomFriendMap.values(), uid);
 		Map<Long, User> userBatch = userCache.getBatch(new ArrayList<>(friendUidSet));
-		return roomFriendMap.values()
-				.stream()
-				.collect(Collectors.toMap(RoomFriend::getRoomId, roomFriend -> {
-					Long friendUid = ChatAdapter.getFriendUid(roomFriend, uid);
-					return userBatch.get(friendUid);
-				}));
+		// ISS-009: 好友账号被逻辑删除(im_user.is_del=1)时 userCache 不会返回该 user,
+		// 这里若仍走 Collectors.toMap 会因 valueMapper 返回 null 触发 JDK Objects.requireNonNull NPE。
+		// 改为手工 put,跳过已删好友,由 getRoomBaseInfoMap 走"账号已注销"占位分支兜底。
+		Map<Long, User> result = new HashMap<>(roomFriendMap.size());
+		roomFriendMap.values().forEach(roomFriend -> {
+			Long friendUid = ChatAdapter.getFriendUid(roomFriend, uid);
+			User user = userBatch.get(friendUid);
+			if (user != null) {
+				result.put(roomFriend.getRoomId(), user);
+			}
+		});
+		return result;
 	}
 
 	private Map<Long, RoomBaseInfo> getRoomBaseInfoMap(List<Long> roomIds, Long uid) {
@@ -1410,29 +1418,49 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			roomBaseInfo.setActiveTime(room.getActiveTime());
 			if (RoomTypeEnum.of(room.getType()) == RoomTypeEnum.GROUP) {
 				RoomGroup roomGroup = roomInfoBatch.get(room.getId());
-				roomBaseInfo.setId(roomGroup.getId());
-				roomBaseInfo.setAvatar(roomGroup.getAvatar());
-				roomBaseInfo.setAccount(roomGroup.getAccount());
-				GroupMember member = groupMemberCache.getMemberDetail(room.getId(), uid);
-				// todo 稳定了这里可以不用判空，理论上100% 在群里
-				if (ObjectUtil.isNotNull(member)) {
-					roomBaseInfo.setMyName(member.getMyName());
-					roomBaseInfo.setRemark(member.getRemark());
-					roomBaseInfo.setName(roomGroup.getName());
-					roomBaseInfo.setRoleId(member.getRoleId());
-				} else {
-					roomBaseInfo.setName("会话异常");
-					roomBaseInfo.setMyName("会话异常");
-					roomBaseInfo.setRemark("会话异常");
+				// ISS-009: roomGroupCache 缺失(数据不一致)时走"群组已解散"占位,避免下方无条件取值 NPE
+				if (ObjectUtil.isNull(roomGroup)) {
+					roomBaseInfo.setId(0L);
+					roomBaseInfo.setAvatar("");
+					roomBaseInfo.setAccount("");
+					roomBaseInfo.setName("群组已解散");
+					roomBaseInfo.setMyName("群组已解散");
+					roomBaseInfo.setRemark("群组已解散");
 					roomBaseInfo.setRoleId(0);
+				} else {
+					roomBaseInfo.setId(roomGroup.getId());
+					roomBaseInfo.setAvatar(roomGroup.getAvatar());
+					roomBaseInfo.setAccount(roomGroup.getAccount());
+					GroupMember member = groupMemberCache.getMemberDetail(room.getId(), uid);
+					// todo 稳定了这里可以不用判空，理论上100% 在群里
+					if (ObjectUtil.isNotNull(member)) {
+						roomBaseInfo.setMyName(member.getMyName());
+						roomBaseInfo.setRemark(member.getRemark());
+						roomBaseInfo.setName(roomGroup.getName());
+						roomBaseInfo.setRoleId(member.getRoleId());
+					} else {
+						roomBaseInfo.setName("会话异常");
+						roomBaseInfo.setMyName("会话异常");
+						roomBaseInfo.setRemark("会话异常");
+						roomBaseInfo.setRoleId(0);
+					}
 				}
 			} else if (RoomTypeEnum.of(room.getType()) == RoomTypeEnum.FRIEND) {
 				User user = friendRoomMap.get(room.getId());
-				roomBaseInfo.setId(user.getId());
-				roomBaseInfo.setRoleId(0);
-				roomBaseInfo.setName(user.getName());
-				roomBaseInfo.setAvatar(user.getAvatar());
-				roomBaseInfo.setAccount(user.getAccount());
+				// ISS-009: getFriendRoomMap 已跳过已注销好友,这里走占位分支避免后续无条件取值 NPE
+				if (ObjectUtil.isNotNull(user)) {
+					roomBaseInfo.setId(user.getId());
+					roomBaseInfo.setRoleId(0);
+					roomBaseInfo.setName(user.getName());
+					roomBaseInfo.setAvatar(user.getAvatar());
+					roomBaseInfo.setAccount(user.getAccount());
+				} else {
+					roomBaseInfo.setId(0L);
+					roomBaseInfo.setRoleId(0);
+					roomBaseInfo.setName("账号已注销");
+					roomBaseInfo.setAvatar("");
+					roomBaseInfo.setAccount("");
+				}
 			}
 			return roomBaseInfo;
 		}).collect(Collectors.toMap(RoomBaseInfo::getRoomId, Function.identity()));
