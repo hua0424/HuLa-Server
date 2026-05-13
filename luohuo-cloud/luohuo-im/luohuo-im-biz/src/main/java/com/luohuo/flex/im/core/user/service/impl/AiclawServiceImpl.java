@@ -39,6 +39,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
+import com.luohuo.flex.model.enums.ChatActiveStatusEnum;
 import com.luohuo.flex.im.enums.UserTypeEnum;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -264,6 +265,9 @@ public class AiclawServiceImpl implements AiclawService {
 		List<Long> uids = aiclaws.stream().map(Aiclaw::getUid).collect(Collectors.toList());
 		Map<Long, User> userMap = userDao.listByIds(uids).stream()
 				.collect(Collectors.toMap(User::getId, u -> u));
+		// ISS-010: authStatus 是"激活授权状态"(im_aiclaw.auth_status),不代表 plugin 当前是否在线。
+		// 这里同步取一次 presence ZSET,补 activeStatus 让前端 AI 列表用 single source of truth 渲染在/离线。
+		Set<Long> onlineSet = onlineService.getOnlineUsersList(uids);
 
 		return aiclaws.stream().map(a -> {
 			User u = userMap.get(a.getUid());
@@ -273,6 +277,9 @@ public class AiclawServiceImpl implements AiclawService {
 					.avatar(u != null ? u.getAvatar() : null)
 					.description(u != null ? u.getResume() : null)
 					.authStatus(a.getAuthStatus())
+					.activeStatus(onlineSet.contains(a.getUid())
+							? ChatActiveStatusEnum.ONLINE.getStatus()
+							: ChatActiveStatusEnum.OFFLINE.getStatus())
 					.adapterType(a.getAdapterType())
 					.publicPersona(a.getPublicPersona())
 					.createTime(a.getCreateTime())
