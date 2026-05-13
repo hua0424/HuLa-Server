@@ -13,6 +13,14 @@
     <artifactId>luohuo-im-entity</artifactId>
     <name>${project.artifactId}</name>
     <description>系统服务-实体模块</description>
+
+    <!-- ISS-013: 显式 hardening,见 luohuo-im/pom.xml -->
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.hibernate.validator</groupId>
