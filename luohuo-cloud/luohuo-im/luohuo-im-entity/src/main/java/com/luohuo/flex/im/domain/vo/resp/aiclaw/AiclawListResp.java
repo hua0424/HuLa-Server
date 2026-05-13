@@ -33,6 +33,9 @@ public class AiclawListResp implements Serializable {
 	@Schema(description = "授权状态 0=未激活 1=已激活 2=已停用")
 	private Integer authStatus;
 
+	@Schema(description = "在线状态(运行时,来自 presence ZSET) 1=在线 2=离线")
+	private Integer activeStatus;
+
 	@Schema(description = "claw 类型")
 	private String adapterType;
 
