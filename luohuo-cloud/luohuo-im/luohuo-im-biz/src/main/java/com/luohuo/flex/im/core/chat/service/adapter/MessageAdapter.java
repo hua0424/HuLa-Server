@@ -28,18 +28,48 @@ import com.luohuo.flex.model.ws.CallEndReq;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.time.LocalDateTime;
 
 public class MessageAdapter {
     public static final int CAN_CALLBACK_GAP_COUNT = 100;
 
+    /**
+     * ISS-015: 流式消息可携带 sendTime 覆盖默认 create_time 的最大回溯窗口(分钟)。
+     * 超出此窗口的 sendTime 会被 clamp 到 [now-MAX_SEND_TIME_BACKDATE_MINUTES min, now]。
+     * 防止恶意客户端把消息「插入」到很久以前的历史位置。
+     */
+    static final long MAX_SEND_TIME_BACKDATE_MINUTES = 5;
+
     public static Message buildMsgSave(ChatMessageReq request, Long uid) {
-		return Message.builder()
+		Message msg = Message.builder()
                 .fromUid(uid)
                 .roomId(request.getRoomId())
                 .type(request.getMsgType())
                 .status(MessageStatusEnum.NORMAL.getStatus())
                 .build();
+		// ISS-015: AI 流式消息 stream_end 落库时,把 stream_start 时间戳回灌到 create_time。
+		// 默认 MetaObjectHandler 会用 now() 填(=stream_end),导致长流式回复被新用户消息夹塞;
+		// 这里在 skipPush=true(stream 路径独有标记)时,带 sendTime 就覆盖,并被 clamp 防注入。
+		if (request.isSkipPush() && request.getSendTime() != null) {
+			msg.setCreateTime(clampSendTime(request.getSendTime()));
+		}
+		return msg;
+    }
 
+    /**
+     * ISS-015: 把客户端声明的 sendTime 钳制到 [now-5min, now],
+     * 让恶意请求即使绕过 skipPush 门也无法把消息插到任意历史位置。
+     */
+    static LocalDateTime clampSendTime(LocalDateTime requested) {
+        LocalDateTime now = LocalDateTime.now();
+        if (requested.isAfter(now)) {
+            return now;
+        }
+        LocalDateTime floor = now.minusMinutes(MAX_SEND_TIME_BACKDATE_MINUTES);
+        if (requested.isBefore(floor)) {
+            return floor;
+        }
+        return requested;
     }
 
     public static List<ChatMessageResp> buildMsgResp(List<Message> messages, List<MessageMark> msgMark, Long receiveUid) {

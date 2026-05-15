@@ -7,6 +7,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDateTime;
+
 /**
  * 聊天信息点播
  * @author nyh
@@ -39,4 +41,12 @@ public class ChatMessageReq {
 
 	@Schema(description ="仅存库不推送（流式消息 stream_end 落库时使用，避免与流式推送重复）")
 	private boolean skipPush = false;
+
+	/**
+	 * ISS-015: 流式消息 stream_start 时间戳,落库时用于覆盖 create_time(=前端 sendTime)。
+	 * 仅在 skipPush=true 时生效(防止常规客户端伪造历史时间),并被 clamp 到 [now-5min, now]。
+	 * 接受 epoch millis(Number) 或 ISO-8601 字符串,见 LuohuoLocalDateTimeDeserializer。
+	 */
+	@Schema(description ="消息原始发送时间(流式消息 stream_start;仅 skipPush=true 时生效,自动 clamp 到 [now-5min, now])")
+	private LocalDateTime sendTime;
 }
