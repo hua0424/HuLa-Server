@@ -103,7 +103,10 @@ public class StreamProcessor implements MessageProcessor {
 		ctx.setFromUid(aiclawUid);
 		ctx.setToUid(req.getToUid());
 		ctx.setRoomId(req.getRoomId());
-		ctx.setLastActivityTime(System.currentTimeMillis());
+		// ISS-015: 记录 stream_start 时间戳,stream_end 落库时回灌到 im_message.create_time,
+		// 避免长流式回复因 create_time = stream_end 被新用户消息夹塞到后面。
+		ctx.setStartTimeMs(System.currentTimeMillis());
+		ctx.setLastActivityTime(ctx.getStartTimeMs());
 		activeStreams.put(aiclawUid, ctx);
 
 		// 中继给目标用户
@@ -214,12 +217,15 @@ public class StreamProcessor implements MessageProcessor {
 		}
 
 		// 构造与 ChatMessageReq 兼容的请求体
+		// ISS-015: 带 sendTime=stream_start 时间戳,IM 侧 buildMsgSave 在 skipPush=true 时回灌到 create_time,
+		// 让前端 sendTime(=create_time) 反映「AI 开始回复」时刻,而非「AI 完成回复」时刻。
 		String body = JSONUtil.toJsonStr(java.util.Map.of(
 				"roomId", ctx.getRoomId(),
 				"msgType", 1,
 				"body", java.util.Map.of("content", content),
 				"skip", true,
-				"skipPush", true
+				"skipPush", true,
+				"sendTime", ctx.getStartTimeMs()
 		));
 
 		Long tenantId = ReactiveContextUtil.getTenantId() != null ? ReactiveContextUtil.getTenantId() : 1L;
@@ -264,5 +270,10 @@ public class StreamProcessor implements MessageProcessor {
 		private Long toUid;
 		private Long roomId;
 		private long lastActivityTime;
+		/**
+		 * ISS-015: stream_start 时间戳(epoch ms),stream_end 落库时透传给 IM 服务,
+		 * 用于覆盖 im_message.create_time。
+		 */
+		private long startTimeMs;
 	}
 }
