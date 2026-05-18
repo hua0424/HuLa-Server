@@ -45,11 +45,11 @@ public class RetryPushConsumer implements RocketMQListener<NodePushDTO> {
 				log.info("ack失败重新发送消息: {}", message);
 				pushService.sendPushMsg(message.getWsBaseMsg(), Arrays.asList(uid), message.getUid());
 
-				// 直接更新会话的最后一条消息的id
+				// 直接更新 receiver(未 ACK 需重推的目标用户)的会话最后一条消息
 				LinkedHashMap<String, Object> dataMap = (LinkedHashMap<String, Object>) message.getWsBaseMsg().getData();
 				LinkedHashMap<String, Object> msg =  (LinkedHashMap<String, Object>) dataMap.get("message");
-				LinkedHashMap<String, Object> user =  (LinkedHashMap<String, Object>) dataMap.get("fromUser");
-				contactDao.refreshOrCreateActive(msg.get("roomId"), Arrays.asList(Long.parseLong(user.get("uid").toString())), msg.get("id"), msg.get("sendTime"));
+				// ISS-007: 取 receiver uid,而非 sender(fromUser.uid)
+				contactDao.refreshOrCreateActive(msg.get("roomId"), Arrays.asList(uid), msg.get("id"), msg.get("sendTime"));
 			}
 		});
 	}
