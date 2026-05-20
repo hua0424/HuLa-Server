@@ -4,6 +4,7 @@
 -- aiclaw 群聊配置表
 CREATE TABLE IF NOT EXISTS `im_aiclaw_group_config` (
   `id`                    BIGINT NOT NULL COMMENT '主键（雪花ID）',
+  `tenant_id`             BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID',
   `aiclaw_uid`            BIGINT NOT NULL COMMENT 'aiclaw 的 uid',
   `room_id`               BIGINT NOT NULL COMMENT '群聊 room_id',
   `rate_limit_per_minute` INT UNSIGNED DEFAULT 10 COMMENT '频率限制（条/分钟），0=无限制',
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_group_config` (
 -- aiclaw thinking 记录表
 CREATE TABLE IF NOT EXISTS `im_aiclaw_thinking` (
   `id`             BIGINT NOT NULL COMMENT '主键（雪花ID）',
+  `tenant_id`      BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID',
   `aiclaw_uid`     BIGINT NOT NULL COMMENT '产生 thinking 的 aiclaw uid',
   `room_id`        BIGINT NOT NULL COMMENT '所属群聊 room_id',
   `trigger_msg_id` BIGINT DEFAULT NULL COMMENT '触发本次 thinking 的消息 ID（im_message.id）',
@@ -48,3 +50,7 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_thinking_msg_rel` (
   `create_time` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '关联建立时间',
   PRIMARY KEY (`thinking_id`, `msg_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='thinking 与回复消息关联表';
+
+-- M1-fix: 为已创建的表补全 tenant_id（TenantLineInnerInterceptor 要求）
+ALTER TABLE `im_aiclaw_thinking` ADD COLUMN IF NOT EXISTS `tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
+ALTER TABLE `im_aiclaw_group_config` ADD COLUMN IF NOT EXISTS `tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
