@@ -102,6 +102,7 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.core.user.dao.AiclawDao;
+import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.im.domain.vo.req.MergeMessageReq;
@@ -140,6 +141,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	private final NoticeDao noticeDao;
 	private final UserApplyDao userApplyDao;
 	private final AiclawDao aiclawDao;
+	private final AiclawOwnerCache aiclawOwnerCache;
 	private ContactDao contactDao;
 	private RoomCache roomCache;
 	private final UserFriendDao userFriendDao;
@@ -1125,12 +1127,10 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	}
 
 	/**
-	 * 获取用户拥有的所有 aiclaw uid 列表
+	 * 获取用户拥有的所有 aiclaw uid 列表（带 Redis 缓存）
 	 */
 	private Set<Long> getAiclawUidsOfUser(Long ownerUid) {
-		return aiclawDao.listByOwner(ownerUid).stream()
-				.map(com.luohuo.flex.im.domain.entity.Aiclaw::getUid)
-				.collect(Collectors.toSet());
+		return aiclawOwnerCache.getAiclawUids(ownerUid);
 	}
 
 	/**

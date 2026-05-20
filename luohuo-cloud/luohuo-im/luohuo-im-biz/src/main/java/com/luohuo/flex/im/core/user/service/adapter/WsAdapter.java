@@ -111,4 +111,14 @@ public class WsAdapter {
 		wsBaseResp.setData(StrUtil.format("你已{}屏蔽来自{}的消息", state? "":"解除",name));
 		return wsBaseResp;
 	}
+
+	/**
+	 * REQ-004 M3: 群配置变更 WS 推送
+	 */
+	public static WsBaseResp<WSGroupConfigChange> buildGroupConfigChange(WSGroupConfigChange change) {
+		WsBaseResp<WSGroupConfigChange> wsBaseResp = new WsBaseResp<>();
+		wsBaseResp.setType(WSRespTypeEnum.GROUP_CONFIG_CHANGE.getType());
+		wsBaseResp.setData(change);
+		return wsBaseResp;
+	}
 }

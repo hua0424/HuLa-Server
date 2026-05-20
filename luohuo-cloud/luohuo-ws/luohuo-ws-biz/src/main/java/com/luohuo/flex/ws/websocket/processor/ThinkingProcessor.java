@@ -8,6 +8,7 @@ import com.luohuo.flex.model.entity.ws.WSThinkingStart;
 import com.luohuo.flex.model.enums.WSReqTypeEnum;
 import com.luohuo.flex.model.ws.WSBaseReq;
 import com.luohuo.flex.ws.ReactiveContextUtil;
+import com.luohuo.flex.ws.service.AiclawRateLimitChecker;
 import com.luohuo.flex.ws.service.PushService;
 import jakarta.annotation.Resource;
 import lombok.Data;
@@ -40,6 +41,8 @@ public class ThinkingProcessor implements MessageProcessor {
 	private PushService pushService;
 	@Resource
 	private DiscoveryClient discoveryClient;
+	@Resource
+	private AiclawRateLimitChecker rateLimitChecker;
 
 	private final WebClient webClient = WebClient.create();
 
@@ -78,6 +81,22 @@ public class ThinkingProcessor implements MessageProcessor {
 		WSThinkingStart req = JSONUtil.toBean(payload.getData(), WSThinkingStart.class);
 		Long roomId = Long.valueOf(req.getRoomId());
 
+		// REQ-004 M3-3: THINKING_START 前置限流校验
+		AiclawRateLimitChecker.LimitResult limitResult = rateLimitChecker.check(aiclawUid, roomId);
+		if (limitResult != AiclawRateLimitChecker.LimitResult.ALLOWED) {
+			String errorMsg = limitResult == AiclawRateLimitChecker.LimitResult.RATE_LIMITED
+					? "rate_limit_exceeded" : "daily_limit_exceeded";
+			WSThinkingEnd endResp = WSThinkingEnd.builder()
+					.thinkingId(null)
+					.status("error")
+					.error(errorMsg)
+					.roomId(req.getRoomId())
+					.build();
+			pushToMembers("thinkingEnd", endResp, List.of(aiclawUid), aiclawUid);
+			log.warn("thinking_start rate limited: aiclaw={}, roomId={}, reason={}", aiclawUid, roomId, errorMsg);
+			return;
+		}
+
 		// 1. 调用 IM 服务创建 thinking 记录
 		Long thinkingId = createThinkingViaHttp(req);
 		if (thinkingId == null) {
@@ -85,6 +104,9 @@ public class ThinkingProcessor implements MessageProcessor {
 			return;
 		}
 		String thinkingIdStr = String.valueOf(thinkingId);
+
+		// 记录限流计数（thinking 创建成功即视为一次"发言意图"）
+		rateLimitChecker.record(aiclawUid, roomId);
 
 		// 2. 查询群成员
 		List<Long> memberUids = queryRoomMembersViaHttp(roomId);
