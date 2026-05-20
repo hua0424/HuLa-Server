@@ -23,4 +23,7 @@ public class WSThinkingStart {
 
 	@Schema(description = "触发本次 thinking 的消息 ID（String 避免 JS 精度丢失）")
 	private String triggerMsgId;
+
+	@Schema(description = "thinking 记录 ID（server 生成，出参时携带）")
+	private String thinkingId;
 }

@@ -101,6 +101,7 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomFriendCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.im.domain.vo.req.MergeMessageReq;
@@ -138,6 +139,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	private final RoomFriendDao roomFriendDao;
 	private final NoticeDao noticeDao;
 	private final UserApplyDao userApplyDao;
+	private final AiclawDao aiclawDao;
 	private ContactDao contactDao;
 	private RoomCache roomCache;
 	private final UserFriendDao userFriendDao;
@@ -1068,6 +1070,22 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			return;
 		}
 
+		// REQ-004: 识别被邀请人中的 aiclaw，自动同意入群
+		Set<Long> aiclawUids = getAiclawUidsOfUser(uid);
+		Set<Long> autoAgreeUids = new HashSet<>(validUids);
+		autoAgreeUids.retainAll(aiclawUids);
+		validUids.removeAll(autoAgreeUids);
+
+		// 自动同意：直接入群，不走 UserApply
+		if (!autoAgreeUids.isEmpty()) {
+			batchAddAiclawMembers(roomGroup, autoAgreeUids, uid);
+		}
+
+		// 非 aiclaw：走原有邀请流程
+		if (CollectionUtils.isEmpty(validUids)) {
+			return;
+		}
+
 		// 2. 创建邀请记录
 		List<UserApply> invites = validUids.stream().map(inviteeUid -> new UserApply(uid, RoomTypeEnum.GROUP.getType(), roomGroup.getRoomId(), inviteeUid, StrUtil.format("{}邀请你加入{}", userSummaryCache.get(uid).getName(), roomGroup.getName()), NoticeStatusEnum.UNTREATED.getStatus(), UNREAD.getCode(), 0, false, 1)).collect(Collectors.toList());
 		transactionTemplate.execute(e -> userApplyDao.saveBatch(invites));
@@ -1104,6 +1122,49 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 					roomGroup.getName()
 			));
 		});
+	}
+
+	/**
+	 * 获取用户拥有的所有 aiclaw uid 列表
+	 */
+	private Set<Long> getAiclawUidsOfUser(Long ownerUid) {
+		return aiclawDao.listByOwner(ownerUid).stream()
+				.map(com.luohuo.flex.im.domain.entity.Aiclaw::getUid)
+				.collect(Collectors.toSet());
+	}
+
+	/**
+	 * 批量添加 aiclaw 入群（自动同意，不走 UserApply）
+	 */
+	private void batchAddAiclawMembers(RoomGroup roomGroup, Set<Long> aiclawUids, Long inviterUid) {
+		for (Long aiclawUid : aiclawUids) {
+			GroupMember member = groupMemberDao.getMemberByGroupId(roomGroup.getId(), aiclawUid);
+			if (member != null) {
+				continue; // 已在群中，跳过
+			}
+
+			transactionTemplate.execute(e -> {
+				groupMemberDao.save(MemberAdapter.buildMemberAdd(roomGroup.getId(), aiclawUid));
+				chatService.createContact(aiclawUid, roomGroup.getRoomId());
+				return true;
+			});
+
+			// 更新缓存
+			groupMemberCache.evictMemberList(roomGroup.getRoomId());
+			groupMemberCache.evictExceptMemberList(roomGroup.getRoomId());
+			CacheKey uKey = PresenceCacheKeyBuilder.userGroupsKey(aiclawUid);
+			CacheKey gKey = PresenceCacheKeyBuilder.groupMembersKey(roomGroup.getRoomId());
+			CacheKey onlineGroupMembersKey = PresenceCacheKeyBuilder.onlineGroupMembersKey(roomGroup.getRoomId());
+			cachePlusOps.sAdd(uKey, roomGroup.getRoomId());
+			cachePlusOps.sAdd(gKey, aiclawUid);
+
+			SpringUtils.publishEvent(new GroupMemberAddEvent(this, roomGroup.getRoomId(),
+					Math.toIntExact(cachePlusOps.sCard(gKey)),
+					Math.toIntExact(cachePlusOps.sCard(onlineGroupMembersKey)),
+					Arrays.asList(aiclawUid), inviterUid));
+
+			log.info("aiclaw auto-joined group: aiclawUid={}, roomId={}, inviter={}", aiclawUid, roomGroup.getRoomId(), inviterUid);
+		}
 	}
 
 	/**
