@@ -29,13 +29,13 @@ public class ThinkingService {
 		Long thinkingId = IdUtil.getSnowflakeNextId();
 
 		AiclawThinking thinking = AiclawThinking.builder()
-				.id(thinkingId)
 				.aiclawUid(aiclawUid)
 				.roomId(roomId)
 				.triggerMsgId(triggerMsgId)
 				.content("")
 				.hasResponse(0)
 				.build();
+		thinking.setId(thinkingId);
 
 		thinkingMapper.insert(thinking);
 		log.debug("thinking created: id={}, aiclawUid={}, roomId={}", thinkingId, aiclawUid, roomId);
