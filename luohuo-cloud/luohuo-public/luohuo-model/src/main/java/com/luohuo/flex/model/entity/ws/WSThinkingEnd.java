@@ -21,6 +21,9 @@ public class WSThinkingEnd {
 	@Schema(description = "处理耗时（毫秒）")
 	private Integer durationMs;
 
+	@Schema(description = "状态: complete=正常, error=失败")
+	private String status;
+
 	@Schema(description = "错误信息，正常结束为空")
 	private String error;
 

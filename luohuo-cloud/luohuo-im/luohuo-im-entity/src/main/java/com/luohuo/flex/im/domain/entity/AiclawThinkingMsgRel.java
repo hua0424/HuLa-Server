@@ -2,27 +2,25 @@ package com.luohuo.flex.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.luohuo.basic.base.entity.SuperEntity;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
-import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 
+import java.io.Serializable;
 import java.time.LocalDateTime;
 
 /**
- * thinking 与回复消息关联表
+ * thinking 与回复消息关联表（独立 POJO，无继承，复合主键）
  */
 @Data
-@EqualsAndHashCode(callSuper = false)
 @TableName("im_aiclaw_thinking_msg_rel")
 @Builder
 @AllArgsConstructor
 @NoArgsConstructor
 @Schema(description = "thinking 与回复消息关联表")
-public class AiclawThinkingMsgRel extends SuperEntity<Long> {
+public class AiclawThinkingMsgRel implements Serializable {
 
 	private static final long serialVersionUID = 1L;
 

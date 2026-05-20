@@ -2,7 +2,7 @@ package com.luohuo.flex.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.luohuo.basic.base.entity.Entity;
+import com.luohuo.basic.base.entity.SuperEntity;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -20,7 +20,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 @NoArgsConstructor
 @Schema(description = "aiclaw thinking 记录表")
-public class AiclawThinking extends Entity<Long> {
+public class AiclawThinking extends SuperEntity<Long> {
 
 	private static final long serialVersionUID = 1L;
 
