@@ -67,6 +67,13 @@ public enum WSRespTypeEnum {
 	STREAM_START("streamStart", "流式消息开始", WSStreamStart.class),
 	STREAM_DELTA("streamDelta", "流式消息片段", WSStreamDelta.class),
 	STREAM_END("streamEnd", "流式消息结束", WSStreamEnd.class),
+
+	// REQ-004: thinking 事件 + 群配置变更
+	THINKING_START("thinkingStart", "thinking 开始", WSThinkingStart.class),
+	THINKING_DELTA("thinkingDelta", "thinking 增量", WSThinkingDelta.class),
+	THINKING_END("thinkingEnd", "thinking 结束", WSThinkingEnd.class),
+	GROUP_CONFIG_CHANGE("groupConfigChange", "群配置变更", WSGroupConfigChange.class),
+
 	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class)
     ;
 

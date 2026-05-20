@@ -35,6 +35,11 @@ public enum WSReqTypeEnum {
 	STREAM_START(17, "流式消息开始"),
 	STREAM_DELTA(18, "流式消息片段"),
 	STREAM_END(19, "流式消息结束"),
+
+	// REQ-004: thinking 事件
+	THINKING_START(20, "thinking 开始"),
+	THINKING_DELTA(21, "thinking 增量"),
+	THINKING_END(22, "thinking 结束"),
     ;
 
     private final Integer type;
