@@ -8,6 +8,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.Map;
 
 /**
  * 聊天信息点播
@@ -49,4 +50,11 @@ public class ChatMessageReq {
 	 */
 	@Schema(description ="消息原始发送时间(流式消息 stream_start;仅 skipPush=true 时生效,自动 clamp 到 [now-5min, now])")
 	private LocalDateTime sendTime;
+
+	/**
+	 * REQ-004 M2-2: aiclaw 扩展字段，用于传递 thinkingId、autoReply 等元数据。
+	 * 不持久化到 im_message 表，仅透传至 WS push。
+	 */
+	@Schema(description ="aiclaw 扩展字段（thinkingId、autoReply 等，不持久化）")
+	private Map<String, Object> extra;
 }

@@ -39,6 +39,9 @@ import com.luohuo.flex.im.core.chat.service.strategy.mark.MsgMarkFactory;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.RecallMsgHandler;
+import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
+import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
+import com.luohuo.flex.im.domain.entity.AiclawThinkingMsgRel;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -64,6 +67,8 @@ public class ChatServiceImpl implements ChatService {
     private RoomCache roomCache;
     private RoomDao roomDao;
     private GroupMemberDao groupMemberDao;
+    private AiclawThinkingMapper aiclawThinkingMapper;
+    private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
     /**
      * 发送消息
      */
@@ -73,6 +78,18 @@ public class ChatServiceImpl implements ChatService {
         check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid);
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
+
+        // REQ-004 M2-2: thinking_msg_rel 关联回写 + has_response 更新
+        if (request.getExtra() != null && request.getExtra().get("thinkingId") != null) {
+            Long thinkingId = Long.valueOf(request.getExtra().get("thinkingId").toString());
+            AiclawThinkingMsgRel rel = new AiclawThinkingMsgRel();
+            rel.setThinkingId(thinkingId);
+            rel.setMsgId(msgId);
+            rel.setCreateTime(LocalDateTime.now());
+            aiclawThinkingMsgRelMapper.insertIgnore(rel);
+            aiclawThinkingMapper.updateHasResponse(thinkingId, 1);
+            log.debug("thinking_msg_rel writeback: msgId={}, thinkingId={}", msgId, thinkingId);
+        }
 
         // ISS-003: 同事务推进房间内所有成员的 contact.last_msg_id,避免写入路径与 /chat/msg/page 游标失同步
         syncContactLastMsgId(request.getRoomId(), msgId);
@@ -95,7 +112,12 @@ public class ChatServiceImpl implements ChatService {
 
         // 发布消息发送事件（skipPush=true 时仅存库不推送，用于流式消息 stream_end 落库）
         if (!request.isSkipPush()) {
-            SpringUtils.publishEvent(new MessageSendEvent(this, new ChatMsgSendDto(msgId, uid)));
+            ChatMsgSendDto sendDto = ChatMsgSendDto.builder()
+                    .msgId(msgId)
+                    .uid(uid)
+                    .extra(request.getExtra())
+                    .build();
+            SpringUtils.publishEvent(new MessageSendEvent(this, sendDto));
         }
         return msgId;
     }

@@ -137,6 +137,10 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 			default -> {
 				// 常规消息处理
 				ChatMessageResp chatMessageResp = chatService.getMsgResp(message, null);
+				// REQ-004 M2-2: 透传 aiclaw extra（thinkingId、autoReply 等）
+				if (dto.getExtra() != null && chatMessageResp.getMessage() != null) {
+					chatMessageResp.getMessage().setExtra(dto.getExtra());
+				}
 				WsBaseResp<ChatMessageResp> wsBaseResp = WsAdapter.buildMsgSend(chatMessageResp);
 
 				// 单聊场景：检测是否有 aiclaw 目标，为其附加扩展字段
@@ -147,6 +151,10 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 						Long senderUid = message.getFromUid();
 						// 为 aiclaw 构建带扩展字段的 payload
 						ChatMessageResp aiclawResp = chatService.getMsgResp(message, null);
+						// REQ-004 M2-2: aiclaw 响应也透传 extra
+						if (dto.getExtra() != null && aiclawResp.getMessage() != null) {
+							aiclawResp.getMessage().setExtra(dto.getExtra());
+						}
 						fillAiclawExt(aiclawResp, aiclawUid, senderUid);
 						WsBaseResp<ChatMessageResp> aiclawWsResp = WsAdapter.buildMsgSend(aiclawResp);
 
