@@ -59,4 +59,16 @@ public class AiclawThinking extends SuperEntity<Long> {
 	 */
 	@TableField("has_response")
 	private Integer hasResponse;
+
+	/**
+	 * 状态：0=进行中 1=成功 2=错误 3=超时
+	 */
+	@TableField("status")
+	private Integer status;
+
+	/**
+	 * 错误码（rate_limit_exceeded / daily_limit_exceeded / short_reply_skip / timeout）
+	 */
+	@TableField("error_code")
+	private String errorCode;
 }

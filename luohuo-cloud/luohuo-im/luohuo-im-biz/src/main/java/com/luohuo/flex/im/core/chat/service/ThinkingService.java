@@ -78,8 +78,29 @@ public class ThinkingService {
 		}
 
 		thinking.setDurationMs(durationMs);
+		thinking.setStatus(1); // 成功
 		thinkingMapper.updateById(thinking);
 		log.debug("thinking finalized: id={}, durationMs={}", thinkingId, durationMs);
+	}
+
+	/**
+	 * 标记 thinking 记录为错误状态
+	 *
+	 * @param thinkingId thinking ID
+	 * @param errorCode  错误码
+	 */
+	public void markError(Long thinkingId, String errorCode) {
+		AiclawThinking thinking = thinkingMapper.selectById(thinkingId);
+		if (thinking == null) {
+			log.warn("markError: thinking not found, id={}", thinkingId);
+			return;
+		}
+
+		// timeout 特殊处理为 status=3
+		thinking.setStatus("timeout".equals(errorCode) ? 3 : 2);
+		thinking.setErrorCode(errorCode);
+		thinkingMapper.updateById(thinking);
+		log.warn("thinking marked error: id={}, errorCode={}", thinkingId, errorCode);
 	}
 
 	/**

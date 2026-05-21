@@ -81,29 +81,32 @@ public class ThinkingProcessor implements MessageProcessor {
 		WSThinkingStart req = JSONUtil.toBean(payload.getData(), WSThinkingStart.class);
 		Long roomId = Long.valueOf(req.getRoomId());
 
-		// REQ-004 M3-3: THINKING_START 前置限流校验
-		AiclawRateLimitChecker.LimitResult limitResult = rateLimitChecker.check(aiclawUid, roomId);
-		if (limitResult != AiclawRateLimitChecker.LimitResult.ALLOWED) {
-			String errorMsg = limitResult == AiclawRateLimitChecker.LimitResult.RATE_LIMITED
-					? "rate_limit_exceeded" : "daily_limit_exceeded";
-			WSThinkingEnd endResp = WSThinkingEnd.builder()
-					.thinkingId(null)
-					.status("error")
-					.error(errorMsg)
-					.roomId(req.getRoomId())
-					.build();
-			pushToMembers("thinkingEnd", endResp, List.of(aiclawUid), aiclawUid);
-			log.warn("thinking_start rate limited: aiclaw={}, roomId={}, reason={}", aiclawUid, roomId, errorMsg);
-			return;
-		}
-
-		// 1. 调用 IM 服务创建 thinking 记录
+		// 1. 先创建 thinking 记录（确保限流拒绝时有 thinkingId 用于 plugin 路由）
 		Long thinkingId = createThinkingViaHttp(req);
 		if (thinkingId == null) {
 			log.error("thinking start failed: aiclaw={}, roomId={}", aiclawUid, roomId);
 			return;
 		}
 		String thinkingIdStr = String.valueOf(thinkingId);
+
+		// REQ-004 M4: THINKING_START 前置限流校验（thinkingId 已生成）
+		AiclawRateLimitChecker.LimitResult limitResult = rateLimitChecker.check(aiclawUid, roomId);
+		if (limitResult != AiclawRateLimitChecker.LimitResult.ALLOWED) {
+			String errorMsg = limitResult == AiclawRateLimitChecker.LimitResult.RATE_LIMITED
+					? "rate_limit_exceeded" : "daily_limit_exceeded";
+			// 标记 thinking 为错误状态
+			markErrorViaHttp(thinkingIdStr, errorMsg);
+			WSThinkingEnd endResp = WSThinkingEnd.builder()
+					.thinkingId(thinkingIdStr)
+					.status("error")
+					.error(errorMsg)
+					.roomId(req.getRoomId())
+					.build();
+			pushToMembers("thinkingEnd", endResp, List.of(aiclawUid), aiclawUid);
+			log.warn("thinking_start rate limited: aiclaw={}, roomId={}, thinkingId={}, reason={}",
+					aiclawUid, roomId, thinkingIdStr, errorMsg);
+			return;
+		}
 
 		// 记录限流计数（thinking 创建成功即视为一次"发言意图"）
 		rateLimitChecker.record(aiclawUid, roomId);
@@ -200,6 +203,7 @@ public class ThinkingProcessor implements MessageProcessor {
 		for (String thinkingId : timedOut) {
 			ThinkingContext ctx = activeThinkings.remove(thinkingId);
 			if (ctx != null) {
+				markErrorViaHttp(thinkingId, "timeout");
 				WSThinkingEnd endResp = WSThinkingEnd.builder()
 						.thinkingId(thinkingId)
 						.status("error")
@@ -262,6 +266,25 @@ public class ThinkingProcessor implements MessageProcessor {
 				.retrieve()
 				.bodyToMono(String.class)
 				.doOnError(err -> log.error("finalizeViaHttp failed: {}", err.getMessage()))
+				.subscribe();
+	}
+
+	private void markErrorViaHttp(String thinkingId, String errorCode) {
+		String url = resolveImServiceUrl();
+		if (url == null) return;
+
+		WSThinkingEnd req = WSThinkingEnd.builder()
+				.thinkingId(thinkingId)
+				.error(errorCode)
+				.build();
+
+		webClient.post()
+				.uri(url + "/thinking/error")
+				.contentType(MediaType.APPLICATION_JSON)
+				.bodyValue(req)
+				.retrieve()
+				.bodyToMono(String.class)
+				.doOnError(err -> log.error("markErrorViaHttp failed: {}", err.getMessage()))
 				.subscribe();
 	}
 

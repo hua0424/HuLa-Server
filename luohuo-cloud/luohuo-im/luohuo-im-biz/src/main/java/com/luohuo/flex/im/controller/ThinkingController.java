@@ -64,6 +64,16 @@ public class ThinkingController {
 	}
 
 	/**
+	 * 标记 thinking 为错误状态（限流拒绝等场景）
+	 */
+	@PostMapping("/error")
+	public R<Void> error(@RequestBody WSThinkingEnd req) {
+		Long thinkingId = Long.valueOf(req.getThinkingId());
+		thinkingService.markError(thinkingId, req.getError());
+		return R.success();
+	}
+
+	/**
 	 * 查询群成员 UID 列表
 	 */
 	@GetMapping("/room/{roomId}/members")

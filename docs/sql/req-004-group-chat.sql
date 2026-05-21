@@ -54,3 +54,8 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_thinking_msg_rel` (
 -- M1-fix: 为已创建的表补全 tenant_id（TenantLineInnerInterceptor 要求）
 ALTER TABLE `im_aiclaw_thinking` ADD COLUMN IF NOT EXISTS `tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
 ALTER TABLE `im_aiclaw_group_config` ADD COLUMN IF NOT EXISTS `tenant_id` BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID';
+
+-- M4-fix: 为 im_aiclaw_thinking 增加状态跟踪字段（限流拒绝时需要 thinkingId 用于 plugin 路由）
+ALTER TABLE `im_aiclaw_thinking`
+    ADD COLUMN IF NOT EXISTS `status` TINYINT DEFAULT 0 COMMENT '状态：0=进行中 1=成功 2=错误 3=超时',
+    ADD COLUMN IF NOT EXISTS `error_code` VARCHAR(64) DEFAULT NULL COMMENT '错误码（rate_limit_exceeded / daily_limit_exceeded / short_reply_skip / timeout）';
