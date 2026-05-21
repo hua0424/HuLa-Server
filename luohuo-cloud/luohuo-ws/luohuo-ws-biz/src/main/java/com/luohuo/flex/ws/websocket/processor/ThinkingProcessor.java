@@ -231,18 +231,14 @@ public class ThinkingProcessor implements MessageProcessor {
 		if (url == null) return null;
 
 		try {
-			return webClient.post()
-					.uri(url + "/thinking/start")
-					.contentType(MediaType.APPLICATION_JSON)
-					.bodyValue(req)
-					.retrieve()
-					.bodyToMono(String.class)
-					.map(resp -> {
-						// 简单解析 R<Long> 的 data 字段
-						cn.hutool.json.JSONObject json = JSONUtil.parseObj(resp);
-						return json.getLong("data");
-					})
-					.block();
+			// M4-fix: 改用 Hutool 同步 HTTP，避免 reactor event loop 上调用 Mono.block()
+			String resp = cn.hutool.http.HttpRequest.post(url + "/thinking/start")
+					.header("Content-Type", "application/json")
+					.body(JSONUtil.toJsonStr(req))
+					.execute()
+					.body();
+			cn.hutool.json.JSONObject json = JSONUtil.parseObj(resp);
+			return json.getLong("data");
 		} catch (Exception e) {
 			log.error("createThinkingViaHttp failed", e);
 			return null;
@@ -301,11 +297,10 @@ public class ThinkingProcessor implements MessageProcessor {
 		if (url == null) return List.of();
 
 		try {
-			String resp = webClient.get()
-					.uri(url + "/thinking/room/" + roomId + "/members")
-					.retrieve()
-					.bodyToMono(String.class)
-					.block();
+			// M4-fix: 改用 Hutool 同步 HTTP，避免 reactor event loop 上调用 Mono.block()
+			String resp = cn.hutool.http.HttpRequest.get(url + "/thinking/room/" + roomId + "/members")
+					.execute()
+					.body();
 			cn.hutool.json.JSONObject json = JSONUtil.parseObj(resp);
 			return json.getBeanList("data", Long.class);
 		} catch (Exception e) {
