@@ -139,6 +139,10 @@ public class ThinkingProcessor implements MessageProcessor {
 	private void handleDelta(Long aiclawUid, WSBaseReq payload) {
 		WSThinkingDelta req = JSONUtil.toBean(payload.getData(), WSThinkingDelta.class);
 		String thinkingIdStr = req.getThinkingId();
+		if (thinkingIdStr == null) {
+			log.warn("thinking_delta missing thinkingId: aiclaw={}", aiclawUid);
+			return;
+		}
 
 		ThinkingContext ctx = activeThinkings.get(thinkingIdStr);
 		if (ctx == null) {
@@ -163,6 +167,10 @@ public class ThinkingProcessor implements MessageProcessor {
 	private void handleEnd(Long aiclawUid, WSBaseReq payload) {
 		WSThinkingEnd req = JSONUtil.toBean(payload.getData(), WSThinkingEnd.class);
 		String thinkingIdStr = req.getThinkingId();
+		if (thinkingIdStr == null) {
+			log.warn("thinking_end missing thinkingId: aiclaw={}", aiclawUid);
+			return;
+		}
 
 		ThinkingContext ctx = activeThinkings.remove(thinkingIdStr);
 		if (ctx == null) {

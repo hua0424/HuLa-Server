@@ -35,6 +35,7 @@ public class ThinkingController {
 	 */
 	@PostMapping("/start")
 	public R<Long> start(@RequestBody WSThinkingStart req) {
+		ensureTenantId();
 		Long aiclawUid = Long.valueOf(req.getFromUid());
 		Long roomId = Long.valueOf(req.getRoomId());
 		Long triggerMsgId = req.getTriggerMsgId() != null ? Long.valueOf(req.getTriggerMsgId()) : null;
@@ -48,6 +49,7 @@ public class ThinkingController {
 	 */
 	@PostMapping("/delta")
 	public R<Void> delta(@RequestBody WSThinkingDelta req) {
+		ensureTenantId();
 		Long thinkingId = Long.valueOf(req.getThinkingId());
 		thinkingService.appendDelta(thinkingId, req.getChunk(), req.getSeq());
 		return R.success();
@@ -58,6 +60,7 @@ public class ThinkingController {
 	 */
 	@PostMapping("/end")
 	public R<Void> end(@RequestBody WSThinkingEnd req) {
+		ensureTenantId();
 		Long thinkingId = Long.valueOf(req.getThinkingId());
 		thinkingService.finalize(thinkingId, req.getDurationMs());
 		return R.success();
@@ -68,9 +71,20 @@ public class ThinkingController {
 	 */
 	@PostMapping("/error")
 	public R<Void> error(@RequestBody WSThinkingEnd req) {
+		ensureTenantId();
 		Long thinkingId = Long.valueOf(req.getThinkingId());
 		thinkingService.markError(thinkingId, req.getError());
 		return R.success();
+	}
+
+	/**
+	 * ws-server 通过 HTTP 调用时不携带租户上下文，MyBatis-Plus tenant interceptor
+	 * 需要从 ContextUtil 读取 tenant_id。此处兜底设置默认租户编号。
+	 */
+	private void ensureTenantId() {
+		if (com.luohuo.basic.context.ContextUtil.getTenantId() == null) {
+			com.luohuo.basic.context.ContextUtil.setTenantId(1L);
+		}
 	}
 
 	/**
@@ -78,6 +92,7 @@ public class ThinkingController {
 	 */
 	@GetMapping("/room/{roomId}/members")
 	public R<List<Long>> getRoomMembers(@PathVariable Long roomId) {
+		ensureTenantId();
 		GroupResp group = roomGroupMapper.getByRoomIdIgnoreDel(roomId);
 		if (group == null || group.getGroupId() == null) {
 			return R.success(List.of());
