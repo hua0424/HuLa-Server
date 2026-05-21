@@ -436,34 +436,38 @@ public class SessionManager {
 	 * @param session 当前会话
 	 */
 	public void cleanupSession(WebSocketSession session) {
-		if (session != null && !session.isOpen()) {
-			session.close(CloseStatus.GOING_AWAY)
-					.subscribeOn(Schedulers.boundedElastic())
-					.doAfterTerminate(() -> {
-						String sessionId = session.getId();
-
-						// 1. 获取反向索引
-						String clientId = SESSION_CLIENT_MAP.remove(sessionId);
-						Long uid = SESSION_USER_MAP.remove(sessionId);
-
-						if (clientId != null && uid != null) {
-							// 2. 原子化清理设备指纹级核心映射
-							boolean isLastSession = cleanDeviceSession(uid, clientId, sessionId);
-
-							// 3. 若设备无会话，清理路由
-							if (isLastSession) {
-								nacosSessionRegistry.removeDeviceRoute(uid, clientId);
-								syncOnline(uid, clientId, false); // 通知下线
-							}
-
-							Set<WebSocketSession> clientSessions = Optional.ofNullable(USER_DEVICE_SESSION_MAP.get(uid)).map(deviceMap -> deviceMap.get(clientId)).orElse(Collections.emptySet());
-							Set<WebSocketSession> sessions = getUserSessions(uid);
-							log.info("清理会话: sessionId={}, clientId={}, uid={}, 客户端映射={}, 用户会话={}", sessionId, clientId, uid, CollUtil.isEmpty(clientSessions) ? 0 : clientSessions.size(), CollUtil.isEmpty(sessions) ? 0 : sessions.size());
-						}
-					})
-					.doOnSuccess(v -> log.debug("会话关闭成功: {}", session.getId()))
-					.doOnError(e -> log.error("会话关闭失败", e)).subscribe();
+		if (session == null) {
+			return;
 		}
+		// 关闭连接（如仍打开），随后清理映射
+		Mono<Void> closeMono = session.isOpen()
+				? session.close(CloseStatus.GOING_AWAY)
+				: Mono.empty();
+		closeMono.subscribeOn(Schedulers.boundedElastic())
+				.doAfterTerminate(() -> {
+					String sessionId = session.getId();
+
+					// 1. 获取反向索引
+					String clientId = SESSION_CLIENT_MAP.remove(sessionId);
+					Long uid = SESSION_USER_MAP.remove(sessionId);
+
+					if (clientId != null && uid != null) {
+						// 2. 原子化清理设备指纹级核心映射
+						boolean isLastSession = cleanDeviceSession(uid, clientId, sessionId);
+
+						// 3. 若设备无会话，清理路由
+						if (isLastSession) {
+							nacosSessionRegistry.removeDeviceRoute(uid, clientId);
+							syncOnline(uid, clientId, false); // 通知下线
+						}
+
+						Set<WebSocketSession> clientSessions = Optional.ofNullable(USER_DEVICE_SESSION_MAP.get(uid)).map(deviceMap -> deviceMap.get(clientId)).orElse(Collections.emptySet());
+						Set<WebSocketSession> sessions = getUserSessions(uid);
+						log.info("清理会话: sessionId={}, clientId={}, uid={}, 客户端映射={}, 用户会话={}", sessionId, clientId, uid, CollUtil.isEmpty(clientSessions) ? 0 : clientSessions.size(), CollUtil.isEmpty(sessions) ? 0 : sessions.size());
+					}
+				})
+				.doOnSuccess(v -> log.debug("会话关闭成功: {}", session.getId()))
+				.doOnError(e -> log.error("会话关闭失败", e)).subscribe();
 	}
 
 	@PostConstruct

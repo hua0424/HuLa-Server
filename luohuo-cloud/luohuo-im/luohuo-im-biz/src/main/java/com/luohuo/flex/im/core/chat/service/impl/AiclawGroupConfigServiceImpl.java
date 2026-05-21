@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
@@ -15,9 +16,11 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigResp;
 import com.luohuo.flex.model.entity.ws.WSGroupConfigChange;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
@@ -28,10 +31,14 @@ import java.util.List;
 @AllArgsConstructor
 public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 
+	private static final String REDIS_CONFIG_KEY_PREFIX = "im:aiclaw:group:config:";
+	private static final Duration CONFIG_CACHE_TTL = Duration.ofMinutes(30);
+
 	private final AiclawGroupConfigMapper aiclawGroupConfigMapper;
 	private final AiclawOwnerCache aiclawOwnerCache;
 	private final GroupMemberCache groupMemberCache;
 	private final PushService pushService;
+	private final StringRedisTemplate stringRedisTemplate;
 
 	@Override
 	public AiclawGroupConfigResp getConfig(Long aiclawUid, Long roomId, Long uid) {
@@ -41,14 +48,22 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			throw new BizException("您不在该群中，无法查看配置");
 		}
 
+		// 先查 Redis 缓存
+		String cacheKey = buildConfigCacheKey(aiclawUid, roomId);
+		String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+		if (cached != null) {
+			return JSONUtil.toBean(cached, AiclawGroupConfigResp.class);
+		}
+
 		AiclawGroupConfig config = aiclawGroupConfigMapper.selectOne(
 				new LambdaQueryWrapper<AiclawGroupConfig>()
 						.eq(AiclawGroupConfig::getAiclawUid, aiclawUid)
 						.eq(AiclawGroupConfig::getRoomId, roomId));
 
+		AiclawGroupConfigResp resp;
 		if (config == null) {
 			// 无记录时返回默认值
-			return AiclawGroupConfigResp.builder()
+			resp = AiclawGroupConfigResp.builder()
 					.aiclawUid(aiclawUid)
 					.roomId(roomId)
 					.rateLimitPerMinute(10)
@@ -58,9 +73,13 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 					.shortReplyThreshold(10)
 					.shortReplyLookback(3)
 					.build();
+		} else {
+			resp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
 		}
 
-		return BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
+		// 写入 Redis 缓存（默认值也缓存，避免穿透）
+		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp), CONFIG_CACHE_TTL);
+		return resp;
 	}
 
 	@Override
@@ -103,6 +122,11 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			log.info("aiclaw group config updated: aiclawUid={}, roomId={}", aiclawUid, roomId);
 		}
 
+		// 更新 Redis 缓存
+		AiclawGroupConfigResp cachedResp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
+		stringRedisTemplate.opsForValue().set(
+				buildConfigCacheKey(aiclawUid, roomId), JSONUtil.toJsonStr(cachedResp), CONFIG_CACHE_TTL);
+
 		// REQ-004 M3-5: WS 广播配置变更到群内所有成员
 		WSGroupConfigChange.ConfigDTO configDTO = WSGroupConfigChange.ConfigDTO.builder()
 				.rateLimitPerMinute(config.getRateLimitPerMinute())
@@ -119,6 +143,10 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				.build();
 		pushService.sendPushMsg(WsAdapter.buildGroupConfigChange(change), memberUids, uid);
 		log.debug("group config change broadcast: aiclawUid={}, roomId={}, members={}", aiclawUid, roomId, memberUids.size());
+	}
+
+	private String buildConfigCacheKey(Long aiclawUid, Long roomId) {
+		return REDIS_CONFIG_KEY_PREFIX + aiclawUid + ":" + roomId;
 	}
 
 	private void fillConfigFields(AiclawGroupConfig config, AiclawGroupConfigUpdateReq request) {

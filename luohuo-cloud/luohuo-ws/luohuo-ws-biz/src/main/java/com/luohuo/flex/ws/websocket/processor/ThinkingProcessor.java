@@ -52,6 +52,11 @@ public class ThinkingProcessor implements MessageProcessor {
 	private final ConcurrentHashMap<String, ThinkingContext> activeThinkings = new ConcurrentHashMap<>();
 
 	/**
+	 * 二级索引：aiclawUid:roomId → thinkingId（用于 delta/end 缺失 thinkingId 时反查）
+	 */
+	private final ConcurrentHashMap<String, String> aiclawRoomIndex = new ConcurrentHashMap<>();
+
+	/**
 	 * thinking 超时阈值（毫秒），默认 5 分钟
 	 */
 	private static final long THINKING_TIMEOUT_MS = 5 * 60 * 1000;
@@ -119,9 +124,11 @@ public class ThinkingProcessor implements MessageProcessor {
 		ctx.setThinkingId(thinkingIdStr);
 		ctx.setFromUid(aiclawUid);
 		ctx.setRoomId(roomId);
+		ctx.setTriggerMsgId(req.getTriggerMsgId());
 		ctx.setMemberUids(memberUids);
 		ctx.setLastActivityTime(System.currentTimeMillis());
 		activeThinkings.put(thinkingIdStr, ctx);
+		aiclawRoomIndex.put(buildAiclawRoomKey(aiclawUid, roomId), thinkingIdStr);
 
 		// 4. 广播 thinkingStart（含 thinkingId 回传）
 		WSThinkingStart startResp = WSThinkingStart.builder()
@@ -139,9 +146,18 @@ public class ThinkingProcessor implements MessageProcessor {
 	private void handleDelta(Long aiclawUid, WSBaseReq payload) {
 		WSThinkingDelta req = JSONUtil.toBean(payload.getData(), WSThinkingDelta.class);
 		String thinkingIdStr = req.getThinkingId();
-		if (thinkingIdStr == null) {
-			log.warn("thinking_delta missing thinkingId: aiclaw={}", aiclawUid);
-			return;
+
+		// fallback：thinkingId 缺失时通过 aiclawUid+roomId 反查
+		if (thinkingIdStr == null || thinkingIdStr.isBlank()) {
+			Long roomIdFromReq = req.getRoomId() != null ? Long.valueOf(req.getRoomId()) : null;
+			if (roomIdFromReq != null) {
+				thinkingIdStr = aiclawRoomIndex.get(buildAiclawRoomKey(aiclawUid, roomIdFromReq));
+			}
+			if (thinkingIdStr == null) {
+				log.warn("thinking_delta missing thinkingId and no fallback: aiclaw={}, roomId={}", aiclawUid, roomIdFromReq);
+				return;
+			}
+			log.debug("thinking_delta thinkingId fallback resolved: aiclaw={}, roomId={}, thinkingId={}", aiclawUid, roomIdFromReq, thinkingIdStr);
 		}
 
 		ThinkingContext ctx = activeThinkings.get(thinkingIdStr);
@@ -167,12 +183,24 @@ public class ThinkingProcessor implements MessageProcessor {
 	private void handleEnd(Long aiclawUid, WSBaseReq payload) {
 		WSThinkingEnd req = JSONUtil.toBean(payload.getData(), WSThinkingEnd.class);
 		String thinkingIdStr = req.getThinkingId();
-		if (thinkingIdStr == null) {
-			log.warn("thinking_end missing thinkingId: aiclaw={}", aiclawUid);
-			return;
+
+		// fallback：thinkingId 缺失时通过 aiclawUid+roomId 反查
+		if (thinkingIdStr == null || thinkingIdStr.isBlank()) {
+			Long roomIdFromReq = req.getRoomId() != null ? Long.valueOf(req.getRoomId()) : null;
+			if (roomIdFromReq != null) {
+				thinkingIdStr = aiclawRoomIndex.get(buildAiclawRoomKey(aiclawUid, roomIdFromReq));
+			}
+			if (thinkingIdStr == null) {
+				log.warn("thinking_end missing thinkingId and no fallback: aiclaw={}, roomId={}", aiclawUid, roomIdFromReq);
+				return;
+			}
+			log.debug("thinking_end thinkingId fallback resolved: aiclaw={}, roomId={}, thinkingId={}", aiclawUid, roomIdFromReq, thinkingIdStr);
 		}
 
 		ThinkingContext ctx = activeThinkings.remove(thinkingIdStr);
+		if (ctx != null) {
+			aiclawRoomIndex.remove(buildAiclawRoomKey(ctx.getFromUid(), ctx.getRoomId()));
+		}
 		if (ctx == null) {
 			log.warn("thinking_end without active thinking: aiclaw={}, thinkingId={}", aiclawUid, thinkingIdStr);
 			return;
@@ -211,6 +239,7 @@ public class ThinkingProcessor implements MessageProcessor {
 		for (String thinkingId : timedOut) {
 			ThinkingContext ctx = activeThinkings.remove(thinkingId);
 			if (ctx != null) {
+				aiclawRoomIndex.remove(buildAiclawRoomKey(ctx.getFromUid(), ctx.getRoomId()));
 				markErrorViaHttp(thinkingId, "timeout");
 				WSThinkingEnd endResp = WSThinkingEnd.builder()
 						.thinkingId(thinkingId)
@@ -222,6 +251,10 @@ public class ThinkingProcessor implements MessageProcessor {
 				log.warn("thinking timeout: aiclaw={}, thinkingId={}", ctx.getFromUid(), thinkingId);
 			}
 		}
+	}
+
+	private String buildAiclawRoomKey(Long aiclawUid, Long roomId) {
+		return aiclawUid + ":" + roomId;
 	}
 
 	// -------- HTTP 调用 IM 服务 --------
@@ -338,6 +371,7 @@ public class ThinkingProcessor implements MessageProcessor {
 		private String thinkingId;
 		private Long fromUid;
 		private Long roomId;
+		private String triggerMsgId;
 		private List<Long> memberUids;
 		private long lastActivityTime;
 	}

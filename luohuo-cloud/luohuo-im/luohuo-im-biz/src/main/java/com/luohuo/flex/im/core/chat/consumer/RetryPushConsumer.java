@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.chat.consumer;
 
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.flex.common.cache.PassageMsgCacheKeyBuilder;
+import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.core.chat.dao.ContactDao;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
@@ -38,7 +39,17 @@ public class RetryPushConsumer implements RocketMQListener<NodePushDTO> {
     @Override
 	public void onMessage(NodePushDTO message) {
 		Map<String, Long> deviceUserMap = message.getDeviceUserMap();
+		String onlineUsersKey = PresenceCacheKeyBuilder.globalOnlineUsersKey().getKey();
+
 		deviceUserMap.values().forEach(uid -> {
+			// M4-2: 死会话保护 — 用户已下线则直接清理 in-flight，不再浪费重试
+			Boolean isOnline = cachePlusOps.zIsMember(onlineUsersKey, uid);
+			if (!Boolean.TRUE.equals(isOnline)) {
+				log.info("用户已下线，跳过重试并清理 in-flight: uid={}, hashId={}", uid, message.getHashId());
+				cachePlusOps.sRem(PassageMsgCacheKeyBuilder.build(uid), message.getHashId());
+				return;
+			}
+
 			Boolean exist = cachePlusOps.sIsMember(PassageMsgCacheKeyBuilder.build(uid), message.getHashId());
 
 			if (exist) {
