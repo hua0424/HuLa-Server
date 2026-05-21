@@ -31,6 +31,11 @@ public class ReactiveWebSocketHandler implements WebSocketHandler {
 	private SessionManager sessionManager;
 
 	@Override
+	public List<String> getSubProtocols() {
+		return List.of("aiclaw-v1");
+	}
+
+	@Override
 	public Mono<Void> handle(WebSocketSession session) {
 		// 0. 检查服务状态
 		if (!sessionManager.isAcceptingNewConnections()) {
