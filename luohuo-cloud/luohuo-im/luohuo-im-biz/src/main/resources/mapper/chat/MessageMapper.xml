@@ -11,4 +11,12 @@
         </foreach>
         GROUP BY room_id
     </select>
+
+    <select id="selectRecentMsgLengths" resultType="java.lang.Integer">
+        SELECT CHAR_LENGTH(content) AS msg_length
+        FROM im_message
+        WHERE from_uid = #{fromUid} AND room_id = #{roomId} AND status = 0
+        ORDER BY create_time DESC, id DESC
+        LIMIT #{limit}
+    </select>
 </mapper>

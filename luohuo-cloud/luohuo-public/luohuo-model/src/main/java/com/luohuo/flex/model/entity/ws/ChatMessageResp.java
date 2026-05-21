@@ -47,6 +47,11 @@ public class ChatMessageResp implements Serializable {
 		private Map<Integer, MarkItem> messageMarks;
 		@Schema(description = "aiclaw 扩展信息，仅推送给 aiclaw 用户时附加")
 		private AiclawExt aiclaw;
+		/**
+		 * REQ-004 M2-2: aiclaw 扩展字段（thinkingId、autoReply 等，不持久化，仅 WS push 透传）
+		 */
+		@Schema(description = "aiclaw 扩展字段（thinkingId、autoReply 等，WS 推送透传）")
+		private Map<String, Object> extra;
     }
 
 	@Data

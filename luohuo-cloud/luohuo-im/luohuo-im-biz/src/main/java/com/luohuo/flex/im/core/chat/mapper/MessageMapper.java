@@ -21,4 +21,9 @@ import java.util.Map;
 public interface MessageMapper extends BaseMapper<Message> {
 
 	List<Map<String, Object>> batchGetUnReadCount(@Param("uid") Long uid, @Param("contactList") Collection<Contact> contactList);
+
+	/**
+	 * REQ-004 M3: 查询发送者在房间最近 N 条消息的内容长度
+	 */
+	List<Integer> selectRecentMsgLengths(@Param("fromUid") Long fromUid, @Param("roomId") Long roomId, @Param("limit") int limit);
 }

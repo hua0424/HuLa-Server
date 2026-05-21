@@ -39,7 +39,13 @@ public class MessageSendListener {
     @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT, classes = MessageSendEvent.class, fallbackExecution = true)
     public void messageRoute(MessageSendEvent event) {
         Long msgId = event.getChatMsgSendDto().getMsgId();
-        mqProducer.sendSecureMsg(MqConstant.MSG_PUSH_OUTPUT_TOPIC, new MsgSendMessageDTO(msgId, event.getChatMsgSendDto().getUid(), ContextUtil.getTenantId()), msgId);
+        MsgSendMessageDTO dto = MsgSendMessageDTO.builder()
+                .msgId(msgId)
+                .uid(event.getChatMsgSendDto().getUid())
+                .tenantId(ContextUtil.getTenantId())
+                .extra(event.getChatMsgSendDto().getExtra())
+                .build();
+        mqProducer.sendSecureMsg(MqConstant.MSG_PUSH_OUTPUT_TOPIC, dto, msgId);
     }
 
     @TransactionalEventListener(classes = MessageSendEvent.class, fallbackExecution = true)

@@ -17,6 +17,7 @@ import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.im.core.user.dao.UserFriendDao;
 import com.luohuo.flex.im.core.user.service.AiclawService;
 import com.luohuo.flex.im.core.user.service.FriendService;
+import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
@@ -72,6 +73,7 @@ public class AiclawServiceImpl implements AiclawService {
 	private final AiclawFriendExtDao aiclawFriendExtDao;
 	private final UserSummaryCache userSummaryCache;
 	private final AiclawCryptoService cryptoService;
+	private final AiclawOwnerCache aiclawOwnerCache;
 	private final StringRedisTemplate stringRedisTemplate;
 
 	private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
@@ -119,6 +121,9 @@ public class AiclawServiceImpl implements AiclawService {
 
 		// 6. 加密生成激活 token
 		String activationToken = cryptoService.encryptActivationToken(aiclawUid, connectionToken);
+
+		// 刷新主人关系缓存
+		aiclawOwnerCache.refresh(aiclawUid);
 
 		log.info("aiclaw created: uid={}, owner={}", aiclawUid, ownerUid);
 
@@ -180,6 +185,9 @@ public class AiclawServiceImpl implements AiclawService {
 		String tokenSha256 = SecureUtil.sha256(connectionToken);
 		saveTokenCache(aiclaw.getTokenPrefix(), uid, aiclaw.getOwnerUid(),
 				tokenSha256, req.getMachineCode(), 1);
+
+		// 刷新主人关系缓存
+		aiclawOwnerCache.refresh(uid);
 
 		log.info("aiclaw activated: uid={}, machineCode={}", uid, req.getMachineCode());
 
@@ -486,6 +494,7 @@ public class AiclawServiceImpl implements AiclawService {
 		aiclawDao.updateById(update);
 
 		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), 2);
+		aiclawOwnerCache.refresh(aiclawUid);
 
 		log.info("aiclaw deactivated: uid={}", aiclawUid);
 	}
@@ -509,6 +518,7 @@ public class AiclawServiceImpl implements AiclawService {
 		aiclawDao.updateById(update);
 
 		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), 1);
+		aiclawOwnerCache.refresh(aiclawUid);
 
 		log.info("aiclaw restored: uid={}", aiclawUid);
 	}
@@ -562,6 +572,9 @@ public class AiclawServiceImpl implements AiclawService {
 
 			// 6. 清理用户缓存
 			userSummaryCache.delete(aiclawUid);
+
+			// 7. 清理主人关系缓存
+			aiclawOwnerCache.evict(aiclawUid, aiclaw.getOwnerUid());
 
 			log.info("aiclaw purged: uid={}", aiclawUid);
 		}
