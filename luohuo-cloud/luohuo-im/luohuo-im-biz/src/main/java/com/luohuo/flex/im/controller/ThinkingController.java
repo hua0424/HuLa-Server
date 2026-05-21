@@ -1,9 +1,11 @@
 package com.luohuo.flex.im.controller;
 
 import com.luohuo.basic.base.R;
+import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.mapper.GroupMemberMapper;
 import com.luohuo.flex.im.core.chat.mapper.RoomGroupMapper;
 import com.luohuo.flex.im.core.chat.service.ThinkingService;
+import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import com.luohuo.flex.model.entity.ws.WSThinkingDelta;
 import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
@@ -29,6 +31,8 @@ public class ThinkingController {
 	private GroupMemberMapper groupMemberMapper;
 	@Resource
 	private RoomGroupMapper roomGroupMapper;
+	@Resource
+	private RoomFriendDao roomFriendDao;
 
 	/**
 	 * 创建 thinking 记录
@@ -93,14 +97,23 @@ public class ThinkingController {
 	@GetMapping("/room/{roomId}/members")
 	public R<List<Long>> getRoomMembers(@PathVariable Long roomId) {
 		ensureTenantId();
+
+		// 1. 先查群聊
 		GroupResp group = roomGroupMapper.getByRoomIdIgnoreDel(roomId);
-		if (group == null || group.getGroupId() == null) {
-			return R.success(List.of());
+		if (group != null && group.getGroupId() != null) {
+			List<Long> uids = groupMemberMapper.getMemberListByGroupId(group.getGroupId())
+					.stream()
+					.map(m -> Long.valueOf(m.getUid()))
+					.collect(Collectors.toList());
+			return R.success(uids);
 		}
-		List<Long> uids = groupMemberMapper.getMemberListByGroupId(group.getGroupId())
-				.stream()
-				.map(m -> Long.valueOf(m.getUid()))
-				.collect(Collectors.toList());
-		return R.success(uids);
+
+		// 2. 私聊分支
+		RoomFriend friend = roomFriendDao.getByRoomId(roomId);
+		if (friend != null) {
+			return R.success(List.of(friend.getUid1(), friend.getUid2()));
+		}
+
+		return R.success(List.of());
 	}
 }
