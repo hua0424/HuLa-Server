@@ -40,6 +40,9 @@ public class Base64Util {
      * clientId:clientSec 解码
      */
     public static String[] extractAuthorization(String authorization) {
+        if (authorization.startsWith("Basic ")) {
+            authorization = authorization.substring(6);
+        }
         String token = base64Decoder(authorization);
         int index = token.indexOf(StrPool.COLON);
         if (index == -1) {
