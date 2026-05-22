@@ -22,7 +22,7 @@ import com.luohuo.flex.oauth.enumeration.GrantType;
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
-@Accessors(chain = true)
+@Accessors(chain = false)
 @ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = false)
 @Builder
