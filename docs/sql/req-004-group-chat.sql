@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_thinking` (
   `aiclaw_uid`     BIGINT NOT NULL COMMENT '产生 thinking 的 aiclaw uid',
   `room_id`        BIGINT NOT NULL COMMENT '所属群聊 room_id',
   `trigger_msg_id` BIGINT DEFAULT NULL COMMENT '触发本次 thinking 的消息 ID（im_message.id）',
-  `content`        TEXT NOT NULL COMMENT '完整思考文本',
+  `content`        MEDIUMTEXT NOT NULL COMMENT '完整思考文本',
   `duration_ms`    INT DEFAULT NULL COMMENT '处理耗时（毫秒），THINKING_END 时回填',
   `has_response`   TINYINT UNSIGNED DEFAULT 0 COMMENT '是否产生了回复消息：0=否，1=是',
   `is_del`         TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除',
@@ -57,5 +57,5 @@ ALTER TABLE `im_aiclaw_group_config` ADD COLUMN IF NOT EXISTS `tenant_id` BIGINT
 
 -- M4-fix: 为 im_aiclaw_thinking 增加状态跟踪字段（限流拒绝时需要 thinkingId 用于 plugin 路由）
 ALTER TABLE `im_aiclaw_thinking`
-    ADD COLUMN IF NOT EXISTS `status` TINYINT DEFAULT 0 COMMENT '状态：0=进行中 1=成功 2=错误 3=超时',
+    ADD COLUMN IF NOT EXISTS `status` TINYINT DEFAULT 0 COMMENT '状态：0=进行中 1=成功 2=错误 3=超时 4=超长截断',
     ADD COLUMN IF NOT EXISTS `error_code` VARCHAR(64) DEFAULT NULL COMMENT '错误码（rate_limit_exceeded / daily_limit_exceeded / short_reply_skip / timeout）';

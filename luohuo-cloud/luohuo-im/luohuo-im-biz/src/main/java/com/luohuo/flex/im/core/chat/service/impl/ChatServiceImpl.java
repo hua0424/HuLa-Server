@@ -88,17 +88,8 @@ public class ChatServiceImpl implements ChatService {
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
 
-        // REQ-004 M2-2: thinking_msg_rel 关联回写 + has_response 更新
-        if (request.getExtra() != null && request.getExtra().get("thinkingId") != null) {
-            Long thinkingId = Long.valueOf(request.getExtra().get("thinkingId").toString());
-            AiclawThinkingMsgRel rel = new AiclawThinkingMsgRel();
-            rel.setThinkingId(thinkingId);
-            rel.setMsgId(msgId);
-            rel.setCreateTime(LocalDateTime.now());
-            aiclawThinkingMsgRelMapper.insertIgnore(rel);
-            aiclawThinkingMapper.updateHasResponse(thinkingId, 1);
-            log.debug("thinking_msg_rel writeback: msgId={}, thinkingId={}", msgId, thinkingId);
-        }
+        // REQ-004 [S4]: thinking_msg_rel 关联回写 + has_response 更新（extra 优先，否则按 active 自动关联）
+        associateThinking(request, uid, msgId);
 
         // ISS-003: 同事务推进房间内所有成员的 contact.last_msg_id,避免写入路径与 /chat/msg/page 游标失同步
         syncContactLastMsgId(request.getRoomId(), msgId);
@@ -130,6 +121,47 @@ public class ChatServiceImpl implements ChatService {
         }
         return msgId;
     }
+
+	/**
+	 * REQ-004 [S4]: 将本次发送的消息关联到对应的 thinking 记录。
+	 * <p>
+	 * thinkingId 解析优先级：
+	 * <ol>
+	 *   <li>extra.thinkingId（plugin 显式回传）→ source=extra（覆盖优先）</li>
+	 *   <li>否则按 (aiclawUid=uid, roomId) 反查最近一条进行中的 thinking → source=auto</li>
+	 * </ol>
+	 * 二者都解析不到则静默跳过（迟到丢关联路径）。
+	 *
+	 * @param request 发送请求
+	 * @param uid     消息发送者（即 aiclaw uid）
+	 * @param msgId   已落库的消息 ID
+	 */
+	private void associateThinking(ChatMessageReq request, Long uid, Long msgId) {
+		Long thinkingId = null;
+		String source = null;
+		if (request.getExtra() != null && request.getExtra().get("thinkingId") != null) {
+			thinkingId = Long.valueOf(request.getExtra().get("thinkingId").toString());
+			source = "extra";
+		} else {
+			thinkingId = aiclawThinkingMapper.selectActiveThinkingId(uid, request.getRoomId());
+			if (thinkingId != null) {
+				source = "auto";
+			}
+		}
+
+		if (thinkingId == null) {
+			log.debug("no active thinking, skip association: msgId={}, roomId={}", msgId, request.getRoomId());
+			return;
+		}
+
+		AiclawThinkingMsgRel rel = new AiclawThinkingMsgRel();
+		rel.setThinkingId(thinkingId);
+		rel.setMsgId(msgId);
+		rel.setCreateTime(LocalDateTime.now());
+		aiclawThinkingMsgRelMapper.insertIgnore(rel);
+		aiclawThinkingMapper.updateHasResponse(thinkingId, 1);
+		log.debug("thinking_msg_rel writeback: msgId={}, thinkingId={}, source={}", msgId, thinkingId, source);
+	}
 
 	/**
 	 * aichatoverview#3: aiclaw 房间成员校验。

@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.HandlerMapping;
 import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 import org.springframework.web.reactive.socket.WebSocketHandler;
+import org.springframework.web.reactive.socket.server.support.HandshakeWebSocketService;
+import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
+import org.springframework.web.reactive.socket.server.upgrade.ReactorNettyRequestUpgradeStrategy;
 
 import java.util.List;
 import java.util.Map;
@@ -54,5 +57,28 @@ class NettyServerConfigTest {
 		assertThat(registered.getSubProtocols())
 				.as("HandlerMapping 中的处理器必须保留 getSubProtocols()，用于握手协商 Sec-WebSocket-Protocol")
 				.containsExactlyElementsOf(EXPECTED_SUBPROTOCOLS);
+	}
+
+	@Test
+	@DisplayName("webSocketHandlerAdapter 必须把 WS 帧上限抬到 1 MB（REQ-004 S4：THINKING_END 单帧全文 >64KB）")
+	void webSocketHandlerAdapterRaisesMaxFramePayloadLengthTo1Mb() {
+		// given
+		ReactiveWebSocketHandler realHandler = mock(ReactiveWebSocketHandler.class);
+		NettyServerConfig config = new NettyServerConfig(realHandler);
+
+		// when: 构建 WebSocket 适配器
+		WebSocketHandlerAdapter adapter = config.webSocketHandlerAdapter();
+
+		// then: 适配器经 HandshakeWebSocketService 装配了配置 1MB 的 ReactorNettyRequestUpgradeStrategy
+		assertThat(adapter.getWebSocketService()).isInstanceOf(HandshakeWebSocketService.class);
+		HandshakeWebSocketService service = (HandshakeWebSocketService) adapter.getWebSocketService();
+		assertThat(service.getUpgradeStrategy()).isInstanceOf(ReactorNettyRequestUpgradeStrategy.class);
+		ReactorNettyRequestUpgradeStrategy strategy =
+				(ReactorNettyRequestUpgradeStrategy) service.getUpgradeStrategy();
+
+		// 核心断言：握手帧上限 = 1 MB（默认仅 65536）。
+		assertThat(strategy.getWebsocketServerSpec().maxFramePayloadLength())
+				.as("WS 帧上限必须为 1 MB，否则 THINKING_END 单帧全文 >64KB 会被传输层拒绝")
+				.isEqualTo(1024 * 1024);
 	}
 }

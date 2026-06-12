@@ -8,7 +8,11 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.reactive.HandlerMapping;
 import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 import org.springframework.web.reactive.socket.WebSocketHandler;
+import org.springframework.web.reactive.socket.server.RequestUpgradeStrategy;
+import org.springframework.web.reactive.socket.server.support.HandshakeWebSocketService;
 import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
+import org.springframework.web.reactive.socket.server.upgrade.ReactorNettyRequestUpgradeStrategy;
+import reactor.netty.http.server.WebsocketServerSpec;
 
 import java.time.Duration;
 import java.util.Map;
@@ -29,9 +33,27 @@ public class NettyServerConfig {
 		this.webSocketHandler = webSocketHandler;
 	}
 
+	/**
+	 * WebSocket 帧上限：1 MB（默认仅 64KB）。
+	 *
+	 * <p>背景（REQ-004 S4）：THINKING_END 单帧携带完整思考全文，>64KB 会被
+	 * Reactor Netty 传输层直接拒绝，思考无法 finalize（行 status 卡在 0），
+	 * 200KB 截断逻辑永远到不了。这里把握手帧上限抬到 1 MB。
+	 *
+	 * <p>注意：maxFramePayloadLength 是 <b>全局握手级</b>限制——WebFlux 无法按
+	 * 路径区分，因此这会抬高 <b>所有</b> WS 客户端（含前端聊天 client）的帧上限。
+	 * 选 1 MB 是因为 JSON 转义可能把 200KB 思考全文最多膨胀约 2 倍；DoS 风险可接受，
+	 * 因为所有 WS 客户端都已在网关完成鉴权。
+	 *
+	 * <p>注意：此处只配置帧上限，子协议（aiclaw-v1）仍由 ReactiveWebSocketHandler
+	 * 的 getSubProtocols() 在握手时注入（见 buildSpec(subProtocol)），不受影响。
+	 */
 	@Bean
 	public WebSocketHandlerAdapter webSocketHandlerAdapter() {
-		return new WebSocketHandlerAdapter();
+		RequestUpgradeStrategy upgradeStrategy = new ReactorNettyRequestUpgradeStrategy(
+				() -> WebsocketServerSpec.builder().maxFramePayloadLength(1024 * 1024));
+		HandshakeWebSocketService webSocketService = new HandshakeWebSocketService(upgradeStrategy);
+		return new WebSocketHandlerAdapter(webSocketService);
 	}
 
 	@Bean

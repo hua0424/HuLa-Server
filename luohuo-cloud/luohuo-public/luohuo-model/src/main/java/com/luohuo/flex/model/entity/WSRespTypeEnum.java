@@ -70,7 +70,7 @@ public enum WSRespTypeEnum {
 
 	// REQ-004: thinking 事件 + 群配置变更
 	THINKING_START("thinkingStart", "thinking 开始", WSThinkingStart.class),
-	THINKING_DELTA("thinkingDelta", "thinking 增量", WSThinkingDelta.class),
+	THINKING_DELTA("thinkingDelta", "thinking 增量", WSThinkingDelta.class), // S4 起废弃，不再广播、不复用
 	THINKING_END("thinkingEnd", "thinking 结束", WSThinkingEnd.class),
 	GROUP_CONFIG_CHANGE("groupConfigChange", "群配置变更", WSGroupConfigChange.class),
 

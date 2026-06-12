@@ -29,4 +29,7 @@ public class WSThinkingEnd {
 
 	@Schema(description = "房间 ID（String 避免 JS 精度丢失）")
 	private String roomId;
+
+	@Schema(description = "完整思考文本（S4 起 END 携带全文）")
+	private String content;
 }
