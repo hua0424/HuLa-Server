@@ -6,6 +6,13 @@ server:
 spring:
   cloud:
     gateway:
+      # REQ-004 S4：WS 代理帧上限 1MB（默认 64KB）。aiclaw THINKING_END 单帧携带完整思考全文，
+      # >64KB 会被网关 WS 代理层（reactor-netty WebSocketClient）拒收，先于 ws-server 丢帧。
+      # 与 ws-server 的 maxFramePayloadLength 须同步抬高，否则 200KB 截断不可达。全局握手级、
+      # 所有 WS 客户端共享；客户端经网关鉴权，DoS 风险可接受。
+      httpclient:
+        websocket:
+          max-frame-payload-length: 1048576
       routes:
         - id: oauth
           uri: lb://luohuo-oauth-server
