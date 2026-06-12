@@ -8,7 +8,6 @@ import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
 import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
-import com.luohuo.flex.model.entity.ws.WSThinkingDelta;
 import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 import com.luohuo.flex.model.entity.ws.WSThinkingStart;
 import jakarta.annotation.Resource;
@@ -55,25 +54,24 @@ public class ThinkingController {
 	}
 
 	/**
-	 * 追加 delta 内容
-	 */
-	@PostMapping("/delta")
-	public R<Void> delta(@RequestBody WSThinkingDelta req) {
-		ensureTenantId();
-		Long thinkingId = Long.valueOf(req.getThinkingId());
-		thinkingService.appendDelta(thinkingId, req.getChunk(), req.getSeq());
-		return R.success();
-	}
-
-	/**
-	 * 结束 thinking 记录
+	 * 结束 thinking 记录（S4 起 END 携带全文，一次性落库）
 	 */
 	@PostMapping("/end")
 	public R<Void> end(@RequestBody WSThinkingEnd req) {
 		ensureTenantId();
 		Long thinkingId = Long.valueOf(req.getThinkingId());
-		thinkingService.finalize(thinkingId, req.getDurationMs());
+		thinkingService.finalize(thinkingId, req.getContent(), req.getDurationMs(), req.getStatus(), req.getError());
 		return R.success();
+	}
+
+	/**
+	 * 反查指定 aiclaw 在指定房间内最近一条进行中（status=0）的 thinking id。
+	 * 供 ws-biz 跨重启场景（内存索引丢失）兜底解析 END 的 thinkingId。
+	 */
+	@PostMapping("/resolve-active")
+	public R<Long> resolveActive(@RequestParam Long aiclawUid, @RequestParam Long roomId) {
+		ensureTenantId();
+		return R.success(thinkingService.resolveActiveThinking(aiclawUid, roomId));
 	}
 
 	/**

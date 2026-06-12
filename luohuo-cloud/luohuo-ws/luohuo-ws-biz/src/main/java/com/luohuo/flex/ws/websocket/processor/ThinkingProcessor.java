@@ -2,7 +2,6 @@ package com.luohuo.flex.ws.websocket.processor;
 
 import cn.hutool.json.JSONUtil;
 import com.luohuo.flex.model.entity.WsBaseResp;
-import com.luohuo.flex.model.entity.ws.WSThinkingDelta;
 import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 import com.luohuo.flex.model.entity.ws.WSThinkingStart;
 import com.luohuo.flex.model.enums.WSReqTypeEnum;
@@ -29,7 +28,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Thinking 消息处理器
- * 处理 aiclaw plugins 发送的 THINKING_START / THINKING_DELTA / THINKING_END
+ * 处理 aiclaw plugins 发送的 THINKING_START / THINKING_END（S4 起 DELTA 已废弃）
  * 落库通过 HTTP 调用 IM 服务，推送通过 PushService 广播给群成员
  */
 @Slf4j
@@ -64,7 +63,6 @@ public class ThinkingProcessor implements MessageProcessor {
 	@Override
 	public boolean supports(WSBaseReq req) {
 		return WSReqTypeEnum.THINKING_START.eq(req.getType())
-				|| WSReqTypeEnum.THINKING_DELTA.eq(req.getType())
 				|| WSReqTypeEnum.THINKING_END.eq(req.getType());
 	}
 
@@ -76,7 +74,6 @@ public class ThinkingProcessor implements MessageProcessor {
 		}
 		switch (type) {
 			case THINKING_START -> handleStart(uid, payload);
-			case THINKING_DELTA -> handleDelta(uid, payload);
 			case THINKING_END -> handleEnd(uid, payload);
 			default -> log.warn("ThinkingProcessor: unexpected type {}", payload.getType());
 		}
@@ -143,52 +140,25 @@ public class ThinkingProcessor implements MessageProcessor {
 				aiclawUid, thinkingIdStr, roomId, memberUids.size());
 	}
 
-	private void handleDelta(Long aiclawUid, WSBaseReq payload) {
-		WSThinkingDelta req = JSONUtil.toBean(payload.getData(), WSThinkingDelta.class);
-		String thinkingIdStr = req.getThinkingId();
-
-		// fallback：thinkingId 缺失时通过 aiclawUid+roomId 反查
-		if (thinkingIdStr == null || thinkingIdStr.isBlank()) {
-			Long roomIdFromReq = req.getRoomId() != null ? Long.valueOf(req.getRoomId()) : null;
-			if (roomIdFromReq != null) {
-				thinkingIdStr = aiclawRoomIndex.get(buildAiclawRoomKey(aiclawUid, roomIdFromReq));
-			}
-			if (thinkingIdStr == null) {
-				log.warn("thinking_delta missing thinkingId and no fallback: aiclaw={}, roomId={}", aiclawUid, roomIdFromReq);
-				return;
-			}
-			log.debug("thinking_delta thinkingId fallback resolved: aiclaw={}, roomId={}, thinkingId={}", aiclawUid, roomIdFromReq, thinkingIdStr);
-		}
-
-		ThinkingContext ctx = activeThinkings.get(thinkingIdStr);
-		if (ctx == null) {
-			log.warn("thinking_delta without active thinking: aiclaw={}, thinkingId={}", aiclawUid, thinkingIdStr);
-			return;
-		}
-		ctx.setLastActivityTime(System.currentTimeMillis());
-
-		// 1. 调用 IM 服务追加 delta
-		appendDeltaViaHttp(req);
-
-		// 2. 广播 thinkingDelta
-		WSThinkingDelta deltaResp = WSThinkingDelta.builder()
-				.thinkingId(thinkingIdStr)
-				.chunk(req.getChunk())
-				.seq(req.getSeq())
-				.roomId(String.valueOf(ctx.getRoomId()))
-				.build();
-		pushToMembers("thinkingDelta", deltaResp, ctx.getMemberUids(), aiclawUid);
-	}
-
 	private void handleEnd(Long aiclawUid, WSBaseReq payload) {
 		WSThinkingEnd req = JSONUtil.toBean(payload.getData(), WSThinkingEnd.class);
 		String thinkingIdStr = req.getThinkingId();
+		Long roomIdFromReq = req.getRoomId() != null ? Long.valueOf(req.getRoomId()) : null;
 
-		// fallback：thinkingId 缺失时通过 aiclawUid+roomId 反查
+		// fallback：thinkingId 缺失时反查。END 不携带 triggerMsgId，故 (aiclaw, room) 即有效键
+		// （并发守卫下唯一）。先走内存索引快路径，再走跨重启 DB 兜底。
 		if (thinkingIdStr == null || thinkingIdStr.isBlank()) {
-			Long roomIdFromReq = req.getRoomId() != null ? Long.valueOf(req.getRoomId()) : null;
 			if (roomIdFromReq != null) {
 				thinkingIdStr = aiclawRoomIndex.get(buildAiclawRoomKey(aiclawUid, roomIdFromReq));
+			}
+			// 跨重启场景：内存 activeThinkings + aiclawRoomIndex 均已丢失，回退到 DB 反查 status=0 最新记录
+			if (thinkingIdStr == null && roomIdFromReq != null) {
+				Long resolved = resolveActiveThinkingViaHttp(aiclawUid, roomIdFromReq);
+				if (resolved != null) {
+					thinkingIdStr = String.valueOf(resolved);
+					log.debug("thinking_end thinkingId DB fallback resolved: aiclaw={}, roomId={}, thinkingId={}",
+							aiclawUid, roomIdFromReq, thinkingIdStr);
+				}
 			}
 			if (thinkingIdStr == null) {
 				log.warn("thinking_end missing thinkingId and no fallback: aiclaw={}, roomId={}", aiclawUid, roomIdFromReq);
@@ -201,25 +171,36 @@ public class ThinkingProcessor implements MessageProcessor {
 		if (ctx != null) {
 			aiclawRoomIndex.remove(buildAiclawRoomKey(ctx.getFromUid(), ctx.getRoomId()));
 		}
-		if (ctx == null) {
-			log.warn("thinking_end without active thinking: aiclaw={}, thinkingId={}", aiclawUid, thinkingIdStr);
-			return;
-		}
 
-		// 1. 调用 IM 服务 finalize
+		// ctx 为空（如跨重启 DB 兜底）时仍需 finalize 落库 + 广播；roomId 取自 req
+		req.setThinkingId(thinkingIdStr);
+
+		// 1. 调用 IM 服务 finalize（content 随 req 整体透传至 /thinking/end）
 		finalizeViaHttp(req);
 
-		// 2. 广播 thinkingEnd
+		// 2. 广播 thinkingEnd（仅状态，绝不携带 content）
+		Long broadcastRoomId = ctx != null ? ctx.getRoomId() : roomIdFromReq;
 		WSThinkingEnd endResp = WSThinkingEnd.builder()
 				.thinkingId(thinkingIdStr)
 				.durationMs(req.getDurationMs())
 				.status(req.getStatus())
 				.error(req.getError())
-				.roomId(String.valueOf(ctx.getRoomId()))
+				.roomId(broadcastRoomId != null ? String.valueOf(broadcastRoomId) : null)
 				.build();
-		pushToMembers("thinkingEnd", endResp, ctx.getMemberUids(), aiclawUid);
+		// ctx 存在走内存成员列表；ctx 为空（跨重启：内存丢失）时重建成员列表，
+		// 否则只发给 aiclawUid 会导致看过 thinkingStart 的真人成员的 thinking 指示器永久挂起。
+		// 守卫：roomId 为空或 HTTP 查询结果为空时回退 List.of(aiclawUid)，避免 NPE / 空推送。
+		List<Long> members;
+		if (ctx != null) {
+			members = ctx.getMemberUids();
+		} else {
+			List<Long> rebuilt = roomIdFromReq != null ? queryRoomMembersViaHttp(roomIdFromReq) : null;
+			members = (rebuilt != null && !rebuilt.isEmpty()) ? rebuilt : List.of(aiclawUid);
+		}
+		pushToMembers("thinkingEnd", endResp, members, aiclawUid);
 
-		log.debug("thinking_end: aiclaw={}, thinkingId={}, status={}", aiclawUid, thinkingIdStr, req.getStatus());
+		log.debug("thinking_end: aiclaw={}, thinkingId={}, status={}, ctxPresent={}",
+				aiclawUid, thinkingIdStr, req.getStatus(), ctx != null);
 	}
 
 	/**
@@ -278,18 +259,26 @@ public class ThinkingProcessor implements MessageProcessor {
 		}
 	}
 
-	private void appendDeltaViaHttp(WSThinkingDelta req) {
+	/**
+	 * 跨重启兜底：通过 IM HTTP 反查 (aiclawUid, roomId) 最近一条进行中（status=0）的 thinkingId。
+	 * 采用与 createThinkingViaHttp 相同的 Hutool 同步 HTTP 风格。
+	 */
+	private Long resolveActiveThinkingViaHttp(Long aiclawUid, Long roomId) {
 		String url = resolveImServiceUrl();
-		if (url == null) return;
+		if (url == null) return null;
 
-		webClient.post()
-				.uri(url + "/thinking/delta")
-				.contentType(MediaType.APPLICATION_JSON)
-				.bodyValue(req)
-				.retrieve()
-				.bodyToMono(String.class)
-				.doOnError(err -> log.error("appendDeltaViaHttp failed: {}", err.getMessage()))
-				.subscribe();
+		try {
+			String resp = cn.hutool.http.HttpRequest.post(url + "/thinking/resolve-active")
+					.form("aiclawUid", aiclawUid)
+					.form("roomId", roomId)
+					.execute()
+					.body();
+			cn.hutool.json.JSONObject json = JSONUtil.parseObj(resp);
+			return json.getLong("data");
+		} catch (Exception e) {
+			log.error("resolveActiveThinkingViaHttp failed: aiclaw={}, roomId={}", aiclawUid, roomId, e);
+			return null;
+		}
 	}
 
 	private void finalizeViaHttp(WSThinkingEnd req) {
