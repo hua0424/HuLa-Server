@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_group_config` (
   `aiclaw_uid`            BIGINT NOT NULL COMMENT 'aiclaw 的 uid',
   `room_id`               BIGINT NOT NULL COMMENT '群聊 room_id',
   `rate_limit_per_minute` INT UNSIGNED DEFAULT 10 COMMENT '频率限制（条/分钟），0=无限制',
-  `mention_required`      TINYINT UNSIGNED DEFAULT 0 COMMENT '是否需要 @ 触发：0=否，1=是',
+  `mention_required`      TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否需要 @ 触发：0=否，1=是',
   `daily_limit`           INT UNSIGNED DEFAULT 1000 COMMENT '每日发言上限',
   `respond_to_ai`         TINYINT UNSIGNED DEFAULT 1 COMMENT '是否响应其他 aiclaw：0=否，1=是',
   `short_reply_threshold` INT UNSIGNED DEFAULT 10 COMMENT '短回复字符阈值',

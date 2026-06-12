@@ -67,7 +67,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 					.aiclawUid(aiclawUid)
 					.roomId(roomId)
 					.rateLimitPerMinute(10)
-					.mentionRequired(0)
+					.mentionRequired(1)
 					.dailyLimit(1000)
 					.respondToAi(1)
 					.build();

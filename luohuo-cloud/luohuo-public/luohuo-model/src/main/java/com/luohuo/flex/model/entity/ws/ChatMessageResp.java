@@ -37,6 +37,8 @@ public class ChatMessageResp implements Serializable {
         private String id;
         @Schema(description ="房间id")
         private String roomId;
+        @Schema(description ="房间类型：1=群聊,2=单聊")
+        private Integer roomType;
         @Schema(description ="消息发送时间")
         private LocalDateTime sendTime;
         @Schema(description ="消息类型 1正常文本 2.撤回消息")
