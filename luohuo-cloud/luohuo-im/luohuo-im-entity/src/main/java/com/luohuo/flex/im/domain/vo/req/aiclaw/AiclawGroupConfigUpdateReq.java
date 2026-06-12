@@ -42,12 +42,4 @@ public class AiclawGroupConfigUpdateReq {
 	@Range(min = 0, max = 1)
 	@Schema(description = "是否响应其他 aiclaw：0=否，1=是")
 	private Integer respondToAi;
-
-	@Min(0)
-	@Schema(description = "短回复字符阈值")
-	private Integer shortReplyThreshold;
-
-	@Min(0)
-	@Schema(description = "短回复检查最近 N 条")
-	private Integer shortReplyLookback;
 }

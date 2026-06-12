@@ -4,6 +4,7 @@ import com.luohuo.basic.base.R;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.mapper.GroupMemberMapper;
 import com.luohuo.flex.im.core.chat.mapper.RoomGroupMapper;
+import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
 import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
@@ -28,6 +29,8 @@ public class ThinkingController {
 	@Resource
 	private ThinkingService thinkingService;
 	@Resource
+	private AiclawRoomMembershipService aiclawRoomMembershipService;
+	@Resource
 	private GroupMemberMapper groupMemberMapper;
 	@Resource
 	private RoomGroupMapper roomGroupMapper;
@@ -43,6 +46,9 @@ public class ThinkingController {
 		Long aiclawUid = Long.valueOf(req.getFromUid());
 		Long roomId = Long.valueOf(req.getRoomId());
 		Long triggerMsgId = req.getTriggerMsgId() != null ? Long.valueOf(req.getTriggerMsgId()) : null;
+
+		// aichatoverview#3: aiclaw 房间成员校验（委托共享 Service）
+		aiclawRoomMembershipService.checkMembership(aiclawUid, roomId);
 
 		Long thinkingId = thinkingService.create(aiclawUid, roomId, triggerMsgId);
 		return R.success(thinkingId);

@@ -70,8 +70,6 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 					.mentionRequired(0)
 					.dailyLimit(1000)
 					.respondToAi(1)
-					.shortReplyThreshold(10)
-					.shortReplyLookback(3)
 					.build();
 		} else {
 			resp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
@@ -127,14 +125,12 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		stringRedisTemplate.opsForValue().set(
 				buildConfigCacheKey(aiclawUid, roomId), JSONUtil.toJsonStr(cachedResp), CONFIG_CACHE_TTL);
 
-		// REQ-004 M3-5: WS 广播配置变更到群内所有成员
+		// aichatoverview#3: WS 广播配置变更到群内所有成员
 		WSGroupConfigChange.ConfigDTO configDTO = WSGroupConfigChange.ConfigDTO.builder()
 				.rateLimitPerMinute(config.getRateLimitPerMinute())
 				.mentionRequired(config.getMentionRequired())
 				.dailyLimit(config.getDailyLimit())
 				.respondToAi(config.getRespondToAi())
-				.shortReplyThreshold(config.getShortReplyThreshold())
-				.shortReplyLookback(config.getShortReplyLookback())
 				.build();
 		WSGroupConfigChange change = WSGroupConfigChange.builder()
 				.aiclawUid(String.valueOf(aiclawUid))
@@ -162,11 +158,6 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		if (request.getRespondToAi() != null) {
 			config.setRespondToAi(request.getRespondToAi());
 		}
-		if (request.getShortReplyThreshold() != null) {
-			config.setShortReplyThreshold(request.getShortReplyThreshold());
-		}
-		if (request.getShortReplyLookback() != null) {
-			config.setShortReplyLookback(request.getShortReplyLookback());
-		}
+		// aichatoverview#3: shortReplyThreshold / shortReplyLookback 已从 UpdateReq 移除，不再处理
 	}
 }

@@ -39,17 +39,12 @@ import com.luohuo.flex.im.core.chat.service.strategy.mark.MsgMarkFactory;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.RecallMsgHandler;
-import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
-import com.luohuo.flex.im.core.chat.mapper.MessageMapper;
+import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
-import com.luohuo.flex.im.core.user.service.impl.PushService;
-import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.entity.AiclawThinkingMsgRel;
 import com.luohuo.flex.im.enums.UserTypeEnum;
-import com.luohuo.flex.model.entity.WsBaseResp;
-import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
@@ -78,19 +73,17 @@ public class ChatServiceImpl implements ChatService {
     private AiclawThinkingMapper aiclawThinkingMapper;
     private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
     private final UserCache userCache;
-    private final AiclawGroupConfigMapper aiclawGroupConfigMapper;
-    private final PushService pushService;
-    private final MessageMapper messageMapper;
+    private final AiclawRoomMembershipService aiclawRoomMembershipService;
     /**
      * 发送消息
      */
     @Override
     @Transactional
     public Long sendMsg(ChatMessageReq request, Long uid) {
-        check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid);
+        // aichatoverview#3: aiclaw 房间成员校验（先于 checkDeFriend，确保非成员抛正确异常）
+        checkAiclawRoomMembership(request, uid);
 
-        // REQ-004 M3: 短回复 skip 检查（仅 aiclaw 在群聊中）
-        checkShortReplySkip(request, uid);
+        check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid);
 
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
@@ -139,68 +132,16 @@ public class ChatServiceImpl implements ChatService {
     }
 
 	/**
-	 * REQ-004 M3: 短回复 skip 检查（仅 aiclaw 在群聊中）。
-	 * 在 {@link #checkAndSaveMsg} 之前执行，避免短回复落库。
-	 * 若触发 skip 且存在 thinkingId，先 WS 广播 thinkingEnd(error=short_reply_skip) 再抛异常。
+	 * aichatoverview#3: aiclaw 房间成员校验。
+	 * 仅 aiclaw 发送者需要校验，委托 AiclawRoomMembershipService 统一执行。
+	 * 普通用户绕过。
 	 */
-	private void checkShortReplySkip(ChatMessageReq request, Long uid) {
-		// 1. 检查发送者是否为 aiclaw
+	private void checkAiclawRoomMembership(ChatMessageReq request, Long uid) {
 		User sender = userCache.get(uid);
 		if (sender == null || !UserTypeEnum.AICLAW.getValue().equals(sender.getUserType())) {
-			return;
+			return; // 普通用户绕过
 		}
-
-		// 2. 仅群聊检查
-		Room room = roomCache.get(request.getRoomId());
-		if (room == null || !room.isRoomGroup()) {
-			return;
-		}
-
-		// 3. 查询群配置（无记录用默认值）
-		AiclawGroupConfig config = aiclawGroupConfigMapper.selectOne(
-				new LambdaQueryWrapper<AiclawGroupConfig>()
-						.eq(AiclawGroupConfig::getAiclawUid, uid)
-						.eq(AiclawGroupConfig::getRoomId, request.getRoomId()));
-
-		int threshold = config != null ? config.getShortReplyThreshold() : 10;
-		int lookback = config != null ? config.getShortReplyLookback() : 3;
-
-		if (lookback <= 0 || threshold <= 0) {
-			return; // 未启用
-		}
-
-		// 4. 查询该 aiclaw 在该群最近 N 条消息长度
-		List<Integer> recentLengths = messageMapper.selectRecentMsgLengths(uid, request.getRoomId(), lookback);
-
-		// 5. 判断：最近 N 条全部短于阈值
-		if (recentLengths.size() >= lookback &&
-				recentLengths.stream().allMatch(len -> len < threshold)) {
-
-			// 6. 有 thinkingId 时推 thinkingEnd(error=short_reply_skip) 给群成员
-			if (request.getExtra() != null && request.getExtra().get("thinkingId") != null) {
-				String thinkingId = request.getExtra().get("thinkingId").toString();
-				List<Long> memberUids = groupMemberCache.getMemberUidList(request.getRoomId());
-				if (memberUids != null && !memberUids.isEmpty()) {
-					WSThinkingEnd endResp = WSThinkingEnd.builder()
-							.thinkingId(thinkingId)
-							.status("error")
-							.error("short_reply_skip")
-							.roomId(String.valueOf(request.getRoomId()))
-							.build();
-					WsBaseResp<WSThinkingEnd> wsResp = new WsBaseResp<>();
-					wsResp.setType("thinkingEnd");
-					wsResp.setData(endResp);
-					pushService.sendPushMsg(wsResp, memberUids, uid);
-				}
-				log.warn("short_reply_skip with thinkingEnd broadcast: aiclaw={}, roomId={}, thinkingId={}, recentLengths={}",
-						uid, request.getRoomId(), thinkingId, recentLengths);
-			} else {
-				log.warn("short_reply_skip: aiclaw={}, roomId={}, recentLengths={}",
-						uid, request.getRoomId(), recentLengths);
-			}
-
-			throw new BizException("short_reply_skip");
-		}
+		aiclawRoomMembershipService.checkMembership(uid, request.getRoomId());
 	}
 
     /**
