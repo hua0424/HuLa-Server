@@ -34,19 +34,15 @@ public class NettyServerConfig {
 		return new WebSocketHandlerAdapter();
 	}
 
-	/**
-	 * 消息进来之后直接转发给响应式消息处理器
-	 * @return
-	 */
-	@Bean
-	public WebSocketHandler messageWebSocketHandler() {
-		return session -> webSocketHandler.handle(session);
-	}
-
 	@Bean
 	public HandlerMapping webSocketMapping() {
-		// 配置连接地址
-		Map<String, WebSocketHandler> map = Map.of("/ws", messageWebSocketHandler());
+		// 直接注册真实处理器 ReactiveWebSocketHandler，而非 lambda 包装。
+		// lambda (session -> webSocketHandler.handle(session)) 只委托 handle()，
+		// 会继承 WebSocketHandler 默认空的 getSubProtocols()，导致 WebFlux
+		// HandshakeWebSocketService 协商不出子协议，握手响应缺失 Sec-WebSocket-Protocol，
+		// 网关下游 client（请求 aiclaw-v1）以 1002 拒绝并重连。
+		// 注册真实 handler 可保留其 getSubProtocols()=[aiclaw-v1]，正常协商子协议。
+		Map<String, WebSocketHandler> map = Map.of("/ws", webSocketHandler);
 		SimpleUrlHandlerMapping handlerMapping = new SimpleUrlHandlerMapping();
 		handlerMapping.setUrlMap(map);
 		handlerMapping.setOrder(-1); // 最高优先级
