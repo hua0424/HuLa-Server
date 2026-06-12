@@ -41,6 +41,7 @@ import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.RecallMsgHandler;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
+import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
 import com.luohuo.flex.im.domain.entity.AiclawThinkingMsgRel;
 import com.luohuo.flex.im.enums.UserTypeEnum;
@@ -72,6 +73,7 @@ public class ChatServiceImpl implements ChatService {
     private AiclawThinkingMapper aiclawThinkingMapper;
     private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
     private final UserCache userCache;
+    private final AiclawRoomMembershipService aiclawRoomMembershipService;
     /**
      * 发送消息
      */
@@ -131,39 +133,15 @@ public class ChatServiceImpl implements ChatService {
 
 	/**
 	 * aichatoverview#3: aiclaw 房间成员校验。
-	 * 仅 aiclaw 发送者需要校验：群聊检查 GroupMemberCache，私聊检查 RoomFriendDao。
-	 * 非成员抛 BizException。
+	 * 仅 aiclaw 发送者需要校验，委托 AiclawRoomMembershipService 统一执行。
+	 * 普通用户绕过。
 	 */
 	private void checkAiclawRoomMembership(ChatMessageReq request, Long uid) {
-		// 1. 检查发送者是否为 aiclaw
 		User sender = userCache.get(uid);
 		if (sender == null || !UserTypeEnum.AICLAW.getValue().equals(sender.getUserType())) {
 			return; // 普通用户绕过
 		}
-
-		// 2. 按房间类型校验
-		Room room = roomCache.get(request.getRoomId());
-		if (room == null) {
-			return; // 房间不存在，交给 checkDeFriend 处理
-		}
-
-		if (room.isRoomGroup()) {
-			// 群聊：检查 aiclaw 是否在群成员列表中
-			List<Long> memberUids = groupMemberCache.getMemberUidList(request.getRoomId());
-			if (memberUids == null || !memberUids.contains(uid)) {
-				throw new BizException("非房间成员，无法发送消息");
-			}
-		} else if (room.isRoomFriend()) {
-			// 私聊：检查 aiclaw 是否是 uid1 或 uid2
-			RoomFriend roomFriend = roomFriendDao.getByRoomId(request.getRoomId());
-			if (roomFriend == null) {
-				throw new BizException("非房间成员，无法发送消息");
-			}
-			boolean isMember = uid.equals(roomFriend.getUid1()) || uid.equals(roomFriend.getUid2());
-			if (!isMember) {
-				throw new BizException("非房间成员，无法发送消息");
-			}
-		}
+		aiclawRoomMembershipService.checkMembership(uid, request.getRoomId());
 	}
 
     /**

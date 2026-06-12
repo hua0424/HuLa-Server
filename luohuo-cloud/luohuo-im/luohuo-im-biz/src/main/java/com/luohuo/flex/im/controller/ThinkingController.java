@@ -1,10 +1,10 @@
 package com.luohuo.flex.im.controller;
 
 import com.luohuo.basic.base.R;
-import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.mapper.GroupMemberMapper;
 import com.luohuo.flex.im.core.chat.mapper.RoomGroupMapper;
+import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
 import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
@@ -29,6 +29,8 @@ public class ThinkingController {
 	@Resource
 	private ThinkingService thinkingService;
 	@Resource
+	private AiclawRoomMembershipService aiclawRoomMembershipService;
+	@Resource
 	private GroupMemberMapper groupMemberMapper;
 	@Resource
 	private RoomGroupMapper roomGroupMapper;
@@ -45,8 +47,8 @@ public class ThinkingController {
 		Long roomId = Long.valueOf(req.getRoomId());
 		Long triggerMsgId = req.getTriggerMsgId() != null ? Long.valueOf(req.getTriggerMsgId()) : null;
 
-		// aichatoverview#3: aiclaw 房间成员校验
-		checkAiclawRoomMembership(aiclawUid, roomId);
+		// aichatoverview#3: aiclaw 房间成员校验（委托共享 Service）
+		aiclawRoomMembershipService.checkMembership(aiclawUid, roomId);
 
 		Long thinkingId = thinkingService.create(aiclawUid, roomId, triggerMsgId);
 		return R.success(thinkingId);
@@ -83,39 +85,6 @@ public class ThinkingController {
 		Long thinkingId = Long.valueOf(req.getThinkingId());
 		thinkingService.markError(thinkingId, req.getError());
 		return R.success();
-	}
-
-	/**
-	 * aichatoverview#3: aiclaw 房间成员校验。
-	 * 群聊检查 groupMemberMapper，私聊检查 RoomFriendDao。
-	 * 非成员抛 BizException。
-	 */
-	private void checkAiclawRoomMembership(Long aiclawUid, Long roomId) {
-		// 1. 先查群聊
-		GroupResp group = roomGroupMapper.getByRoomIdIgnoreDel(roomId);
-		if (group != null && group.getGroupId() != null) {
-			List<Long> uids = groupMemberMapper.getMemberListByGroupId(group.getGroupId())
-					.stream()
-					.map(m -> Long.valueOf(m.getUid()))
-					.collect(Collectors.toList());
-			if (!uids.contains(aiclawUid)) {
-				throw new BizException("非房间成员，无法创建 thinking");
-			}
-			return;
-		}
-
-		// 2. 私聊分支
-		RoomFriend friend = roomFriendDao.getByRoomId(roomId);
-		if (friend != null) {
-			boolean isMember = aiclawUid.equals(friend.getUid1()) || aiclawUid.equals(friend.getUid2());
-			if (!isMember) {
-				throw new BizException("非房间成员，无法创建 thinking");
-			}
-			return;
-		}
-
-		// 3. 既不是群也不是私聊
-		throw new BizException("房间不存在");
 	}
 
 	/**
