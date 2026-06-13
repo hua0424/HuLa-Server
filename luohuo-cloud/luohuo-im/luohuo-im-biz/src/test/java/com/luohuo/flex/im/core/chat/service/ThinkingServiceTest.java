@@ -244,44 +244,108 @@ class ThinkingServiceTest {
 			assertEquals("完整的思考内容", resp.getContent());
 		}
 
-		@Test
-		@DisplayName("群聊：caller 非群成员 → 拒绝 BizException，不返回内容（IDOR 核心）")
-		void groupNonMember_rejected() {
+		// REQ-004 [S7] 安全(P2)：所有拒绝分支必须抛出完全相同的异常（同 message + 同 code），
+		// 否则 "记录不存在" 与 "存在但无权查看" 可被区分，构成 thinkingId 枚举预言机。
+		// 下列 helper 触发各拒绝分支并返回抛出的 BizException，供不可区分性断言。
+
+		private BizException rejectFromNotFound() {
+			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(null);
+			return assertThrows(BizException.class,
+					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
+		}
+
+		private BizException rejectFromGroupNonMember() {
 			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 1));
 			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(groupRoom());
 			// 成员列表里有 aiclaw 但没有 caller —— 用 aiclaw 成员身份不能授权 caller
 			when(groupMemberCache.getMemberUidList(GROUP_ROOM_ID))
 					.thenReturn(List.of(AICLAW_UID, 999L));
-
-			BizException ex = assertThrows(BizException.class,
+			return assertThrows(BizException.class,
 					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
-			assertTrue(ex.getMessage().contains("非房间成员"), "实际消息: " + ex.getMessage());
 		}
 
-		@Test
-		@DisplayName("私聊：caller 非参与者 → 拒绝 BizException，不返回内容（IDOR 核心）")
-		void friendNonMember_rejected() {
+		private BizException rejectFromFriendNonMember() {
 			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(FRIEND_ROOM_ID, 1));
 			when(roomCache.get(FRIEND_ROOM_ID)).thenReturn(friendRoom());
 			RoomFriend rf = new RoomFriend();
 			rf.setUid1(AICLAW_UID);
 			rf.setUid2(999L);
 			when(roomFriendDao.getByRoomId(FRIEND_ROOM_ID)).thenReturn(rf);
-
-			BizException ex = assertThrows(BizException.class,
+			return assertThrows(BizException.class,
 					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
-			assertTrue(ex.getMessage().contains("非房间成员"), "实际消息: " + ex.getMessage());
+		}
+
+		private BizException rejectFromRoomMissing() {
+			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 1));
+			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(null);
+			return assertThrows(BizException.class,
+					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
 		}
 
 		@Test
-		@DisplayName("thinkingId 不存在 → BizException(不存在)，不触碰房间校验")
-		void notFound_rejected() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(null);
+		@DisplayName("群聊：caller 非群成员 → 拒绝 BizException，不返回内容（IDOR 核心）")
+		void groupNonMember_rejected() {
+			BizException ex = rejectFromGroupNonMember();
+			// 安全：对外消息为统一拒绝文案，绝不暴露 "非成员" 这类可区分原因
+			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案，不得泄露真实原因");
+		}
 
-			BizException ex = assertThrows(BizException.class,
-					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
-			assertTrue(ex.getMessage().contains("不存在"), "实际消息: " + ex.getMessage());
+		@Test
+		@DisplayName("私聊：caller 非参与者 → 拒绝 BizException，不返回内容（IDOR 核心）")
+		void friendNonMember_rejected() {
+			BizException ex = rejectFromFriendNonMember();
+			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案，不得泄露真实原因");
+		}
+
+		@Test
+		@DisplayName("thinkingId 不存在 → 统一拒绝 BizException，不触碰房间校验")
+		void notFound_rejected() {
+			BizException ex = rejectFromNotFound();
+			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案，不得泄露真实原因");
 			verifyNoInteractions(roomCache, groupMemberCache, roomFriendDao);
+		}
+
+		// ==================== REQ-004 [S7] 安全核心：枚举预言机不可区分性 ====================
+
+		@Test
+		@DisplayName("安全：不存在 与 非成员 的拒绝异常必须完全一致（消息+code 不可区分）")
+		void notFound_and_nonMember_areIndistinguishable() {
+			BizException notFound = rejectFromNotFound();
+
+			// 重置 mapper 桩，复用同一实例触发非成员分支
+			reset(thinkingMapper);
+			BizException groupNonMember = rejectFromGroupNonMember();
+
+			// 安全属性：两条拒绝路径的 message 与 code 必须完全相同，调用方无从分辨记录是否存在
+			assertEquals(notFound.getMessage(), groupNonMember.getMessage(),
+					"不存在 与 非成员 的拒绝消息必须相同（不可区分性是本测试的安全属性）");
+			assertEquals(notFound.getCode(), groupNonMember.getCode(),
+					"不存在 与 非成员 的拒绝 code 必须相同");
+		}
+
+		@Test
+		@DisplayName("安全：全部四个拒绝分支（不存在/房间缺失/群非成员/私聊非参与者）的 message+code 两两一致")
+		void allRejectionBranches_areIndistinguishable() {
+			BizException notFound = rejectFromNotFound();
+			reset(thinkingMapper, roomCache, groupMemberCache, roomFriendDao);
+
+			BizException roomMissing = rejectFromRoomMissing();
+			reset(thinkingMapper, roomCache, groupMemberCache, roomFriendDao);
+
+			BizException groupNonMember = rejectFromGroupNonMember();
+			reset(thinkingMapper, roomCache, groupMemberCache, roomFriendDao);
+
+			BizException friendNonMember = rejectFromFriendNonMember();
+
+			List<BizException> all = List.of(notFound, roomMissing, groupNonMember, friendNonMember);
+			String expectedMsg = notFound.getMessage();
+			int expectedCode = notFound.getCode();
+			for (BizException ex : all) {
+				assertEquals(expectedMsg, ex.getMessage(),
+						"所有拒绝分支必须使用同一 message，否则可枚举 thinkingId");
+				assertEquals(expectedCode, ex.getCode(),
+						"所有拒绝分支必须使用同一 code，否则可枚举 thinkingId");
+			}
 		}
 
 		@Test
@@ -299,14 +363,10 @@ class ThinkingServiceTest {
 		}
 
 		@Test
-		@DisplayName("房间不存在 → 拒绝，不返回内容")
+		@DisplayName("房间不存在 → 统一拒绝，不返回内容（不暴露 '房间不存在' 这类可区分原因）")
 		void roomMissing_rejected() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 1));
-			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(null);
-
-			BizException ex = assertThrows(BizException.class,
-					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
-			assertTrue(ex.getMessage().contains("房间不存在"), "实际消息: " + ex.getMessage());
+			BizException ex = rejectFromRoomMissing();
+			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案，不得泄露真实原因");
 		}
 	}
 }

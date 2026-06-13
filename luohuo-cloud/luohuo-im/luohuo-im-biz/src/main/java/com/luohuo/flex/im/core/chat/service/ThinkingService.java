@@ -33,6 +33,16 @@ public class ThinkingService {
 	 */
 	private static final int MAX_CONTENT_BYTES = 200 * 1024;
 
+	/**
+	 * REQ-004 [S7] 安全：reviewThinking 的<b>统一拒绝</b>消息。
+	 *
+	 * <p>所有拒绝分支（thinkingId 不存在 / 房间不存在 / 当前用户非成员 / 不支持的房间类型）
+	 * 必须抛出<b>完全相同</b>的异常（同 message + 同 code，code 由 {@link BizException#BizException(String)}
+	 * 统一固定为 {@code SYSTEM_BUSY}），使调用方无法区分"记录不存在"与"存在但无权查看"，
+	 * 从而消除 thinkingId 枚举预言机（enumeration oracle）信息泄露。真实拒绝原因仅记录在服务端日志中。</p>
+	 */
+	private static final String REVIEW_REJECTED_MESSAGE = "思考记录不存在或无权查看";
+
 	@Resource
 	private AiclawThinkingMapper thinkingMapper;
 
@@ -167,12 +177,16 @@ public class ThinkingService {
 	 * @param thinkingId thinking ID
 	 * @param currentUid 当前登录用户 uid（caller，来自 SA-Token 上下文）
 	 * @return content / status / durationMs
-	 * @throws BizException 记录不存在 或 当前用户非房间成员（拒绝，且不返回内容）
+	 * @throws BizException 任何拒绝（不存在 / 非成员 / 房间异常 / 类型不支持）均抛出<b>统一</b>异常，
+	 *                      调用方无法区分原因（见 {@link #REVIEW_REJECTED_MESSAGE}）；真实原因仅记日志。
 	 */
 	public AiclawThinkingDetailResp reviewThinking(Long thinkingId, Long currentUid) {
 		AiclawThinking thinking = thinkingMapper.selectById(thinkingId);
 		if (thinking == null) {
-			throw new BizException("思考记录不存在");
+			// 真实原因仅记日志，对外抛统一异常以消除枚举预言机
+			log.warn("reviewThinking rejected: thinking not found, thinkingId={}, currentUid={}",
+					thinkingId, currentUid);
+			throw new BizException(REVIEW_REJECTED_MESSAGE);
 		}
 
 		// IDOR 防护：校验 caller（当前登录用户）是否为该房间成员
@@ -187,30 +201,37 @@ public class ThinkingService {
 
 	/**
 	 * 校验当前登录用户是否为指定房间成员（群聊看成员列表，私聊看 uid1/uid2）。
-	 * 非成员 / 房间数据异常一律以 BizException 拒绝，绝不泄露内容。
+	 *
+	 * <p>非成员 / 房间数据异常一律拒绝，绝不泄露内容。所有拒绝分支抛出<b>统一</b>异常
+	 * （{@link #REVIEW_REJECTED_MESSAGE}），与"记录不存在"不可区分；每个分支的真实原因仅
+	 * 通过 {@code log.warn} 记录在服务端，供调试排查，不会到达调用方。</p>
 	 */
 	private void checkCurrentUserMembership(Long currentUid, Long roomId) {
 		Room room = roomCache.get(roomId);
 		if (room == null) {
-			throw new BizException("房间不存在，无法校验成员身份");
+			log.warn("reviewThinking rejected: room not found, roomId={}, currentUid={}", roomId, currentUid);
+			throw new BizException(REVIEW_REJECTED_MESSAGE);
 		}
 
 		if (room.isRoomGroup()) {
 			List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
 			if (memberUids == null || !memberUids.contains(currentUid)) {
-				throw new BizException("非房间成员，无法查看思考内容");
+				log.warn("reviewThinking rejected: not a group member, roomId={}, currentUid={}", roomId, currentUid);
+				throw new BizException(REVIEW_REJECTED_MESSAGE);
 			}
 		} else if (room.isRoomFriend()) {
 			RoomFriend roomFriend = roomFriendDao.getByRoomId(roomId);
 			if (roomFriend == null
 					|| !(currentUid.equals(roomFriend.getUid1()) || currentUid.equals(roomFriend.getUid2()))) {
-				throw new BizException("非房间成员，无法查看思考内容");
+				log.warn("reviewThinking rejected: not a friend-room participant, roomId={}, currentUid={}",
+						roomId, currentUid);
+				throw new BizException(REVIEW_REJECTED_MESSAGE);
 			}
 		} else {
 			// 白名单思维：未知房间类型一律拒绝
-			log.warn("reviewThinking: unsupported room type, currentUid={}, roomId={}, roomType={}",
+			log.warn("reviewThinking rejected: unsupported room type, currentUid={}, roomId={}, roomType={}",
 					currentUid, roomId, room.getType());
-			throw new BizException("不支持的房间类型，无法查看思考内容");
+			throw new BizException(REVIEW_REJECTED_MESSAGE);
 		}
 	}
 
