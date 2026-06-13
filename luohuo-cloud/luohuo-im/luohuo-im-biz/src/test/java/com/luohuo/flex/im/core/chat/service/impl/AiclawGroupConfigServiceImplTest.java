@@ -87,7 +87,8 @@ class AiclawGroupConfigServiceImplTest {
 		assertEquals(AICLAW_UID, resp.getAiclawUid());
 		assertEquals(ROOM_ID, resp.getRoomId());
 		assertEquals(10, resp.getRateLimitPerMinute());
-		assertEquals(0, resp.getMentionRequired());
+		// REQ-004 S5: 群聊默认改为「需要 @ 触发」，无记录时默认值 0 -> 1
+		assertEquals(1, resp.getMentionRequired());
 		assertEquals(1000, resp.getDailyLimit());
 		assertEquals(1, resp.getRespondToAi());
 	}

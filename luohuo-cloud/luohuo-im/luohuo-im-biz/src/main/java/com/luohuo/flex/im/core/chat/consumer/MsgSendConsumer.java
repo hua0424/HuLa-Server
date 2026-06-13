@@ -26,6 +26,7 @@ import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import com.luohuo.flex.im.core.chat.service.ChatService;
+import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
@@ -105,7 +106,10 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				Long uid = dto.getUid();
 
 				// 3.1 给自己推送原始消息
-				WsBaseResp<ChatMessageResp> selfResp = WsAdapter.buildMsgSend(chatService.getMsgResp(message, null));
+				ChatMessageResp selfMsgResp = chatService.getMsgResp(message, null);
+				// REQ-004 S5: 回填房间类型，供 aiclaw 插件区分群聊/单聊
+				MessageAdapter.fillRoomType(selfMsgResp, room.getType());
+				WsBaseResp<ChatMessageResp> selfResp = WsAdapter.buildMsgSend(selfMsgResp);
 				pushService.sendPushMsg(selfResp, uid, dto.getUid());
 				asyncSavePassageMsg(message.getId(), selfResp, Set.of(uid), dto.getUid());
 
@@ -127,7 +131,10 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				onlineUsersList.remove(uid);
 				List<Long> otherMembers = new ArrayList<>(onlineUsersList);
 
-				WsBaseResp<ChatMessageResp> othersResp = WsAdapter.buildMsgSend(chatService.getMsgResp(message, null));
+				ChatMessageResp othersMsgResp = chatService.getMsgResp(message, null);
+				// REQ-004 S5: 回填房间类型
+				MessageAdapter.fillRoomType(othersMsgResp, room.getType());
+				WsBaseResp<ChatMessageResp> othersResp = WsAdapter.buildMsgSend(othersMsgResp);
 				// 恢复原始发送者显示
 				othersResp.getData().getFromUser().setUid(originalFromUid + "");
 				pushService.sendPushMsg(othersResp, otherMembers, dto.getUid());
@@ -137,6 +144,8 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 			default -> {
 				// 常规消息处理
 				ChatMessageResp chatMessageResp = chatService.getMsgResp(message, null);
+				// REQ-004 S5: 回填房间类型（群聊/单聊），供 aiclaw 插件做 @ 触发判定
+				MessageAdapter.fillRoomType(chatMessageResp, room.getType());
 				// REQ-004 M2-2: 透传 aiclaw extra（thinkingId、autoReply 等）
 				if (dto.getExtra() != null && chatMessageResp.getMessage() != null) {
 					chatMessageResp.getMessage().setExtra(dto.getExtra());
@@ -151,6 +160,8 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 						Long senderUid = message.getFromUid();
 						// 为 aiclaw 构建带扩展字段的 payload
 						ChatMessageResp aiclawResp = chatService.getMsgResp(message, null);
+						// REQ-004 S5: aiclaw 变体也回填房间类型（单聊=2）
+						MessageAdapter.fillRoomType(aiclawResp, room.getType());
 						// REQ-004 M2-2: aiclaw 响应也透传 extra
 						if (dto.getExtra() != null && aiclawResp.getMessage() != null) {
 							aiclawResp.getMessage().setExtra(dto.getExtra());

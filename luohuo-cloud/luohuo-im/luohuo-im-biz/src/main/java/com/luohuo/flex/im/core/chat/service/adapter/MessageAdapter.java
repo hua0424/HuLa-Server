@@ -85,6 +85,21 @@ public class MessageAdapter {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * REQ-004 S5: 把房间类型回填到已构建的 ChatMessageResp 上。
+     * 域实体 {@link Message} 不持有 roomType，buildMsgResp 阶段拿不到 Room，
+     * 故由持有 Room 的推送点（MsgSendConsumer）在 push 前调用本方法填充。
+     * roomType 取值见 {@code RoomTypeEnum}（GROUP=1, FRIEND=2）。
+     *
+     * @param resp     已构建的聊天消息响应（可为 null，则不做任何事）
+     * @param roomType 房间类型，来自 {@code Room#getType()}
+     */
+    public static void fillRoomType(ChatMessageResp resp, Integer roomType) {
+        if (resp != null && resp.getMessage() != null) {
+            resp.getMessage().setRoomType(roomType);
+        }
+    }
+
     private static ChatMessageResp.Message buildMessage(Message message, List<MessageMark> marks, Long receiveUid) {
         ChatMessageResp.Message messageVO = new ChatMessageResp.Message();
         BeanUtil.copyProperties(message, messageVO);

@@ -1,7 +1,9 @@
 package com.luohuo.flex.im.core.chat.service.adapter;
 
 import com.luohuo.flex.im.domain.entity.Message;
+import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
+import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -135,5 +137,49 @@ class MessageAdapterTest {
 		long deltaMs = ChronoUnit.MILLIS.between(t, clamped);
 		assertTrue(Math.abs(deltaMs) < 50,
 				"距 now 1s 的 sendTime 不应被 clamp,deltaMs=" + deltaMs);
+	}
+
+	// ==================== REQ-004 S5: roomType 回填 ====================
+
+	/** 构造一个已建好 message 体的 ChatMessageResp（模拟 buildMsgResp 的产物）。 */
+	private ChatMessageResp respWithMessage() {
+		ChatMessageResp resp = new ChatMessageResp();
+		resp.setMessage(new ChatMessageResp.Message());
+		return resp;
+	}
+
+	@Test
+	@DisplayName("S5: 群聊推送 → roomType 回填为 GROUP(1)")
+	void fillRoomTypeGroup() {
+		ChatMessageResp resp = respWithMessage();
+
+		MessageAdapter.fillRoomType(resp, RoomTypeEnum.GROUP.getType());
+
+		assertEquals(1, RoomTypeEnum.GROUP.getType(), "前置断言: GROUP 枚举值应为 1");
+		assertEquals(RoomTypeEnum.GROUP.getType(), resp.getMessage().getRoomType(),
+				"群聊推送的 message.roomType 应等于 Room.type(GROUP=1)");
+	}
+
+	@Test
+	@DisplayName("S5: 单聊推送 → roomType 回填为 FRIEND(2)")
+	void fillRoomTypeFriend() {
+		ChatMessageResp resp = respWithMessage();
+
+		MessageAdapter.fillRoomType(resp, RoomTypeEnum.FRIEND.getType());
+
+		assertEquals(2, RoomTypeEnum.FRIEND.getType(), "前置断言: FRIEND 枚举值应为 2");
+		assertEquals(RoomTypeEnum.FRIEND.getType(), resp.getMessage().getRoomType(),
+				"单聊推送的 message.roomType 应等于 Room.type(FRIEND=2)");
+	}
+
+	@Test
+	@DisplayName("S5: resp 或 message 为 null 时 fillRoomType 不抛异常（防御）")
+	void fillRoomTypeNullSafe() {
+		ChatMessageResp empty = new ChatMessageResp(); // message 为 null
+		MessageAdapter.fillRoomType(empty, RoomTypeEnum.GROUP.getType());
+		assertNull(empty.getMessage(), "message 为 null 时不应被实例化");
+
+		// resp 本身为 null 也不抛
+		MessageAdapter.fillRoomType(null, RoomTypeEnum.GROUP.getType());
 	}
 }
