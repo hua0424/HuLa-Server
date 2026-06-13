@@ -29,6 +29,8 @@ public class ChatMessageResp implements Serializable {
     public static class UserInfo {
         @Schema(description ="用户id")
         private String uid;
+        @Schema(description ="用户类型 1系统 2机器人 3普通用户 4aiclaw（REQ-004 S23：供 aiclaw 反环路与 respondToAi 判定）")
+        private Integer userType;
     }
 
     @Data
