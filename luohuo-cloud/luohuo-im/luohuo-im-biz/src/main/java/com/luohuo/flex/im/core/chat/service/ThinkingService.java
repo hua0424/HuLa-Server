@@ -1,8 +1,15 @@
 package com.luohuo.flex.im.core.chat.service;
 
 import cn.hutool.core.util.IdUtil;
+import com.luohuo.basic.exception.BizException;
+import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
+import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
+import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.domain.entity.AiclawThinking;
+import com.luohuo.flex.im.domain.entity.Room;
+import com.luohuo.flex.im.domain.entity.RoomFriend;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -12,6 +19,7 @@ import java.nio.CharBuffer;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * Thinking 记录管理服务
@@ -27,6 +35,15 @@ public class ThinkingService {
 
 	@Resource
 	private AiclawThinkingMapper thinkingMapper;
+
+	@Resource
+	private RoomCache roomCache;
+
+	@Resource
+	private GroupMemberCache groupMemberCache;
+
+	@Resource
+	private RoomFriendDao roomFriendDao;
 
 	/**
 	 * 创建 thinking 记录
@@ -136,6 +153,65 @@ public class ThinkingService {
 	 */
 	public AiclawThinking getById(Long thinkingId) {
 		return thinkingMapper.selectById(thinkingId);
+	}
+
+	/**
+	 * REQ-004 [S7]: 客户端按需回看 thinking 全文。
+	 *
+	 * <p><b>IDOR 防护是本方法的核心</b>：授权的对象是<b>当前登录用户</b>（caller），
+	 * 而不是产生 thinking 的 aiclaw。必须校验 caller 是该 thinking 所属房间的成员，
+	 * 否则任何登录用户都能通过猜 thinkingId 读取任意房间的思考内容。
+	 * 因此这里<b>不能</b>复用 {@code AiclawRoomMembershipService.checkMembership(aiclawUid, roomId)}
+	 * —— 那校验的是 aiclaw 的成员身份。</p>
+	 *
+	 * @param thinkingId thinking ID
+	 * @param currentUid 当前登录用户 uid（caller，来自 SA-Token 上下文）
+	 * @return content / status / durationMs
+	 * @throws BizException 记录不存在 或 当前用户非房间成员（拒绝，且不返回内容）
+	 */
+	public AiclawThinkingDetailResp reviewThinking(Long thinkingId, Long currentUid) {
+		AiclawThinking thinking = thinkingMapper.selectById(thinkingId);
+		if (thinking == null) {
+			throw new BizException("思考记录不存在");
+		}
+
+		// IDOR 防护：校验 caller（当前登录用户）是否为该房间成员
+		checkCurrentUserMembership(currentUid, thinking.getRoomId());
+
+		return AiclawThinkingDetailResp.builder()
+				.content(thinking.getContent())
+				.status(thinking.getStatus())
+				.durationMs(thinking.getDurationMs())
+				.build();
+	}
+
+	/**
+	 * 校验当前登录用户是否为指定房间成员（群聊看成员列表，私聊看 uid1/uid2）。
+	 * 非成员 / 房间数据异常一律以 BizException 拒绝，绝不泄露内容。
+	 */
+	private void checkCurrentUserMembership(Long currentUid, Long roomId) {
+		Room room = roomCache.get(roomId);
+		if (room == null) {
+			throw new BizException("房间不存在，无法校验成员身份");
+		}
+
+		if (room.isRoomGroup()) {
+			List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
+			if (memberUids == null || !memberUids.contains(currentUid)) {
+				throw new BizException("非房间成员，无法查看思考内容");
+			}
+		} else if (room.isRoomFriend()) {
+			RoomFriend roomFriend = roomFriendDao.getByRoomId(roomId);
+			if (roomFriend == null
+					|| !(currentUid.equals(roomFriend.getUid1()) || currentUid.equals(roomFriend.getUid2()))) {
+				throw new BizException("非房间成员，无法查看思考内容");
+			}
+		} else {
+			// 白名单思维：未知房间类型一律拒绝
+			log.warn("reviewThinking: unsupported room type, currentUid={}, roomId={}, roomType={}",
+					currentUid, roomId, room.getType());
+			throw new BizException("不支持的房间类型，无法查看思考内容");
+		}
 	}
 
 	/**
