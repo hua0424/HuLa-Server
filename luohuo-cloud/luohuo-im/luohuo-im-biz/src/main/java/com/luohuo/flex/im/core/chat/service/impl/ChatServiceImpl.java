@@ -576,7 +576,10 @@ public class ChatServiceImpl implements ChatService {
 		// REQ-004 S23: 回填 fromUser.userType（aiclaw 插件据此做 AI-to-AI 反环路与 respondToAi 判定）。
 		// 域实体 Message 只持有 fromUid，故在此从 UserSummaryCache 解析发送者 userType 并按 uid 匹配回填。
 		// UserSummaryCache 是 Redis 支撑的缓存，用 getBatch 一次批量取回所有去重发送者，避免按 uid 逐个查询导致的 N+1
-		//（history/sync 路径 getMsgList/getMsgPage 也经此方法）。缓存缺失则保持 null（不 NPE、不中断批处理）。
+		//（history/sync 路径 getMsgList/getMsgPage 也经此方法）。
+		// getBatch 为 cache-aside：Redis miss 会回源 DB（load() 据 User 行填 userType 并回写 Redis），
+		// 仅当 uid 在 DB 根本不存在时才返回 null。能发出消息的发送者（含活跃 aiclaw）必有 User 行、userType 必被填充；
+		// 故此处 null 仅对不可达的「不存在用户」，保持 null 即可（不 NPE、不中断批处理）。
 		List<Long> distinctUids = messages.stream()
 				.map(Message::getFromUid)
 				.filter(Objects::nonNull)
