@@ -100,6 +100,22 @@ public class MessageAdapter {
         }
     }
 
+    /**
+     * REQ-004 S23: 把发送者用户类型回填到已构建的 ChatMessageResp.fromUser 上。
+     * 域实体 {@link Message} 只持有 fromUid，buildMsgResp 阶段拿不到 userType，
+     * 故由持有用户缓存的 {@code ChatServiceImpl#getMsgRespBatch} 在返回前调用本方法填充。
+     * userType 取值见 {@code UserTypeEnum}（SYSTEM=1, BOT=2, NORMAL=3, AICLAW=4）。
+     * aiclaw 插件据 {@code fromUser.userType==4} 做 AI-to-AI 反环路与 respondToAi 判定。
+     *
+     * @param resp     已构建的聊天消息响应（resp 或 resp.fromUser 为 null 则不做任何事）
+     * @param userType 发送者用户类型，来自 {@code SummeryInfoDTO#getUserType()}（可为 null）
+     */
+    public static void fillFromUserType(ChatMessageResp resp, Integer userType) {
+        if (resp != null && resp.getFromUser() != null) {
+            resp.getFromUser().setUserType(userType);
+        }
+    }
+
     private static ChatMessageResp.Message buildMessage(Message message, List<MessageMark> marks, Long receiveUid) {
         ChatMessageResp.Message messageVO = new ChatMessageResp.Message();
         BeanUtil.copyProperties(message, messageVO);

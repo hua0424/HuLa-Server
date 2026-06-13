@@ -43,6 +43,8 @@ import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.AiclawThinkingMsgRel;
 import com.luohuo.flex.im.enums.UserTypeEnum;
 
@@ -74,6 +76,7 @@ public class ChatServiceImpl implements ChatService {
     private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
     private final UserCache userCache;
     private final AiclawRoomMembershipService aiclawRoomMembershipService;
+    private final UserSummaryCache userSummaryCache;
     /**
      * 发送消息
      */
@@ -568,7 +571,29 @@ public class ChatServiceImpl implements ChatService {
         }
         // 查询消息标志
 		List<MessageMark> msgMark = messageMarkDao.getValidMarkByMsgIdBatch(messages.stream().map(Message::getId).collect(Collectors.toList()));
-		return MessageAdapter.buildMsgResp(messages, msgMark, receiveUid);
+		List<ChatMessageResp> resps = MessageAdapter.buildMsgResp(messages, msgMark, receiveUid);
+
+		// REQ-004 S23: 回填 fromUser.userType（aiclaw 插件据此做 AI-to-AI 反环路与 respondToAi 判定）。
+		// 域实体 Message 只持有 fromUid，故在此从 UserSummaryCache 解析发送者 userType 并按 uid 匹配回填。
+		// UserSummaryCache 是 Redis 支撑的缓存，用 getBatch 一次批量取回所有去重发送者，避免按 uid 逐个查询导致的 N+1
+		//（history/sync 路径 getMsgList/getMsgPage 也经此方法）。缓存缺失则保持 null（不 NPE、不中断批处理）。
+		List<Long> distinctUids = messages.stream()
+				.map(Message::getFromUid)
+				.filter(Objects::nonNull)
+				.distinct()
+				.collect(Collectors.toList());
+		Map<Long, SummeryInfoDTO> summaryMap = userSummaryCache.getBatch(distinctUids);
+		Map<Long, Integer> uidToUserType = new HashMap<>(distinctUids.size());
+		for (Long uid : distinctUids) {
+			SummeryInfoDTO summary = summaryMap.get(uid);
+			uidToUserType.put(uid, summary == null ? null : summary.getUserType());
+		}
+		resps.forEach(resp -> {
+			if (resp.getFromUser() != null && resp.getFromUser().getUid() != null) {
+				MessageAdapter.fillFromUserType(resp, uidToUserType.get(Long.valueOf(resp.getFromUser().getUid())));
+			}
+		});
+		return resps;
     }
 
 }

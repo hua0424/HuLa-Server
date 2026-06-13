@@ -182,4 +182,39 @@ class MessageAdapterTest {
 		// resp 本身为 null 也不抛
 		MessageAdapter.fillRoomType(null, RoomTypeEnum.GROUP.getType());
 	}
+
+	// ==================== REQ-004 S23: fromUser.userType 回填 ====================
+
+	/** 构造一个已建好 fromUser 的 ChatMessageResp（模拟 buildMsgResp 的产物）。 */
+	private ChatMessageResp respWithFromUser() {
+		ChatMessageResp resp = new ChatMessageResp();
+		resp.setFromUser(new ChatMessageResp.UserInfo());
+		return resp;
+	}
+
+	@Test
+	@DisplayName("S23: fillFromUserType 把 userType 回填到已构建的 fromUser 上")
+	void fillFromUserTypeSetsUserType() {
+		ChatMessageResp resp = respWithFromUser();
+
+		MessageAdapter.fillFromUserType(resp, 4);
+
+		assertEquals(4, resp.getFromUser().getUserType(),
+				"fromUser.userType 应被回填为传入的值(AICLAW=4)");
+	}
+
+	@Test
+	@DisplayName("S23: resp 为 null 时 fillFromUserType 不抛异常（防御）")
+	void fillFromUserTypeNullRespIsNoop() {
+		// resp 本身为 null 也不抛
+		MessageAdapter.fillFromUserType(null, 4);
+	}
+
+	@Test
+	@DisplayName("S23: fromUser 为 null 时 fillFromUserType 不抛异常、不实例化（防御）")
+	void fillFromUserTypeNullFromUserIsNoop() {
+		ChatMessageResp empty = new ChatMessageResp(); // fromUser 为 null
+		MessageAdapter.fillFromUserType(empty, 4);
+		assertNull(empty.getFromUser(), "fromUser 为 null 时不应被实例化");
+	}
 }

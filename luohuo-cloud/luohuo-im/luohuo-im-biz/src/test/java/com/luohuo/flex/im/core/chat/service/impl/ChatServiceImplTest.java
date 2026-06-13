@@ -14,8 +14,11 @@ import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.core.user.dao.UserFriendDao;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.*;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
+import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import org.junit.jupiter.api.Nested;
 import org.mockito.ArgumentCaptor;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
@@ -30,6 +33,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -59,6 +63,7 @@ class ChatServiceImplTest {
 	@Mock private AiclawRoomMembershipService aiclawRoomMembershipService;
 	@Mock private AiclawThinkingMapper aiclawThinkingMapper;
 	@Mock private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
+	@Mock private UserSummaryCache userSummaryCache;
 
 	@InjectMocks
 	private ChatServiceImpl chatService;
@@ -271,6 +276,104 @@ class ChatServiceImplTest {
 
 			verify(aiclawThinkingMsgRelMapper, never()).insertIgnore(any());
 			verify(aiclawThinkingMapper, never()).updateHasResponse(any(), any());
+		}
+	}
+
+	// ==================== REQ-004 S23: getMsgRespBatch 回填 fromUser.userType ====================
+
+	@Nested
+	@DisplayName("S23 getMsgRespBatch 回填 fromUser.userType")
+	class FromUserTypeFill {
+
+		/** 构造一条 sender 为 senderUid、msgId 为 msgId 的消息。 */
+		private Message msgFrom(Long msgId, Long senderUid) {
+			Message m = new Message();
+			m.setId(msgId);
+			m.setFromUid(senderUid);
+			m.setType(1);
+			m.setCreateTime(LocalDateTime.now());
+			return m;
+		}
+
+		private SummeryInfoDTO summary(Long uid, Integer userType) {
+			SummeryInfoDTO dto = new SummeryInfoDTO();
+			dto.setUid(uid);
+			dto.setUserType(userType);
+			return dto;
+		}
+
+		/** getMsgRespBatch 内部经 buildMsgResp → buildMessage 调用 MsgHandlerFactory，
+		 *  这里 mock 静态工厂返回 null（buildMessage 对 null handler 直接跳过 body）。 */
+		private List<ChatMessageResp> batchWithMockedHandler(List<Message> messages, Long receiveUid) {
+			try (MockedStatic<MsgHandlerFactory> mf = mockStatic(MsgHandlerFactory.class)) {
+				mf.when(() -> MsgHandlerFactory.getStrategyNoNull(anyInt())).thenReturn(null);
+				return chatService.getMsgRespBatch(messages, receiveUid);
+			}
+		}
+
+		@Test
+		@DisplayName("发送者为 aiclaw(4) → resp.fromUser.userType == 4")
+		void getMsgRespBatchFillsUserTypeForAiclawSender() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(AICLAW_UID, summary(AICLAW_UID, UserTypeEnum.AICLAW.getValue())));
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(List.of(msgFrom(999L, AICLAW_UID)), NORMAL_UID);
+
+			assertEquals(1, resps.size());
+			assertEquals(UserTypeEnum.AICLAW.getValue(), resps.get(0).getFromUser().getUserType(),
+					"aiclaw 发送者的 fromUser.userType 应为 4");
+			assertEquals(4, UserTypeEnum.AICLAW.getValue(), "前置断言: AICLAW 枚举值应为 4");
+		}
+
+		@Test
+		@DisplayName("发送者为普通用户(3) → resp.fromUser.userType == 3")
+		void getMsgRespBatchFillsUserTypeForNormalSender() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(NORMAL_UID, summary(NORMAL_UID, UserTypeEnum.NORMAL.getValue())));
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(List.of(msgFrom(999L, NORMAL_UID)), NORMAL_UID);
+
+			assertEquals(1, resps.size());
+			assertEquals(UserTypeEnum.NORMAL.getValue(), resps.get(0).getFromUser().getUserType(),
+					"普通用户发送者的 fromUser.userType 应为 3");
+		}
+
+		@Test
+		@DisplayName("缓存查不到发送者 → resp.fromUser.userType == null，不抛异常")
+		void getMsgRespBatchMissingCacheEntryLeavesUserTypeNull() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList())).thenReturn(Map.of());
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(List.of(msgFrom(999L, AICLAW_UID)), NORMAL_UID);
+
+			assertEquals(1, resps.size());
+			assertNull(resps.get(0).getFromUser().getUserType(),
+					"缓存缺失时 fromUser.userType 应保持 null（不 NPE）");
+		}
+
+		@Test
+		@DisplayName("混合发送者批次 [aiclaw, 普通, aiclaw] → 各 resp 按各自 uid 回填，不串号、不因 distinct 塌缩")
+		void getMsgRespBatchMixedSendersMatchesEachRespByOwnUid() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			// distinct() 会把两个 aiclaw uid 折叠成一个 key，getBatch 仍按 uid 返回；
+			// 每条 resp 必须重新按自己的 uid 匹配，而非沿用第一个发送者。
+			when(userSummaryCache.getBatch(anyList())).thenReturn(Map.of(
+					AICLAW_UID, summary(AICLAW_UID, UserTypeEnum.AICLAW.getValue()),
+					NORMAL_UID, summary(NORMAL_UID, UserTypeEnum.NORMAL.getValue())));
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(
+					List.of(msgFrom(1001L, AICLAW_UID), msgFrom(1002L, NORMAL_UID), msgFrom(1003L, AICLAW_UID)),
+					NORMAL_UID);
+
+			assertEquals(3, resps.size());
+			assertEquals(UserTypeEnum.AICLAW.getValue(), resps.get(0).getFromUser().getUserType(),
+					"resp[0] 发送者为 aiclaw → userType==4");
+			assertEquals(UserTypeEnum.NORMAL.getValue(), resps.get(1).getFromUser().getUserType(),
+					"resp[1] 发送者为普通用户 → userType==3（不被首个发送者串号）");
+			assertEquals(UserTypeEnum.AICLAW.getValue(), resps.get(2).getFromUser().getUserType(),
+					"resp[2] 发送者为 aiclaw → userType==4（distinct 折叠 key 后仍按自身 uid 匹配）");
 		}
 	}
 }
