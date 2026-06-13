@@ -2,6 +2,7 @@ package com.luohuo.flex.im.controller.user;
 
 import com.luohuo.basic.base.R;
 import com.luohuo.basic.context.ContextUtil;
+import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.core.user.service.AiclawService;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
@@ -16,6 +17,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import io.swagger.v3.oas.annotations.Operation;
@@ -36,6 +38,16 @@ public class AiclawController {
 
 	@Resource
 	private AiclawService aiclawService;
+
+	@Resource
+	private ThinkingService thinkingService;
+
+	@GetMapping("/thinking/{thinkingId}")
+	@Operation(summary = "回看 aiclaw thinking 全文（仅房间成员可见）")
+	public R<AiclawThinkingDetailResp> reviewThinking(@PathVariable Long thinkingId) {
+		// IDOR 防护：以当前登录用户（caller）为授权主体，校验其为该 thinking 所属房间成员
+		return R.success(thinkingService.reviewThinking(thinkingId, ContextUtil.getUid()));
+	}
 
 	@PostMapping("/create")
 	@Operation(summary = "创建AI助理，返回加密激活 token")
