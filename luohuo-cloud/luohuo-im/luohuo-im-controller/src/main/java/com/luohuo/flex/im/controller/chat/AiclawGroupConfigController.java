@@ -11,6 +11,8 @@ import jakarta.annotation.Resource;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 /**
  * aiclaw 群聊配置管理
  */
@@ -28,6 +30,14 @@ public class AiclawGroupConfigController {
 			@RequestParam Long aiclawUid,
 			@RequestParam Long roomId) {
 		return R.success(aiclawGroupConfigService.getConfig(aiclawUid, roomId, ContextUtil.getUid()));
+	}
+
+	@GetMapping("/list")
+	@Operation(summary = "列出当前 aiclaw 自己的全部群配置（插件启动/重连预热）")
+	public R<List<AiclawGroupConfigResp>> listSelfConfigs() {
+		// aichatoverview#26: aiclawUid 仅来自认证身份，端点不声明任何 query 参数，
+		// 调用方无法借 query 拉取其他 aiclaw 的配置（防 IDOR）。
+		return R.success(aiclawGroupConfigService.listSelfConfigs(ContextUtil.getUid()));
 	}
 
 	@PutMapping
