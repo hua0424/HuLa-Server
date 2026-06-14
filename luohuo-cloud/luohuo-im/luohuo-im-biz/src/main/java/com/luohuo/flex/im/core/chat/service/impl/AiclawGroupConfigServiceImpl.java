@@ -81,6 +81,21 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	}
 
 	@Override
+	public List<AiclawGroupConfigResp> listSelfConfigs(Long aiclawUid) {
+		// aichatoverview#26: 仅按传入的 aiclawUid（来自认证身份）查询该 aiclaw 自己的全部配置行。
+		// 只返回已落库的行，不补默认值；空结果返回空 List。无群成员/owner 校验——
+		// 因为查询范围已被 aiclawUid 限定为「自己」，且 aiclawUid 来自 ContextUtil.getUid()。
+		// 软删：AiclawGroupConfig 经基类 SuperEntity 的 @TableLogic(is_del) 全局逻辑删除，
+		// MyBatis-Plus 自动为 selectList 追加 is_del=0、过滤软删行（与 getConfig 行为一致），无需手加条件。
+		List<AiclawGroupConfig> configs = aiclawGroupConfigMapper.selectList(
+				new LambdaQueryWrapper<AiclawGroupConfig>()
+						.eq(AiclawGroupConfig::getAiclawUid, aiclawUid));
+		return configs.stream()
+				.map(c -> BeanUtil.copyProperties(c, AiclawGroupConfigResp.class))
+				.toList();
+	}
+
+	@Override
 	@Transactional(rollbackFor = Exception.class)
 	public void updateConfig(AiclawGroupConfigUpdateReq request, Long uid) {
 		Long aiclawUid = request.getAiclawUid();

@@ -41,7 +41,30 @@
             <artifactId>luohuo-im-cloud-impl</artifactId>
             <version>${luohuo-project.version}</version>
         </dependency>
+
+        <!-- aichatoverview#26: controller 层 MockMvc 行为测试依赖。
+             spring-boot-starter-test 提供 MockMvc + Mockito 5(原生 mockStatic,无需 mockito-inline)
+             + JUnit Jupiter + JsonPath。与 luohuo-im-biz 测试栈一致。 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
+    <build>
+        <plugins>
+            <plugin>
+                <!-- aichatoverview#26: 父 pom(luohuo-dependencies-parent)默认 skip=true 跳过测试;
+                     本模块需运行 controller 层 MockMvc 行为测试,故覆盖为 false。与 luohuo-im-biz 一致。 -->
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skip>false</skip>
+                    <skipTests>false</skipTests>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>
