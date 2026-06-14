@@ -36,6 +36,7 @@ import org.mockito.quality.Strictness;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -374,6 +375,145 @@ class ChatServiceImplTest {
 					"resp[1] 发送者为普通用户 → userType==3（不被首个发送者串号）");
 			assertEquals(UserTypeEnum.AICLAW.getValue(), resps.get(2).getFromUser().getUserType(),
 					"resp[2] 发送者为 aiclaw → userType==4（distinct 折叠 key 后仍按自身 uid 匹配）");
+		}
+	}
+
+	// ==================== REQ-021: getMsgRespBatch 回填 fromUser.name（群昵称优先，回退用户名） ====================
+
+	@Nested
+	@DisplayName("REQ-021 getMsgRespBatch 回填 fromUser.name")
+	class FromUserNameFill {
+
+		/** 构造一条 sender 为 senderUid、msgId 为 msgId、归属 roomId 的消息。 */
+		private Message msgFromInRoom(Long msgId, Long senderUid, Long roomId) {
+			Message m = new Message();
+			m.setId(msgId);
+			m.setFromUid(senderUid);
+			m.setRoomId(roomId);
+			m.setType(1);
+			m.setCreateTime(LocalDateTime.now());
+			return m;
+		}
+
+		private SummeryInfoDTO summaryWithName(Long uid, Integer userType, String name) {
+			SummeryInfoDTO dto = new SummeryInfoDTO();
+			dto.setUid(uid);
+			dto.setUserType(userType);
+			dto.setName(name);
+			return dto;
+		}
+
+		private GroupMember groupMemberWithName(Long uid, String myName) {
+			GroupMember member = new GroupMember();
+			member.setUid(uid);
+			member.setMyName(myName);
+			return member;
+		}
+
+		private List<ChatMessageResp> batchWithMockedHandler(List<Message> messages, Long receiveUid) {
+			try (MockedStatic<MsgHandlerFactory> mf = mockStatic(MsgHandlerFactory.class)) {
+				mf.when(() -> MsgHandlerFactory.getStrategyNoNull(anyInt())).thenReturn(null);
+				return chatService.getMsgRespBatch(messages, receiveUid);
+			}
+		}
+
+		private Map<String, ChatMessageResp> byMsgId(List<ChatMessageResp> resps) {
+			return resps.stream().collect(Collectors.toMap(r -> r.getMessage().getId(), r -> r));
+		}
+
+		@Test
+		@DisplayName("群消息：发送者有群昵称 myName → fromUser.name 取群昵称（优先于用户名）")
+		void groupMessageWithMyName_usesGroupNickname() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(NORMAL_UID, summaryWithName(NORMAL_UID, UserTypeEnum.NORMAL.getValue(), "原始用户名")));
+			when(groupMemberDao.getMemberBatchByRoomId(eq(ROOM_ID), anyCollection()))
+					.thenReturn(List.of(groupMemberWithName(NORMAL_UID, "群昵称")));
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(
+					List.of(msgFromInRoom(1001L, NORMAL_UID, ROOM_ID)), AICLAW_UID);
+
+			assertEquals(1, resps.size());
+			assertEquals("群昵称", byMsgId(resps).get("1001").getFromUser().getName(),
+					"有群昵称时应优先取 myName，而非用户名");
+		}
+
+		@Test
+		@DisplayName("群消息：发送者 myName 为空 → 回退用户名")
+		void groupMessageBlankMyName_fallsBackToUsername() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(NORMAL_UID, summaryWithName(NORMAL_UID, UserTypeEnum.NORMAL.getValue(), "用户名兜底")));
+			// GroupMember 存在但 myName 为空 → 视为无昵称，回退用户名
+			when(groupMemberDao.getMemberBatchByRoomId(eq(ROOM_ID), anyCollection()))
+					.thenReturn(List.of(groupMemberWithName(NORMAL_UID, "")));
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(
+					List.of(msgFromInRoom(1002L, NORMAL_UID, ROOM_ID)), AICLAW_UID);
+
+			assertEquals(1, resps.size());
+			assertEquals("用户名兜底", byMsgId(resps).get("1002").getFromUser().getName(),
+					"myName 为空时应回退 SummeryInfoDTO.name");
+		}
+
+		@Test
+		@DisplayName("私聊：无群成员记录（getMemberBatchByRoomId 返回空）→ 回退用户名")
+		void privateChat_noGroupMember_fallsBackToUsername() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(NORMAL_UID, summaryWithName(NORMAL_UID, UserTypeEnum.NORMAL.getValue(), "私聊用户名")));
+			// 私聊房间 roomGroupCache 无群记录 → DAO 返回空列表
+			when(groupMemberDao.getMemberBatchByRoomId(anyLong(), anyCollection()))
+					.thenReturn(List.of());
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(
+					List.of(msgFromInRoom(1003L, NORMAL_UID, 20L)), AICLAW_UID);
+
+			assertEquals(1, resps.size());
+			assertEquals("私聊用户名", byMsgId(resps).get("1003").getFromUser().getName(),
+					"私聊无群成员记录时自然回退用户名");
+		}
+
+		@Test
+		@DisplayName("跨房间批次：同一 uid 在 room1 有群昵称、在 room2 无 → 各 resp 取各自房间昵称，不串号")
+		void crossRoomBatch_noContamination() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(NORMAL_UID, summaryWithName(NORMAL_UID, UserTypeEnum.NORMAL.getValue(), "用户名A")));
+			Long room1 = 10L;
+			Long room2 = 11L;
+			// room1：uid A 有群昵称；room2：uid A 无群成员记录
+			when(groupMemberDao.getMemberBatchByRoomId(eq(room1), anyCollection()))
+					.thenReturn(List.of(groupMemberWithName(NORMAL_UID, "群昵称A1")));
+			when(groupMemberDao.getMemberBatchByRoomId(eq(room2), anyCollection()))
+					.thenReturn(List.of());
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(
+					List.of(msgFromInRoom(2001L, NORMAL_UID, room1), msgFromInRoom(2002L, NORMAL_UID, room2)),
+					AICLAW_UID);
+
+			assertEquals(2, resps.size());
+			Map<String, ChatMessageResp> map = byMsgId(resps);
+			assertEquals("群昵称A1", map.get("2001").getFromUser().getName(),
+					"room1 的 resp 取 room1 群昵称");
+			assertEquals("用户名A", map.get("2002").getFromUser().getName(),
+					"room2 的 resp 无群昵称→回退用户名，不被 room1 昵称污染");
+		}
+
+		@Test
+		@DisplayName("边界：缓存无该 uid 且无群成员记录 → name == null，不抛异常")
+		void noSummaryNoGroupMember_nameNull() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList())).thenReturn(Map.of());
+			when(groupMemberDao.getMemberBatchByRoomId(anyLong(), anyCollection()))
+					.thenReturn(List.of());
+
+			List<ChatMessageResp> resps = batchWithMockedHandler(
+					List.of(msgFromInRoom(3001L, NORMAL_UID, ROOM_ID)), AICLAW_UID);
+
+			assertEquals(1, resps.size());
+			assertNull(byMsgId(resps).get("3001").getFromUser().getName(),
+					"summary 与群成员都缺失时 name 应为 null（不 NPE）");
 		}
 	}
 }

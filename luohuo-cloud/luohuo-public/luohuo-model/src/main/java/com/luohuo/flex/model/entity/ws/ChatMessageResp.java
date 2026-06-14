@@ -31,6 +31,8 @@ public class ChatMessageResp implements Serializable {
         private String uid;
         @Schema(description ="用户类型 1系统 2机器人 3普通用户 4aiclaw（REQ-004 S23：供 aiclaw 反环路与 respondToAi 判定）")
         private Integer userType;
+        @Schema(description = "发送者显示名（REQ-021：群昵称优先，回退用户名；供 aiclaw 群语境标注发言人）")
+        private String name;
     }
 
     @Data

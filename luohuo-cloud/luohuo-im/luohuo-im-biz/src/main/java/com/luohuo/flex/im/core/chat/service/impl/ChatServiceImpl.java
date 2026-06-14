@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.collection.CollectionUtil;
 import cn.hutool.core.lang.Assert;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.basic.utils.TimeUtils;
@@ -594,6 +595,41 @@ public class ChatServiceImpl implements ChatService {
 		resps.forEach(resp -> {
 			if (resp.getFromUser() != null && resp.getFromUser().getUid() != null) {
 				MessageAdapter.fillFromUserType(resp, uidToUserType.get(Long.valueOf(resp.getFromUser().getUid())));
+			}
+		});
+
+		// REQ-021: 回填 fromUser.name（群昵称优先、回退用户名；aiclaw 群语境标注发言人，避免 [unknown(uid)]）。
+		// 按 roomId 分组批量查群成员昵称，避免逐条 N+1；私聊无群成员记录→自然回退用户名。
+		Map<Long, Set<Long>> roomToUids = messages.stream()
+				.filter(m -> m.getRoomId() != null && m.getFromUid() != null)
+				.collect(Collectors.groupingBy(Message::getRoomId,
+						Collectors.mapping(Message::getFromUid, Collectors.toSet())));
+		// key 统一用 String.valueOf 拼接：build 侧 roomId 为实体 Long、lookup 侧 resp.getMessage().getRoomId() 为 String，
+		// 显式归一避免依赖「Long.toString 与 String 值相等」的隐式巧合。
+		Map<String, String> roomUidToMyName = new HashMap<>();
+		roomToUids.forEach((roomId, uids) -> {
+			List<GroupMember> members = groupMemberDao.getMemberBatchByRoomId(roomId, uids);
+			for (GroupMember member : members) {
+				if (StrUtil.isNotEmpty(member.getMyName())) {
+					roomUidToMyName.put(String.valueOf(roomId) + ":" + member.getUid(), member.getMyName());
+				}
+			}
+		});
+		resps.forEach(resp -> {
+			if (resp.getFromUser() != null && resp.getFromUser().getUid() != null) {
+				Long uid = Long.valueOf(resp.getFromUser().getUid());
+				String myName = null;
+				if (resp.getMessage() != null && resp.getMessage().getRoomId() != null) {
+					myName = roomUidToMyName.get(resp.getMessage().getRoomId() + ":" + uid);
+				}
+				String name;
+				if (StrUtil.isNotEmpty(myName)) {
+					name = myName;
+				} else {
+					SummeryInfoDTO summary = summaryMap.get(uid);
+					name = summary == null ? null : summary.getName();
+				}
+				MessageAdapter.fillFromUserName(resp, name);
 			}
 		});
 		return resps;
