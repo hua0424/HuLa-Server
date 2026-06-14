@@ -116,6 +116,19 @@ public class MessageAdapter {
         }
     }
 
+    /**
+     * REQ-021: 把发送者显示名回填到已构建的 ChatMessageResp.fromUser 上。
+     * 域实体 Message 只持有 fromUid，故由 ChatServiceImpl#getMsgRespBatch 解析「群昵称优先、回退用户名」后填充。
+     * aiclaw 插件据此在群语境标注发言人，避免 [unknown(uid)]。
+     * @param resp 已构建的聊天消息响应（resp 或 resp.fromUser 为 null 则不做任何事）
+     * @param name 发送者显示名（可为 null）
+     */
+    public static void fillFromUserName(ChatMessageResp resp, String name) {
+        if (resp != null && resp.getFromUser() != null) {
+            resp.getFromUser().setName(name);
+        }
+    }
+
     private static ChatMessageResp.Message buildMessage(Message message, List<MessageMark> marks, Long receiveUid) {
         ChatMessageResp.Message messageVO = new ChatMessageResp.Message();
         BeanUtil.copyProperties(message, messageVO);

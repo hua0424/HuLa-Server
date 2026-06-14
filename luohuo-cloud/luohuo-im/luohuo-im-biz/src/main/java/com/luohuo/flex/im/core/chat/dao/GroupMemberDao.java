@@ -21,6 +21,7 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -62,6 +63,27 @@ public class GroupMemberDao extends ServiceImpl<GroupMemberMapper, GroupMember> 
                 .in(GroupMember::getUid, uidList)
                 .list();
     }
+
+	/**
+	 * REQ-021: 按 roomId 批量取群成员（用于 getMsgRespBatch 填发言人群昵称，避免逐条 N+1）。
+	 * 私聊房间（roomGroupCache 无群记录）返回空列表，调用方据此自然回退用户名。
+	 * @param roomId 房间id
+	 * @param uidList 发送者 uid 集合（同一房间内去重）
+	 * @return 该房间内匹配到的群成员（可空，不含未入群的 uid）
+	 */
+	public List<GroupMember> getMemberBatchByRoomId(Long roomId, Collection<Long> uidList) {
+		if (CollectionUtil.isEmpty(uidList)) {
+			return Collections.emptyList();
+		}
+		RoomGroup roomGroup = roomGroupCache.getByRoomId(roomId);
+		if (roomGroup == null) {
+			return Collections.emptyList();
+		}
+		return lambdaQuery()
+				.eq(GroupMember::getGroupId, roomGroup.getId())
+				.in(GroupMember::getUid, uidList)
+				.list();
+	}
 
 	/**
 	 * 获取群聊人员
