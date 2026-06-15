@@ -40,7 +40,19 @@ public class RoomGroupCache extends AbstractRedisStringCache<Long, RoomGroup> {
         return roomGroups.stream().collect(Collectors.toMap(RoomGroup::getRoomId, Function.identity()));
     }
 
-	public RoomGroup getByRoomId(Long roomId) {
+	/**
+	 * 直查 DB 取群信息，<b>不走本类的 Redis 缓存</b>（不经基类 {@link AbstractRedisStringCache#get}）。
+	 *
+	 * <p>命名以 {@code FromDb} 显式标注「绕过缓存」，避免被误当作 cache-aside 入口调用。
+	 *
+	 * <p>为何保持直查、不改走基类 {@code get(roomId)}：roomId 维度<b>没有失效 wiring</b>——
+	 * 本类 {@link #removeById} 不 evict 该维度缓存，类内的 {@code @CacheEvict} 作用于
+	 * account-keyed 的 {@code searchGroup}/{@code findGroup} 缓存，与 roomId 维度无关。
+	 * 若改走基类 {@code get(roomId)}，命中后最长会有 {@link #getExpireSeconds()} 返回的
+	 * 5min TTL 陈旧（getExpireSeconds 返 5*60），故此处保持直查 DB 取实时数据。
+	 * 如需为 roomId 维度加缓存，必须另补对应的失效逻辑，属本次范围外。
+	 */
+	public RoomGroup getByRoomIdFromDb(Long roomId) {
 		return roomGroupDao.getByRoomId(roomId);
 	}
 

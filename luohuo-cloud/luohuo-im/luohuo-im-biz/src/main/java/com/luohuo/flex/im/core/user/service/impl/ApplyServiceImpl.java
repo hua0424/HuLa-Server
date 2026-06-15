@@ -326,7 +326,7 @@ public class ApplyServiceImpl implements ApplyService {
 				} else {
 					// 处理加群, 如果是申请进群，那么用uid、否则是拉进群
 					Long infoUid = invite.getApplyFor() ? invite.getUid() : invite.getTargetId();
-					RoomGroup roomGroup = roomGroupCache.getByRoomId(invite.getRoomId());
+					RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(invite.getRoomId());
 
 					// 如果是申请进群，那么判断当前人员是否具备权限
 					if(invite.getApplyFor()){

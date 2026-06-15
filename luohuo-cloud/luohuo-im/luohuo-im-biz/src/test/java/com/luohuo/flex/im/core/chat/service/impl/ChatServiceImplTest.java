@@ -34,6 +34,8 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -514,6 +516,66 @@ class ChatServiceImplTest {
 			assertEquals(1, resps.size());
 			assertNull(byMsgId(resps).get("3001").getFromUser().getName(),
 					"summary 与群成员都缺失时 name 应为 null（不 NPE）");
+		}
+	}
+
+	// ==================== #40: getMsgResp / getMsgRespBatch 的 null 防御 ====================
+
+	@Nested
+	@DisplayName("#40 getMsgResp null 防御（getById 返 null 不再 NPE→500）")
+	class GetMsgRespNullGuard {
+
+		/** 构造一条合法消息（id+fromUid+type+createTime 齐备），可走通 batch。 */
+		private Message validMsg(Long msgId, Long senderUid) {
+			Message m = new Message();
+			m.setId(msgId);
+			m.setFromUid(senderUid);
+			m.setType(1);
+			m.setCreateTime(LocalDateTime.now());
+			return m;
+		}
+
+		/** 与 FromUserTypeFill 同款：mock 静态工厂返回 null，让真实消息走通 buildMsgResp。 */
+		private List<ChatMessageResp> batchWithMockedHandler(List<Message> messages, Long receiveUid) {
+			try (MockedStatic<MsgHandlerFactory> mf = mockStatic(MsgHandlerFactory.class)) {
+				mf.when(() -> MsgHandlerFactory.getStrategyNoNull(anyInt())).thenReturn(null);
+				return chatService.getMsgRespBatch(messages, receiveUid);
+			}
+		}
+
+		// ---- Case ①：核心真实修复——getById 返 null 时优雅返 null，不 NPE ----
+		@Test
+		@DisplayName("getMsgResp(msgId): messageDao.getById 返 null → 返回 null 且不抛 NPE")
+		void getMsgRespByIdReturnsNullWhenMessageNotFound() {
+			when(messageDao.getById(123L)).thenReturn(null);
+
+			ChatMessageResp resp = assertDoesNotThrow(
+					() -> chatService.getMsgResp(123L, NORMAL_UID),
+					"getById 返 null 不应导致 NPE（修复前会经 singletonList(null) 触发 Message::getId NPE）");
+			assertNull(resp, "找不到消息时应优雅返回 null");
+		}
+
+		// ---- Case ②(a)：批量路径——singletonList(null) → 空列表、不 NPE ----
+		@Test
+		@DisplayName("getMsgRespBatch(singletonList(null)) → 返回空列表，不抛 NPE")
+		void getMsgRespBatchSingletonNullReturnsEmpty() {
+			List<ChatMessageResp> resps = assertDoesNotThrow(
+					() -> chatService.getMsgRespBatch(Collections.singletonList(null), NORMAL_UID),
+					"批量路径混入单个 null 不应 NPE");
+			assertTrue(resps.isEmpty(), "全为 null 的批次过滤后应为空列表");
+		}
+
+		// ---- Case ②(b)：批量路径——[realMsg, null] → 仅处理 realMsg，null 被过滤 ----
+		@Test
+		@DisplayName("getMsgRespBatch([realMsg, null]) → null 被过滤，仅处理 realMsg（size==1），不 NPE")
+		void getMsgRespBatchMixedNullFiltersOnlyNull() {
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList())).thenReturn(Map.of());
+
+			List<ChatMessageResp> resps = assertDoesNotThrow(
+					() -> batchWithMockedHandler(Arrays.asList(validMsg(999L, NORMAL_UID), null), NORMAL_UID),
+					"混入 null 元素的批次不应 NPE");
+			assertEquals(1, resps.size(), "null 被过滤，仅保留 1 条真实消息");
 		}
 	}
 }
