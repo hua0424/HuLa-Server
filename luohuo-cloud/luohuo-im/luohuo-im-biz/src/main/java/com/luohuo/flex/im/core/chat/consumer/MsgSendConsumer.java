@@ -137,6 +137,14 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				WsBaseResp<ChatMessageResp> othersResp = WsAdapter.buildMsgSend(othersMsgResp);
 				// 恢复原始发送者显示
 				othersResp.getData().getFromUser().setUid(originalFromUid + "");
+				// #24: uid 已改回 originalFromUid，userType 与 name 也需同步纠正回 originalFromUid 的，
+				// 否则保留了通话创建者(creator)的 userType/name。复用 swap 前构建的 selfMsgResp
+				// （其 fromUser 由 getMsgRespBatch 按 originalFromUid 填好）已算好的值，零额外查询。
+				ChatMessageResp.UserInfo originalFromUser = selfMsgResp.getFromUser();
+				if (originalFromUser != null) {
+					MessageAdapter.fillFromUserType(othersResp.getData(), originalFromUser.getUserType());
+					MessageAdapter.fillFromUserName(othersResp.getData(), originalFromUser.getName());
+				}
 				pushService.sendPushMsg(othersResp, otherMembers, dto.getUid());
 				asyncSavePassageMsg(message.getId(), othersResp, onlineUsersList, dto.getUid());
 				message.setFromUid(originalFromUid);
