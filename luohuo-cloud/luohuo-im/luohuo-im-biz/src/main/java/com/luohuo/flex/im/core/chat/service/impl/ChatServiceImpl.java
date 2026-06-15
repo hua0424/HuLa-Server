@@ -299,12 +299,20 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public ChatMessageResp getMsgResp(Message message, Long receiveUid) {
+        // 防御直接调用方传入 null：避免构造 singletonList(null) 后在批量路径触发 Message::getId NPE。
+        if (message == null) {
+            return null;
+        }
         return CollUtil.getFirst(getMsgRespBatch(Collections.singletonList(message), receiveUid));
     }
 
     @Override
     public ChatMessageResp getMsgResp(Long msgId, Long receiveUid) {
         Message msg = messageDao.getById(msgId);
+        // getById 返 null（消息不存在）时优雅返 null，不构造 singletonList(null)→下游 NPE→500。
+        if (msg == null) {
+            return null;
+        }
         return getMsgResp(msg, receiveUid);
     }
 
@@ -567,6 +575,11 @@ public class ChatServiceImpl implements ChatService {
     }
 
     public List<ChatMessageResp> getMsgRespBatch(List<Message> messages, Long receiveUid) {
+        if (CollectionUtil.isEmpty(messages)) {
+            return new ArrayList<>();
+        }
+        // 防御批量路径中混入 null 元素（如 singletonList(null)）：过滤后再判空，避免下游 Message::getId NPE。
+        messages = messages.stream().filter(Objects::nonNull).collect(Collectors.toList());
         if (CollectionUtil.isEmpty(messages)) {
             return new ArrayList<>();
         }

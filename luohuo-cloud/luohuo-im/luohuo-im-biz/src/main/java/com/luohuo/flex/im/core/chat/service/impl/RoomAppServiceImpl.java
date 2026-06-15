@@ -442,7 +442,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	 */
 	private RoomGroup verifyGet(Long uid, AdminSetReq request) {
 		// 1. 判断群聊是否存在
-		RoomGroup roomGroup = roomGroupCache.getByRoomId(request.getRoomId());
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(request.getRoomId());
 		AssertUtil.isNotEmpty(roomGroup, GroupErrorEnum.GROUP_NOT_EXIST);
 
 		// 2. 判断该用户是否是群主
@@ -1178,7 +1178,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	public void exitGroup(Boolean isGroup, Long uid, MemberExitReq request) {
 		Long roomId = request.getRoomId();
 		// 1. 判断群聊是否存在
-		RoomGroup roomGroup = roomGroupCache.getByRoomId(roomId);
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(roomId);
 		AssertUtil.isNotEmpty(roomGroup, GroupErrorEnum.GROUP_NOT_EXIST);
 
 		// 2. 判断房间是否是大群聊 （大群聊禁止退出）
@@ -1626,7 +1626,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	@Override
 	@Transactional(rollbackFor = Exception.class)
 	public void disbandGroup(DisbandGroupReq request) {
-		RoomGroup roomGroup = roomGroupCache.getByRoomId(request.getRoomId());
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(request.getRoomId());
 		AssertUtil.isNotEmpty(roomGroup, GroupErrorEnum.GROUP_NOT_EXIST);
 
 		// 获取群主uid

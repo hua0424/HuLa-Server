@@ -75,7 +75,7 @@ public class GroupMemberDao extends ServiceImpl<GroupMemberMapper, GroupMember> 
 		if (CollectionUtil.isEmpty(uidList)) {
 			return Collections.emptyList();
 		}
-		RoomGroup roomGroup = roomGroupCache.getByRoomId(roomId);
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(roomId);
 		if (roomGroup == null) {
 			return Collections.emptyList();
 		}
@@ -109,7 +109,7 @@ public class GroupMemberDao extends ServiceImpl<GroupMemberMapper, GroupMember> 
 	 * @return
 	 */
     public GroupMember getMember(Long roomId, Long uid) {
-		RoomGroup roomGroup = roomGroupCache.getByRoomId(roomId);
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(roomId);
 		return lambdaQuery()
                 .eq(GroupMember::getGroupId, roomGroup.getId())
                 .eq(GroupMember::getUid, uid)
