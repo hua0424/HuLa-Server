@@ -30,4 +30,7 @@ public class BaseFileDTO implements Serializable {
     @Schema(description ="下载地址")
     @NotBlank
     private String url;
+
+    @Schema(description ="文件 MIME 类型，如 image/png、application/pdf")
+    private String mime;
 }
