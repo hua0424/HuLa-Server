@@ -16,6 +16,14 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!--
+          父 pom (luohuo-dependencies-parent) 在 pluginManagement 里硬编码了
+          surefire <skip>true</skip>/<skipTests>true</skipTests>，导致命令行
+          -DskipTests=false 无法覆盖。本模块改为由属性驱动并默认放开，使
+          `mvn test` 能运行单元测试；正常打包时仍用 -DskipTests=true 跳过。
+        -->
+        <skipTests>false</skipTests>
+        <maven.test.skip>false</maven.test.skip>
     </properties>
 
     <dependencies>
@@ -139,6 +147,30 @@
             <groupId>org.springframework.cloud</groupId>
             <artifactId>spring-cloud-context</artifactId>
         </dependency>
+
+        <!-- 单元测试：JUnit 5（版本由 spring-boot-starter-parent BOM 统一管理，不手写版本） -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              覆盖父 pom 硬编码的 surefire skip：改用属性驱动 (默认放开)，
+              使本模块的纯 POJO 单元测试可被 `mvn test` 执行。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skip>${maven.test.skip}</skip>
+                    <skipTests>${skipTests}</skipTests>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>
