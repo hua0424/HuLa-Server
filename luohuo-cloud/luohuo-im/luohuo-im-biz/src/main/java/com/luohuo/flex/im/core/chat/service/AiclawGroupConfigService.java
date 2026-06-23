@@ -40,4 +40,29 @@ public interface AiclawGroupConfigService {
 	 * @param uid     当前登录用户 uid
 	 */
 	void updateConfig(AiclawGroupConfigUpdateReq request, Long uid);
+
+	/**
+	 * REQ-009#84: 判断某 aiclaw 是否已在指定群被批准响应。
+	 *
+	 * <p>合同（#82）：approved == 1 为已批准；null 或 0（无记录/默认）为未批准。
+	 * 优先读 Redis 缓存（{@code buildConfigCacheKey}），缓存未命中回落 DB；
+	 * 无记录视为未批准（沉默）。
+	 *
+	 * @param aiclawUid aiclaw 的 uid
+	 * @param roomId    群聊 room_id
+	 * @return 已批准返回 true，否则 false
+	 */
+	boolean isApproved(Long aiclawUid, Long roomId);
+
+	/**
+	 * REQ-009#84: 从群消息收件人列表中剔除「未批准」的 aiclaw 成员。
+	 *
+	 * <p>ADR-0002 gate 落点：非 aiclaw 成员永不过滤；aiclaw 成员仅当未批准时剔除，
+	 * 已批准 aiclaw 保留。空/Null 列表原样返回。
+	 *
+	 * @param memberUids 群消息收件人 uid 列表
+	 * @param roomId     群聊 room_id
+	 * @return 剔除未批准 aiclaw 后的新列表
+	 */
+	List<Long> filterUnapprovedAiclawRecipients(List<Long> memberUids, Long roomId);
 }

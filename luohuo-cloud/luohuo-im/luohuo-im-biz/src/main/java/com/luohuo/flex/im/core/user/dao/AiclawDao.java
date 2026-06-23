@@ -6,6 +6,8 @@ import com.luohuo.flex.im.domain.entity.Aiclaw;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -24,6 +26,19 @@ public class AiclawDao extends ServiceImpl<AiclawMapper, Aiclaw> {
 
 	public List<Aiclaw> listByOwner(Long ownerUid) {
 		return lambdaQuery().eq(Aiclaw::getOwnerUid, ownerUid).list();
+	}
+
+	/**
+	 * REQ-009#84: 批量识别 uid 列表中的 aiclaw（按 uid 字段查询，非 @TableId）。
+	 *
+	 * @param uids 待筛查的 uid 集合
+	 * @return 其中属于 aiclaw 的记录；uids 为 null/空时返回空 List
+	 */
+	public List<Aiclaw> listByUids(Collection<Long> uids) {
+		if (uids == null || uids.isEmpty()) {
+			return Collections.emptyList();
+		}
+		return lambdaQuery().in(Aiclaw::getUid, uids).list();
 	}
 
 	public Aiclaw getByOwnerAndUid(Long ownerUid, Long uid) {

@@ -1,11 +1,14 @@
 package com.luohuo.flex.im.core.chat.service.impl;
 
 import com.luohuo.basic.exception.BizException;
+import cn.hutool.json.JSONUtil;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
+import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawGroupConfigUpdateReq;
@@ -48,6 +51,7 @@ class AiclawGroupConfigServiceImplTest {
 	@Mock private StringRedisTemplate stringRedisTemplate;
 	@Mock private ValueOperations<String, String> valueOps;
 	@Mock private RoomGroupCache roomGroupCache;
+	@Mock private AiclawDao aiclawDao;
 
 	@InjectMocks
 	private AiclawGroupConfigServiceImpl configService;
@@ -391,5 +395,142 @@ class AiclawGroupConfigServiceImplTest {
 		assertNotNull(change.getConfig());
 		assertEquals(1, change.getConfig().getApproved());
 		assertEquals("/ws", change.getConfig().getWorkspaceDir());
+	}
+
+	// =====================================================================
+	// REQ-009 #84: 批准门控 —— isApproved 读取 + filterUnapprovedAiclawRecipients 收件人过滤。
+	// 合同（#82）：approved == 1 为已批准；null/0（无记录/默认）为未批准。
+	// =====================================================================
+
+	private String cachedRespJson(Long aiclawUid, Long roomId, Integer approved) {
+		AiclawGroupConfigResp resp = AiclawGroupConfigResp.builder()
+				.aiclawUid(aiclawUid)
+				.roomId(roomId)
+				.approved(approved)
+				.build();
+		return JSONUtil.toJsonStr(resp);
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: isApproved 缓存命中 approved=1 → true")
+	void isApproved_cacheHitApproved_returnsTrue() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.get(anyString())).thenReturn(cachedRespJson(AICLAW_UID, ROOM_ID, 1));
+
+		assertTrue(configService.isApproved(AICLAW_UID, ROOM_ID));
+		// 命中缓存不应回落 DB
+		verify(aiclawGroupConfigMapper, never()).selectOne(any());
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: isApproved 缓存命中 approved=0 → false")
+	void isApproved_cacheHitNotApproved_returnsFalse() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.get(anyString())).thenReturn(cachedRespJson(AICLAW_UID, ROOM_ID, 0));
+
+		assertFalse(configService.isApproved(AICLAW_UID, ROOM_ID));
+		verify(aiclawGroupConfigMapper, never()).selectOne(any());
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: isApproved 缓存命中 approved=null → false")
+	void isApproved_cacheHitApprovedNull_returnsFalse() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.get(anyString())).thenReturn(cachedRespJson(AICLAW_UID, ROOM_ID, null));
+
+		assertFalse(configService.isApproved(AICLAW_UID, ROOM_ID));
+		verify(aiclawGroupConfigMapper, never()).selectOne(any());
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: isApproved 缓存未命中 + DB 记录 approved=1 → true")
+	void isApproved_cacheMissDbApproved_returnsTrue() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.get(anyString())).thenReturn(null);
+		AiclawGroupConfig config = AiclawGroupConfig.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.build();
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(config);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		assertTrue(configService.isApproved(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: isApproved 缓存未命中 + 无 DB 记录 → false（默认沉默）")
+	void isApproved_cacheMissNoRow_returnsFalse() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.get(anyString())).thenReturn(null);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		assertFalse(configService.isApproved(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: filterUnapprovedAiclawRecipients 剔除未批准 aiclaw，保留普通用户与已批准 aiclaw")
+	void filterUnapprovedAiclawRecipients_removesUnapprovedAiclaws() {
+		Long normalUser = 300L;
+		Long aiclawApproved = 301L;
+		Long aiclawUnapproved = 302L;
+		Long aiclawNoRow = 303L;
+
+		List<Long> members = List.of(normalUser, aiclawApproved, aiclawUnapproved, aiclawNoRow);
+
+		// aiclawDao 识别出收件人中的 3 个 aiclaw（normalUser 不是 aiclaw）
+		when(aiclawDao.listByUids(members)).thenReturn(List.of(
+				aiclawRow(aiclawApproved),
+				aiclawRow(aiclawUnapproved),
+				aiclawRow(aiclawNoRow)));
+
+		// 缓存：approved=1 / approved=0 / 未命中（回落 DB 无记录）
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.get(contains(":" + aiclawApproved + ":")))
+				.thenReturn(cachedRespJson(aiclawApproved, ROOM_ID, 1));
+		when(valueOps.get(contains(":" + aiclawUnapproved + ":")))
+				.thenReturn(cachedRespJson(aiclawUnapproved, ROOM_ID, 0));
+		when(valueOps.get(contains(":" + aiclawNoRow + ":"))).thenReturn(null);
+		// aiclawNoRow 缓存未命中 → 回落 DB 也无记录 → 未批准
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		List<Long> result = configService.filterUnapprovedAiclawRecipients(members, ROOM_ID);
+
+		// 普通用户保留，已批准 aiclaw 保留；两个未批准 aiclaw 被剔除
+		assertEquals(List.of(normalUser, aiclawApproved), result);
+		assertTrue(result.contains(normalUser));
+		assertTrue(result.contains(aiclawApproved));
+		assertFalse(result.contains(aiclawUnapproved));
+		assertFalse(result.contains(aiclawNoRow));
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: filterUnapprovedAiclawRecipients 空/Null 列表原样返回")
+	void filterUnapprovedAiclawRecipients_nullOrEmpty_returnsAsIs() {
+		assertNull(configService.filterUnapprovedAiclawRecipients(null, ROOM_ID));
+		assertTrue(configService.filterUnapprovedAiclawRecipients(Collections.emptyList(), ROOM_ID).isEmpty());
+		// 空/Null 不应触发任何查询
+		verify(aiclawDao, never()).listByUids(any());
+	}
+
+	@Test
+	@DisplayName("REQ-009#84: filterUnapprovedAiclawRecipients 无 aiclaw 成员时原样返回，不调 isApproved")
+	void filterUnapprovedAiclawRecipients_noAiclawMembers_returnsAsIs() {
+		List<Long> members = List.of(400L, 401L);
+		when(aiclawDao.listByUids(members)).thenReturn(Collections.emptyList());
+
+		List<Long> result = configService.filterUnapprovedAiclawRecipients(members, ROOM_ID);
+
+		assertEquals(members, result);
+		// 无 aiclaw → 不触碰缓存/DB
+		verify(stringRedisTemplate, never()).opsForValue();
+	}
+
+	private Aiclaw aiclawRow(Long uid) {
+		Aiclaw a = new Aiclaw();
+		a.setUid(uid);
+		return a;
 	}
 }
