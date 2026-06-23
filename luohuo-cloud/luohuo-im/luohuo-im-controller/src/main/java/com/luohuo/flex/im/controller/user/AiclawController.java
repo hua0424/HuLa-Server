@@ -9,6 +9,7 @@ import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawPersonaReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawRelationReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportTypeReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
@@ -65,6 +66,14 @@ public class AiclawController {
 	@Operation(summary = "获取AI助理列表")
 	public R<List<AiclawListResp>> list() {
 		return R.success(aiclawService.list(ContextUtil.getUid()));
+	}
+
+	@PostMapping("/report-agent-type")
+	@Operation(summary = "aiclaw 连接后上报 agent 类型（REQ-009 #83，仅可上报自身类型）")
+	public R<Void> reportAgentType(@RequestBody AiclawReportTypeReq req) {
+		// 防伪造：caller 的 uid（来自 aiclaw connectionToken）即被上报方，只能上报自己的类型
+		aiclawService.reportAgentType(ContextUtil.getUid(), req.getAgentType());
+		return R.success();
 	}
 
 	@GetMapping("/{uid}/activation-token")

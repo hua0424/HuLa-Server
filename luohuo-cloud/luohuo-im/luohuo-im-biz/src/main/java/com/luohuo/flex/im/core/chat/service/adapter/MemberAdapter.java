@@ -31,6 +31,9 @@ import static com.luohuo.flex.model.entity.ws.WSMemberChange.CHANGE_TYPE_ADD;
 public class MemberAdapter {
 
     public static List<ChatMemberListResp> buildMemberList(List<User> memberList) {
+        // REQ-009 #83 TODO: 群成员输出当前仅基于 im_user，未承载 aiclaw 专属字段（adapter_type）。
+        // 为 aiclaw 成员(userType=4)补 adapterType 需要按成员批量 join im_aiclaw，属成员信息/徽标分片的跨切改动，
+        // 本分片不强行引入；待该分片落地时在此填充。aiclaw 列表(/aiclaw/list)已通过 AiclawListResp.adapterType 暴露。
         return memberList.stream()
                 .map(a -> {
                     ChatMemberListResp resp = new ChatMemberListResp();
