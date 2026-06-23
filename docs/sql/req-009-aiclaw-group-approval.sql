@@ -54,7 +54,9 @@ WHERE c.is_del = 0 AND c.approved <> 1;
 --     id 用雪花占位不可行（无函数），这里用主键自增不可用（id 非自增）——改用 UUID 数值化的稳定占位：
 --     采用 (gm.id) 作为派生主键来源，保证幂等且不与既有雪花 id 冲突区间重叠的风险极低；
 --     若部署环境对 id 生成有要求，可改由应用侧补行。详见下方 NOTE。
-INSERT INTO `im_aiclaw_group_config`
+-- REQ-009 #84 P2（reviewer 建议）：INSERT IGNORE 双保险——WHERE NOT EXISTS 已幂等，
+--   IGNORE 再兜底任何并发/重跑下的主键冲突（静默跳过而非中断），回填可安全重复执行。
+INSERT IGNORE INTO `im_aiclaw_group_config`
     (`id`, `tenant_id`, `aiclaw_uid`, `room_id`,
      `rate_limit_per_minute`, `mention_required`, `daily_limit`, `respond_to_ai`,
      `approved`, `workspace_dir`, `is_del`, `create_time`, `update_time`)

@@ -9,9 +9,11 @@ import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawGroupConfigUpdateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigResp;
@@ -23,7 +25,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * aiclaw 群聊配置服务实现
@@ -42,6 +47,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	private final PushService pushService;
 	private final StringRedisTemplate stringRedisTemplate;
 	private final RoomGroupCache roomGroupCache;
+	private final AiclawDao aiclawDao;
 
 	@Override
 	public AiclawGroupConfigResp getConfig(Long aiclawUid, Long roomId, Long uid) {
@@ -106,6 +112,71 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 					return r;
 				})
 				.toList();
+	}
+
+	@Override
+	public boolean isApproved(Long aiclawUid, Long roomId) {
+		// 优先读 Redis 缓存
+		String cacheKey = buildConfigCacheKey(aiclawUid, roomId);
+		String cached = stringRedisTemplate.opsForValue().get(cacheKey);
+		if (cached != null) {
+			AiclawGroupConfigResp resp = JSONUtil.toBean(cached, AiclawGroupConfigResp.class);
+			// 合同（#82）：approved == 1 为已批准；null/0 为未批准
+			return Integer.valueOf(1).equals(resp.getApproved());
+		}
+
+		// 缓存未命中：回落 DB
+		AiclawGroupConfig config = aiclawGroupConfigMapper.selectOne(
+				new LambdaQueryWrapper<AiclawGroupConfig>()
+						.eq(AiclawGroupConfig::getAiclawUid, aiclawUid)
+						.eq(AiclawGroupConfig::getRoomId, roomId));
+
+		AiclawGroupConfigResp resp;
+		if (config == null) {
+			// 无记录：默认未批准（approved=0），与 getConfig 默认值路径保持一致
+			resp = AiclawGroupConfigResp.builder()
+					.aiclawUid(aiclawUid)
+					.roomId(roomId)
+					.rateLimitPerMinute(10)
+					.mentionRequired(1)
+					.dailyLimit(1000)
+					.respondToAi(1)
+					.approved(0)
+					.build();
+		} else {
+			resp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
+		}
+		resp.setAccount(accountOf(roomId));
+
+		// 预热缓存（避免穿透），与 getConfig 行为一致
+		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp), CONFIG_CACHE_TTL);
+		return Integer.valueOf(1).equals(resp.getApproved());
+	}
+
+	@Override
+	public List<Long> filterUnapprovedAiclawRecipients(List<Long> memberUids, Long roomId) {
+		if (memberUids == null || memberUids.isEmpty()) {
+			return memberUids;
+		}
+		// 找出收件人中属于 aiclaw 的 uid
+		List<Aiclaw> aiclaws = aiclawDao.listByUids(memberUids);
+		if (aiclaws == null || aiclaws.isEmpty()) {
+			// 没有 aiclaw 成员 → 无需过滤
+			return memberUids;
+		}
+		Set<Long> aiclawUids = aiclaws.stream()
+				.map(Aiclaw::getUid)
+				.collect(Collectors.toSet());
+
+		List<Long> result = new ArrayList<>(memberUids.size());
+		for (Long uid : memberUids) {
+			// 非 aiclaw 永远保留；aiclaw 仅在已批准时保留
+			if (aiclawUids.contains(uid) && !isApproved(uid, roomId)) {
+				continue;
+			}
+			result.add(uid);
+		}
+		return result;
 	}
 
 	@Override

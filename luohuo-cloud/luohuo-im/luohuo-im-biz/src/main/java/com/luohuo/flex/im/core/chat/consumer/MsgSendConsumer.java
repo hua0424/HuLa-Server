@@ -25,6 +25,7 @@ import com.luohuo.flex.im.domain.enums.MessageTypeEnum;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
+import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -68,6 +69,7 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 	private AiclawDao aiclawDao;
 	private AiclawFriendExtDao aiclawFriendExtDao;
 	private UserSummaryCache userSummaryCache;
+	private AiclawGroupConfigService aiclawGroupConfigService;
 
     @Override
     public void onMessage(MsgSendMessageDTO dto) {
@@ -90,6 +92,9 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 		List<Long> memberUidList = new ArrayList<>();
 		if (Objects.equals(room.getType(), RoomTypeEnum.GROUP.getType())) {
 			memberUidList = groupMemberCache.getMemberExceptUidList(room.getId());
+			// REQ-009#84 (ADR-0002): 在收件人计算处剔除「未批准」的 aiclaw 成员，
+			// 使其完全收不到该群消息（agent 永不触达 → 不会执行代码）。私聊不受此门控约束。
+			memberUidList = aiclawGroupConfigService.filterUnapprovedAiclawRecipients(memberUidList, room.getId());
 		} else if (Objects.equals(room.getType(), RoomTypeEnum.FRIEND.getType())) {
 			// 单聊对象, 对单人推送
 			RoomFriend roomFriend = roomFriendDao.getByRoomId(room.getId());
