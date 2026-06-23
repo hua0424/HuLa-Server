@@ -24,6 +24,9 @@ public class WSGroupConfigChange {
 	@Schema(description = "变更后的配置")
 	private ConfigDTO config;
 
+	@Schema(description = "REQ-009#82: 群的可读群号（plugins 据此派生工作目录 groupkey）")
+	private String account;
+
 	/**
 	 * 嵌套配置结构（避免扁平化字段冲突）
 	 */
@@ -45,5 +48,11 @@ public class WSGroupConfigChange {
 
 		@Schema(description = "是否响应其他 aiclaw：0=否，1=是")
 		private Integer respondToAi;
+
+		@Schema(description = "REQ-009#82: 是否已批准在该群响应：0=未批准/沉默，1=已批准")
+		private Integer approved;
+
+		@Schema(description = "REQ-009#82: 工作目录（可空；NULL=plugins 自行派生默认目录）")
+		private String workspaceDir;
 	}
 }

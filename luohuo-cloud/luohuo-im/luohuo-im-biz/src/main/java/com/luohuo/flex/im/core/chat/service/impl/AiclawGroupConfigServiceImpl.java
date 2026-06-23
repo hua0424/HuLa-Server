@@ -7,6 +7,8 @@ import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
+import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
+import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
@@ -39,6 +41,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	private final GroupMemberCache groupMemberCache;
 	private final PushService pushService;
 	private final StringRedisTemplate stringRedisTemplate;
+	private final RoomGroupCache roomGroupCache;
 
 	@Override
 	public AiclawGroupConfigResp getConfig(Long aiclawUid, Long roomId, Long uid) {
@@ -63,6 +66,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		AiclawGroupConfigResp resp;
 		if (config == null) {
 			// 无记录时返回默认值
+			// REQ-009#82: approved 默认 0（未批准/沉默）。此默认 Resp 会被缓存——若不显式置 0，
+			// approved 为 null，下游 gate 会把 null 当作「已批准」而错误放行。workspace_dir 默认 null。
 			resp = AiclawGroupConfigResp.builder()
 					.aiclawUid(aiclawUid)
 					.roomId(roomId)
@@ -70,10 +75,13 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 					.mentionRequired(1)
 					.dailyLimit(1000)
 					.respondToAi(1)
+					.approved(0)
 					.build();
 		} else {
 			resp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
 		}
+		// REQ-009#82: 回填群号（默认值路径与实体路径都需要），供 plugins 派生工作目录 groupkey
+		resp.setAccount(accountOf(roomId));
 
 		// 写入 Redis 缓存（默认值也缓存，避免穿透）
 		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp), CONFIG_CACHE_TTL);
@@ -91,7 +99,12 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				new LambdaQueryWrapper<AiclawGroupConfig>()
 						.eq(AiclawGroupConfig::getAiclawUid, aiclawUid));
 		return configs.stream()
-				.map(c -> BeanUtil.copyProperties(c, AiclawGroupConfigResp.class))
+				.map(c -> {
+					AiclawGroupConfigResp r = BeanUtil.copyProperties(c, AiclawGroupConfigResp.class);
+					// REQ-009#82: 按 roomId 回填群号
+					r.setAccount(accountOf(c.getRoomId()));
+					return r;
+				})
 				.toList();
 	}
 
@@ -108,6 +121,12 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		}
 		if (!uid.equals(ownerUid) && !uid.equals(aiclawUid)) {
 			throw new BizException("只有AI助理主人或AI助理本人可以修改群配置");
+		}
+
+		// REQ-009#82: 字段级权限——approved / workspaceDir 仅群主可设置（拒绝 aiclaw 本人自我批准，
+		// 这是 gate 的核心意义）。旧字段（rate/mention/daily/respondToAi）保持「群主或本人」皆可。
+		if ((request.getApproved() != null || request.getWorkspaceDir() != null) && !uid.equals(ownerUid)) {
+			throw new BizException("只有AI助理主人可以批准或配置工作目录");
 		}
 
 		// 校验 aiclaw 在该群中
@@ -136,7 +155,10 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		}
 
 		// 更新 Redis 缓存
+		// REQ-009#82: BeanUtil 已携带 approved/workspaceDir；再补 account 后入缓存，
+		// 使下游 gate 从缓存读到的 Resp 含完整批准态与群号。
 		AiclawGroupConfigResp cachedResp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
+		cachedResp.setAccount(accountOf(roomId));
 		stringRedisTemplate.opsForValue().set(
 				buildConfigCacheKey(aiclawUid, roomId), JSONUtil.toJsonStr(cachedResp), CONFIG_CACHE_TTL);
 
@@ -146,11 +168,14 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				.mentionRequired(config.getMentionRequired())
 				.dailyLimit(config.getDailyLimit())
 				.respondToAi(config.getRespondToAi())
+				.approved(config.getApproved())
+				.workspaceDir(config.getWorkspaceDir())
 				.build();
 		WSGroupConfigChange change = WSGroupConfigChange.builder()
 				.aiclawUid(String.valueOf(aiclawUid))
 				.roomId(String.valueOf(roomId))
 				.config(configDTO)
+				.account(accountOf(roomId))
 				.build();
 		pushService.sendPushMsg(WsAdapter.buildGroupConfigChange(change), memberUids, uid);
 		log.debug("group config change broadcast: aiclawUid={}, roomId={}, members={}", aiclawUid, roomId, memberUids.size());
@@ -158,6 +183,14 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 
 	private String buildConfigCacheKey(Long aiclawUid, Long roomId) {
 		return REDIS_CONFIG_KEY_PREFIX + aiclawUid + ":" + roomId;
+	}
+
+	/**
+	 * REQ-009#82: 取群的可读群号（account），null-safe。
+	 */
+	private String accountOf(Long roomId) {
+		RoomGroup rg = roomGroupCache.get(roomId);
+		return rg != null ? rg.getAccount() : null;
 	}
 
 	private void fillConfigFields(AiclawGroupConfig config, AiclawGroupConfigUpdateReq request) {
@@ -172,6 +205,14 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		}
 		if (request.getRespondToAi() != null) {
 			config.setRespondToAi(request.getRespondToAi());
+		}
+		// REQ-009#82: approved / workspaceDir 仅在请求显式携带时更新。
+		// 撤销天然成立：群主发 approved=0 且不带 workspaceDir → approved 置 0、workspaceDir 原值保留。
+		if (request.getApproved() != null) {
+			config.setApproved(request.getApproved());
+		}
+		if (request.getWorkspaceDir() != null) {
+			config.setWorkspaceDir(request.getWorkspaceDir());
 		}
 		// aichatoverview#3: shortReplyThreshold / shortReplyLookback 已从 UpdateReq 移除，不再处理
 	}

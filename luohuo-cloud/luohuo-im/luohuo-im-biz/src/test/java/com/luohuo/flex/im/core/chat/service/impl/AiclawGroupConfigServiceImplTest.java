@@ -1,12 +1,17 @@
 package com.luohuo.flex.im.core.chat.service.impl;
 
+import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
+import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
+import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawGroupConfigUpdateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigResp;
+import com.luohuo.flex.model.entity.WsBaseResp;
+import com.luohuo.flex.model.entity.ws.WSGroupConfigChange;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -42,6 +47,7 @@ class AiclawGroupConfigServiceImplTest {
 	@Mock private PushService pushService;
 	@Mock private StringRedisTemplate stringRedisTemplate;
 	@Mock private ValueOperations<String, String> valueOps;
+	@Mock private RoomGroupCache roomGroupCache;
 
 	@InjectMocks
 	private AiclawGroupConfigServiceImpl configService;
@@ -49,6 +55,14 @@ class AiclawGroupConfigServiceImplTest {
 	private static final Long AICLAW_UID = 100L;
 	private static final Long ROOM_ID = 10L;
 	private static final Long UID = 200L;
+	private static final String ACCOUNT = "G123456";
+
+	private RoomGroup roomGroupWithAccount() {
+		RoomGroup rg = new RoomGroup();
+		rg.setRoomId(ROOM_ID);
+		rg.setAccount(ACCOUNT);
+		return rg;
+	}
 
 	/**
 	 * aichatoverview#26: 初始化 AiclawGroupConfig 的 MyBatis-Plus TableInfo 缓存，
@@ -100,6 +114,7 @@ class AiclawGroupConfigServiceImplTest {
 		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
 		when(valueOps.get(anyString())).thenReturn(null);
 		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
 
 		AiclawGroupConfigResp resp = configService.getConfig(AICLAW_UID, ROOM_ID, UID);
 
@@ -111,6 +126,9 @@ class AiclawGroupConfigServiceImplTest {
 		assertEquals(1, resp.getMentionRequired());
 		assertEquals(1000, resp.getDailyLimit());
 		assertEquals(1, resp.getRespondToAi());
+		// REQ-009#82: 无记录默认 approved=0（NOT null），account 为 mock 的群号
+		assertEquals(0, resp.getApproved());
+		assertEquals(ACCOUNT, resp.getAccount());
 	}
 
 	@Test
@@ -219,5 +237,159 @@ class AiclawGroupConfigServiceImplTest {
 		assertTrue(wrapper.getParamNameValuePairs().containsValue(AICLAW_UID));
 		// selectList 仅被调用一次——不会发出携带其他 aiclawUid 的额外查询
 		verify(aiclawGroupConfigMapper, times(1)).selectList(any());
+	}
+
+	// =====================================================================
+	// REQ-009 #82: (aiclaw, 群) 批准合同 —— approved / workspaceDir 字段级群主权限。
+	// grandfather SQL 回填由部署期 DB 断言验证（见 docs/sql/req-009-aiclaw-group-approval.sql），
+	// 不在本单元测试范畴。
+	// =====================================================================
+
+	@Test
+	@DisplayName("REQ-009#82: 群主设置 approved=1 + workspaceDir 成功，落库实体含正确值")
+	void ownerSetsApprovedAndWorkspaceDir_succeeds() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.workspaceDir("/x")
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID); // UID = 群主
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		configService.updateConfig(req, UID);
+
+		ArgumentCaptor<AiclawGroupConfig> captor = ArgumentCaptor.forClass(AiclawGroupConfig.class);
+		verify(aiclawGroupConfigMapper).insert(captor.capture());
+		AiclawGroupConfig saved = captor.getValue();
+		assertEquals(1, saved.getApproved());
+		assertEquals("/x", saved.getWorkspaceDir());
+	}
+
+	@Test
+	@DisplayName("REQ-009#82: aiclaw 本人自我批准 approved → BizException（拒绝）")
+	void aiclawSelfSetsApproved_throws() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.build();
+
+		// owner != caller：owner 是 UID，调用者是 aiclaw 本人
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+
+		BizException ex = assertThrows(BizException.class,
+				() -> configService.updateConfig(req, AICLAW_UID));
+		assertTrue(ex.getMessage().contains("只有AI助理主人"));
+		verify(aiclawGroupConfigMapper, never()).insert(any(AiclawGroupConfig.class));
+		verify(aiclawGroupConfigMapper, never()).updateById(any(AiclawGroupConfig.class));
+	}
+
+	@Test
+	@DisplayName("REQ-009#82: aiclaw 本人设置 workspaceDir → BizException（拒绝）")
+	void aiclawSelfSetsWorkspaceDir_throws() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.workspaceDir("/hack")
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+
+		BizException ex = assertThrows(BizException.class,
+				() -> configService.updateConfig(req, AICLAW_UID));
+		assertTrue(ex.getMessage().contains("只有AI助理主人"));
+		verify(aiclawGroupConfigMapper, never()).insert(any(AiclawGroupConfig.class));
+		verify(aiclawGroupConfigMapper, never()).updateById(any(AiclawGroupConfig.class));
+	}
+
+	@Test
+	@DisplayName("REQ-009#82: aiclaw 本人只设置旧字段（rateLimit）→ 仍成功，不触发群主校验")
+	void aiclawSelfSetsOnlyOldField_succeeds() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.rateLimitPerMinute(7)
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID); // owner=UID, caller=aiclaw 本人
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		assertDoesNotThrow(() -> configService.updateConfig(req, AICLAW_UID));
+		verify(aiclawGroupConfigMapper).insert(any(AiclawGroupConfig.class));
+	}
+
+	@Test
+	@DisplayName("REQ-009#82: 撤销——群主发 approved=0（不带 workspaceDir），既有 workspaceDir 保留")
+	void ownerRevokeApproved_preservesWorkspaceDir() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(0)
+				.build();
+
+		AiclawGroupConfig existing = AiclawGroupConfig.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.rateLimitPerMinute(10)
+				.mentionRequired(1)
+				.dailyLimit(1000)
+				.respondToAi(1)
+				.approved(1)
+				.workspaceDir("/keep")
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(existing);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		configService.updateConfig(req, UID);
+
+		ArgumentCaptor<AiclawGroupConfig> captor = ArgumentCaptor.forClass(AiclawGroupConfig.class);
+		verify(aiclawGroupConfigMapper).updateById(captor.capture());
+		AiclawGroupConfig saved = captor.getValue();
+		assertEquals(0, saved.getApproved());
+		assertEquals("/keep", saved.getWorkspaceDir());
+	}
+
+	@Test
+	@DisplayName("REQ-009#82: updateConfig 广播——ConfigDTO 含 approved/workspaceDir，外层含 account")
+	void updateConfigBroadcast_carriesApprovedWorkspaceDirAndAccount() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.workspaceDir("/ws")
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		configService.updateConfig(req, UID);
+
+		// WsAdapter.buildGroupConfigChange 把 WSGroupConfigChange 包进 WsBaseResp.data，
+		// 透传给 pushService.sendPushMsg(WsBaseResp<?>, List<Long>, Long)；这里捕获该信封并取出载荷。
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<WsBaseResp<?>> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
+		verify(pushService).sendPushMsg(msgCaptor.capture(), anyList(), eq(UID));
+		Object data = msgCaptor.getValue().getData();
+		assertTrue(data instanceof WSGroupConfigChange, "WsBaseResp.data 应为 WSGroupConfigChange");
+		WSGroupConfigChange change = (WSGroupConfigChange) data;
+		assertEquals(ACCOUNT, change.getAccount());
+		assertNotNull(change.getConfig());
+		assertEquals(1, change.getConfig().getApproved());
+		assertEquals("/ws", change.getConfig().getWorkspaceDir());
 	}
 }
