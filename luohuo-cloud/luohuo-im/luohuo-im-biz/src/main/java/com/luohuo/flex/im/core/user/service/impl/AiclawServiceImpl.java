@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.user.service.impl;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.crypto.SecureUtil;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import cn.hutool.crypto.digest.BCrypt;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
@@ -293,6 +294,28 @@ public class AiclawServiceImpl implements AiclawService {
 					.createTime(a.getCreateTime())
 					.build();
 		}).collect(Collectors.toList());
+	}
+
+	@Override
+	@Transactional(rollbackFor = Exception.class)
+	public void reportAgentType(Long uid, String agentType) {
+		// 非空保护：null/空白不覆写，保留"最后已知类型"（某次连接未携带类型时不抹掉历史值）
+		if (StrUtil.isBlank(agentType)) {
+			return;
+		}
+		Aiclaw aiclaw = aiclawDao.getByUid(uid);
+		if (aiclaw == null) {
+			// 未知 aiclaw：记录后优雅返回，绝不新建
+			log.warn("reportAgentType: aiclaw not found, uid={}, agentType={}", uid, agentType);
+			return;
+		}
+		LambdaUpdateWrapper<Aiclaw> update = new LambdaUpdateWrapper<Aiclaw>()
+				.eq(Aiclaw::getUid, uid)
+				.set(Aiclaw::getAdapterType, agentType);
+		aiclawDao.update(update);
+		// 刷新主人关系缓存（保持缓存与 DB 一致；该缓存未直接承载 adapter_type，但 refresh 安全无副作用）
+		aiclawOwnerCache.refresh(uid);
+		log.info("reportAgentType: uid={}, adapterType {} -> {}", uid, aiclaw.getAdapterType(), agentType);
 	}
 
 	@Override

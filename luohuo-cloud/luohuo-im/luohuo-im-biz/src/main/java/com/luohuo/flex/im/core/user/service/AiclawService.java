@@ -32,6 +32,14 @@ public interface AiclawService {
 	List<AiclawListResp> list(Long ownerUid);
 
 	/**
+	 * aiclaw 连接后上报 agent 类型，覆写 im_aiclaw.adapter_type（REQ-009 #83）。
+	 *
+	 * @param uid       被上报的 aiclaw uid（= caller 自身，防伪造）
+	 * @param agentType 上报的类型；为 null/空白时 no-op（保留"最后已知类型"）
+	 */
+	void reportAgentType(Long uid, String agentType);
+
+	/**
 	 * 修改AI助理资料（name/avatar/description）
 	 */
 	void updateProfile(AiclawUpdateReq req, Long ownerUid);
