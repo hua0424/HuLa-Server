@@ -42,4 +42,11 @@ public class AiclawGroupConfigUpdateReq {
 	@Range(min = 0, max = 1)
 	@Schema(description = "是否响应其他 aiclaw：0=否，1=是")
 	private Integer respondToAi;
+
+	@Range(min = 0, max = 1)
+	@Schema(description = "REQ-009#82: 是否已批准在该群响应：0=未批准/沉默，1=已批准（仅群主可设置）")
+	private Integer approved;
+
+	@Schema(description = "REQ-009#82: 工作目录（仅群主可设置；不传=不变）")
+	private String workspaceDir;
 }

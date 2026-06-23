@@ -61,6 +61,20 @@ public class AiclawGroupConfig extends Entity<Long> {
 	private Integer respondToAi;
 
 	/**
+	 * REQ-009#82: 是否已批准在该群响应：0=未批准/沉默（默认），1=已批准。仅群主可设置。
+	 */
+	@Schema(description = "是否已批准在该群响应：0=未批准/沉默，1=已批准")
+	@TableField("approved")
+	private Integer approved;
+
+	/**
+	 * REQ-009#82: 工作目录（可空；NULL=plugins 自行按群号派生默认目录）。仅群主可设置。
+	 */
+	@Schema(description = "工作目录（可空；NULL=plugins 自行派生默认目录）")
+	@TableField("workspace_dir")
+	private String workspaceDir;
+
+	/**
 	 * 短回复字符阈值
 	 * @deprecated aichatoverview#3 已下线，保留 DB 字段兼容历史数据
 	 */
