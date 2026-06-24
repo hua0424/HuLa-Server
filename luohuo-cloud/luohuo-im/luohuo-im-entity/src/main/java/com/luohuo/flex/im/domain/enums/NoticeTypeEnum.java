@@ -22,7 +22,8 @@ public enum NoticeTypeEnum implements Serializable {
 	GROUP_MEMBER_DELETE(5, "移除群成员"),
 	GROUP_INVITE_ME(7, "被邀请进群"),
 	GROUP_SET_ADMIN(8, "设置群管理员"),
-	GROUP_RECALL_ADMIN(9, "取消群管理员");
+	GROUP_RECALL_ADMIN(9, "取消群管理员"),
+	AICLAW_GROUP_APPROVE(11, "AI助理入群待批准");
 
 	private final Integer type;
 	private final String desc;
