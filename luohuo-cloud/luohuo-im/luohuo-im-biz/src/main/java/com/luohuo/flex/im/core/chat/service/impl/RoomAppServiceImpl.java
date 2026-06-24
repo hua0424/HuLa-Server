@@ -1584,6 +1584,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 							.uid(String.valueOf(member.getUid()))
 							.name(StrUtil.isEmpty(member.getMyName())? user.getName() : member.getMyName())
 							.roleId(member.getRoleId())
+							.userType(user.getUserType())
 							.activeStatus(onlineStatus)
 							.locPlace(locPlace)
 							.ipAddress(ipAddress)

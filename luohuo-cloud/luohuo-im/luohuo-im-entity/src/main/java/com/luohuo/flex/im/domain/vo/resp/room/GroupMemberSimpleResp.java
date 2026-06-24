@@ -25,6 +25,9 @@ public class GroupMemberSimpleResp {
     @Schema(description = "角色 1-群主 2-管理员 3-普通成员 4-已被移出")
     private Integer roleId;
 
+    @Schema(description = "用户类型：1系统 2机器人 3普通用户 4aiclaw")
+    private Integer userType;
+
     @Schema(description = "在线状态 1-在线 2-离线")
     private Integer activeStatus;
 
