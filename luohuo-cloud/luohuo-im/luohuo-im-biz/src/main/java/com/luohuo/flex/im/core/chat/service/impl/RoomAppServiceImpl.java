@@ -1072,10 +1072,12 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			return;
 		}
 
-		// REQ-004: 识别被邀请人中的 aiclaw，自动同意入群
-		Set<Long> aiclawUids = getAiclawUidsOfUser(uid);
-		Set<Long> autoAgreeUids = new HashSet<>(validUids);
-		autoAgreeUids.retainAll(aiclawUids);
+		// REQ-009 #88: 识别被邀请人中的所有 aiclaw（userType=4），无论归属，统一自动入群（pending）。
+		// 别人拉你的 aiclaw 也走自动入群，避免落入普通邀请流程而无 UI 可接受。
+		Set<Long> autoAgreeUids = userDao.listByIds(validUids).stream()
+				.filter(user -> Integer.valueOf(4).equals(user.getUserType()))
+				.map(User::getId)
+				.collect(Collectors.toSet());
 		validUids.removeAll(autoAgreeUids);
 
 		// 自动同意：直接入群，不走 UserApply
@@ -1127,13 +1129,6 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	}
 
 	/**
-	 * 获取用户拥有的所有 aiclaw uid 列表（带 Redis 缓存）
-	 */
-	private Set<Long> getAiclawUidsOfUser(Long ownerUid) {
-		return aiclawOwnerCache.getAiclawUids(ownerUid);
-	}
-
-	/**
 	 * 批量添加 aiclaw 入群（自动同意，不走 UserApply）
 	 */
 	private void batchAddAiclawMembers(RoomGroup roomGroup, Set<Long> aiclawUids, Long inviterUid) {
@@ -1164,6 +1159,19 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 					Arrays.asList(aiclawUid), inviterUid));
 
 			log.info("aiclaw auto-joined group: aiclawUid={}, roomId={}, inviter={}", aiclawUid, roomGroup.getRoomId(), inviterUid);
+
+			// REQ-009 #88: 别人拉你的 aiclaw 入群 → 给主人发「待批准」通知；主人自己拉自己的不发（主人在群里有就地审批弹窗）。
+			Long ownerUid = aiclawOwnerCache.getOwnerUid(aiclawUid);
+			if (ownerUid != null && !ownerUid.equals(inviterUid)) {
+				noticeService.createNotice(
+						RoomTypeEnum.GROUP, NoticeTypeEnum.AICLAW_GROUP_APPROVE,
+						aiclawUid,                 // senderId
+						ownerUid,                  // receiverId（aiclaw 的主人）
+						0L,                        // applyId
+						aiclawUid,                 // operate（= aiclaw uid → 服务端置 receiverUserType=4，转发给主人）
+						roomGroup.getRoomId(),     // roomId
+						roomGroup.getName());      // content = 群名
+			}
 		}
 	}
 
