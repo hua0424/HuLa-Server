@@ -9,6 +9,7 @@ import com.luohuo.flex.im.domain.vo.req.room.GroupPageReq;
 import com.luohuo.flex.im.domain.vo.req.room.UpdateMemberNicknameReq;
 import com.luohuo.flex.im.domain.vo.res.IdRespVO;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
+import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import io.swagger.v3.oas.annotations.Operation;
@@ -85,6 +86,15 @@ public class RoomController {
 	@Operation(summary ="群成员列表")
 	public R<List<ChatMemberResp>> listMember(@Valid MemberReq request) {
 		return R.success(roomService.listMember(request));
+	}
+
+	@GetMapping("/group/aiclaw/members")
+	@Operation(summary ="aiclaw 专用群成员列表（服务层硬鉴权 + 在线过滤）")
+	public R<List<AiclawMemberResp>> aiclawListMembers(
+			@RequestParam("roomId") Long roomId,
+			@RequestParam(value = "online", required = false, defaultValue = "false") Boolean online) {
+		Long aiclawUid = ContextUtil.getUid();
+		return R.success(roomService.aiclawListMembers(roomId, Boolean.TRUE.equals(online), aiclawUid));
 	}
 
     @GetMapping("/group/member/list")

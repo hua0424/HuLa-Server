@@ -38,6 +38,7 @@ import com.luohuo.flex.im.domain.vo.request.admin.AdminSetReq;
 import com.luohuo.flex.im.domain.vo.request.member.MemberExitReq;
 import com.luohuo.flex.im.domain.entity.msg.TextMsgReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
+import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import com.luohuo.flex.model.entity.ws.AdminChangeDTO;
@@ -941,6 +942,35 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 
 		// 7. 群主、管理员永远在前面
 		return chatMemberResps;
+	}
+
+	@Override
+	public List<AiclawMemberResp> aiclawListMembers(Long roomId, boolean online, Long aiclawUid) {
+		// 1. 服务层硬鉴权：房间须存在且为群聊（ADR-0002）
+		Room room = roomCache.get(roomId);
+		if (room == null || !room.isRoomGroup()) {
+			throw new BizException("当前不在群聊中");
+		}
+		// 2. aiclaw 须为该群成员，否则不得查询成员
+		if (groupMemberDao.getMember(roomId, aiclawUid) == null) {
+			throw new BizException("未加入该群聊，无法查询成员");
+		}
+
+		// 3. 复用既有成员查询（已填充 activeStatus 在线状态 + name/account/roleId）
+		List<ChatMemberResp> members = listMember(MemberReq.builder().roomId(roomId).build());
+
+		// 4. 映射为精简响应；online=true 时仅保留在线成员
+		Integer onlineStatus = ChatActiveStatusEnum.ONLINE.getStatus();
+		return members.stream()
+				.filter(m -> !online || onlineStatus.equals(m.getActiveStatus()))
+				.map(m -> AiclawMemberResp.builder()
+						.uid(m.getUid())
+						.name(m.getName())
+						.account(m.getAccount())
+						.online(onlineStatus.equals(m.getActiveStatus()))
+						.roleId(m.getRoleId())
+						.build())
+				.collect(Collectors.toList());
 	}
 
 	@Override
