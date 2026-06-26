@@ -7,6 +7,7 @@ import com.luohuo.flex.im.domain.vo.request.admin.AdminSetReq;
 import com.luohuo.flex.im.domain.vo.request.contact.ContactAddReq;
 import com.luohuo.flex.im.domain.vo.request.member.MemberExitReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
+import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import jakarta.validation.Valid;
@@ -203,6 +204,18 @@ public interface RoomAppService {
 	 * @param request
 	 */
 	List<ChatMemberResp> listMember(@Valid MemberReq request);
+
+	/**
+	 * REQ-010 S4: aiclaw 专用群成员列表（服务层硬鉴权 + 在线过滤 + 精简响应）。
+	 *
+	 * <p>ADR-0002：AI agent（经 aiclaw token 鉴权）只能查询自己已加入的群的成员，
+	 * 不得读取未加入群 / 私聊的成员。鉴权在服务端强制执行。</p>
+	 *
+	 * @param roomId     房间id
+	 * @param online     true 仅返回在线成员
+	 * @param aiclawUid  当前 aiclaw 的 uid（= ContextUtil.getUid()）
+	 */
+	List<AiclawMemberResp> aiclawListMembers(Long roomId, boolean online, Long aiclawUid);
 
 	/**
 	 * 解散群聊
