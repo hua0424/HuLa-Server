@@ -299,6 +299,12 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	@Override
 	public List<MemberResp> groupList(Long uid) {
 		List<MemberResp> voList = roomService.groupList(uid);
+		// #99: 无群用户 voList 为空 → groupIdList 为空 → getGroupMemberByGroupIdListAndUid 的
+		// MyBatis foreach 生成非法 `IN ()` → SQL 语法错 → 全局兜底「系统繁忙」。空集提前返回
+		// （同 getGroupPage 的 isEmpty 守卫），无群用户得到空列表而非 500。
+		if (voList.isEmpty()) {
+			return voList;
+		}
 		Set<Long> groupIdList = voList.stream().map(MemberResp::getGroupId).collect(Collectors.toSet());
 		List<Long> roomIdList = voList.stream().map(MemberResp::getRoomId).collect(Collectors.toList());
 
