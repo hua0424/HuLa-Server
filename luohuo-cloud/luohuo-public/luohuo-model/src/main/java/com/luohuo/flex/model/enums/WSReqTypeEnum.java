@@ -40,6 +40,9 @@ public enum WSReqTypeEnum {
 	THINKING_START(20, "thinking 开始"),
 	THINKING_DELTA(21, "thinking 增量"), // 21 THINKING_DELTA：S4 起废弃，不再处理、不复用
 	THINKING_END(22, "thinking 结束"),
+
+	// REQ-010 S9: CC（claude-code）绑定结果回执（node→server）
+	CC_BIND_RESULT(23, "CC 绑定结果回执"),
     ;
 
     private final Integer type;
