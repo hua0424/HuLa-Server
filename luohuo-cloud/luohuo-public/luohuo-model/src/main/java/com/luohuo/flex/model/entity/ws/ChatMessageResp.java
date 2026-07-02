@@ -58,6 +58,9 @@ public class ChatMessageResp implements Serializable {
 		 */
 		@Schema(description = "aiclaw 扩展字段（thinkingId、autoReply 等，WS 推送透传）")
 		private Map<String, Object> extra;
+		@com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+		@Schema(description="客户端临时消息 id 回显（F3-1 #42：nullable；仅发送者据此精确 reconcile 乐观气泡；WS receiveMessage + /chat/msg/list sync 两路都回带）")
+		private String clientMsgId;
     }
 
 	@Data
