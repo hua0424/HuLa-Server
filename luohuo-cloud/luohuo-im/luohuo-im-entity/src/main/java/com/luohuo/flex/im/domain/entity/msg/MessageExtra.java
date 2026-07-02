@@ -55,4 +55,10 @@ public class MessageExtra implements Serializable {
      * 表情图片信息
      */
     private EmojisMsgDTO emojisMsgDTO;
+
+	/**
+	 * F3-1 #42: 客户端生成的临时消息 id。随 im_message.extra JSON 持久化,
+	 * 供 sync 路径(/chat/msg/list)从 DB 回读并回显给发送者做乐观气泡精确 reconcile。
+	 */
+	private String clientMsgId;
 }

@@ -1,14 +1,20 @@
 package com.luohuo.flex.im.core.chat.service.adapter;
 
 import com.luohuo.flex.im.domain.entity.Message;
+import com.luohuo.flex.im.domain.entity.msg.MessageExtra;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
+import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
+import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.Collections;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -216,5 +222,83 @@ class MessageAdapterTest {
 		ChatMessageResp empty = new ChatMessageResp(); // fromUser 为 null
 		MessageAdapter.fillFromUserType(empty, 4);
 		assertNull(empty.getFromUser(), "fromUser 为 null 时不应被实例化");
+	}
+
+	// ==================== F3-1 #42: clientMsgId 透传（持久化 + 回显） ====================
+
+	@Test
+	@DisplayName("F3-1: buildMsgSave 带 clientMsgId → 写入 extra.clientMsgId 供落库持久化")
+	void buildMsgSavePersistsClientMsgId() {
+		ChatMessageReq req = baseReq();
+		req.setClientMsgId("T-abc-123");
+
+		Message msg = MessageAdapter.buildMsgSave(req, 100L);
+
+		assertNotNull(msg.getExtra(), "带 clientMsgId 时 extra 应被创建以承载它");
+		assertEquals("T-abc-123", msg.getExtra().getClientMsgId(),
+				"extra.clientMsgId 应等于请求体的 clientMsgId（供 sync 路径从 DB 回读）");
+	}
+
+	@Test
+	@DisplayName("F3-1: buildMsgSave 不带 clientMsgId → extra 维持 null（不改变原有行为）")
+	void buildMsgSaveNullClientMsgIdKeepsExtraNull() {
+		ChatMessageReq req = baseReq();
+		req.setClientMsgId(null);
+
+		Message msg = MessageAdapter.buildMsgSave(req, 100L);
+
+		assertNull(msg.getExtra(),
+				"未带 clientMsgId 时不应创建 extra，保持与旧行为一致");
+	}
+
+	/**
+	 * buildMessage 内部会经 MsgHandlerFactory.getStrategyNoNull(type) 取 handler（该方法对
+	 * 未注册类型会抛 BizException）。纯单元测试无 Spring 注册流程，故手动注册一个 mock handler，
+	 * 让 buildMsgResp 能跑到我们要断言的 clientMsgId 回显逻辑。
+	 */
+	private void registerStubHandler(int type) {
+		MsgHandlerFactory.register(type, Mockito.mock(AbstractMsgHandler.class));
+	}
+
+	@Test
+	@DisplayName("F3-1: buildMsgResp 回显 message.extra.clientMsgId 到 resp.message.clientMsgId")
+	void buildMsgRespEchoesClientMsgId() {
+		registerStubHandler(1);
+		Message message = Message.builder()
+				.fromUid(100L)
+				.roomId(1L)
+				.type(1)
+				.extra(MessageExtra.builder().clientMsgId("T-x").build())
+				.build();
+		message.setId(1L);
+		message.setCreateTime(LocalDateTime.now());
+
+		List<ChatMessageResp> resps = MessageAdapter.buildMsgResp(
+				List.of(message), Collections.emptyList(), 100L);
+
+		assertEquals(1, resps.size());
+		assertEquals("T-x", resps.get(0).getMessage().getClientMsgId(),
+				"resp.message.clientMsgId 应回显 message.extra.clientMsgId");
+	}
+
+	@Test
+	@DisplayName("F3-1: buildMsgResp 对 extra 为 null 的旧消息 → clientMsgId 为 null（不抛异常）")
+	void buildMsgRespNullExtraYieldsNullClientMsgId() {
+		registerStubHandler(1);
+		Message message = Message.builder()
+				.fromUid(100L)
+				.roomId(1L)
+				.type(1)
+				.extra(null)
+				.build();
+		message.setId(2L);
+		message.setCreateTime(LocalDateTime.now());
+
+		List<ChatMessageResp> resps = MessageAdapter.buildMsgResp(
+				List.of(message), Collections.emptyList(), 100L);
+
+		assertEquals(1, resps.size());
+		assertNull(resps.get(0).getMessage().getClientMsgId(),
+				"extra 为 null 的历史消息不应产生 clientMsgId，也不应 NPE");
 	}
 }
