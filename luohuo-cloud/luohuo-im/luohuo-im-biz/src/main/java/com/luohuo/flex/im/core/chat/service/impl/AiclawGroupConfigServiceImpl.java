@@ -221,6 +221,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			log.info("aiclaw group config created: aiclawUid={}, roomId={}", aiclawUid, roomId);
 		} else {
 			fillConfigFields(config, request);
+			// BL-027 (#55): selectOne 读回的实体带旧 updateTime，而 LuohuoMetaObjectHandler 仅在 updateTime==null 时填充；置空以让其在 updateById 时刷新 update_time
+			config.setUpdateTime(null);
 			aiclawGroupConfigMapper.updateById(config);
 			log.info("aiclaw group config updated: aiclawUid={}, roomId={}", aiclawUid, roomId);
 		}
