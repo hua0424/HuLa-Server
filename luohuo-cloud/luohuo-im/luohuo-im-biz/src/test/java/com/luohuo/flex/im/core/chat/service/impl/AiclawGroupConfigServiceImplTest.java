@@ -30,6 +30,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 
@@ -532,5 +533,44 @@ class AiclawGroupConfigServiceImplTest {
 		Aiclaw a = new Aiclaw();
 		a.setUid(uid);
 		return a;
+	}
+
+	// =====================================================================
+	// BL-027 (#55): 更新既有行时须把 updateTime 置空，否则 LuohuoMetaObjectHandler.updateFill
+	// 的条件填充（仅在 updateTime==null 时填）不会刷新时间戳——load-then-updateById 会带旧值。
+	// =====================================================================
+
+	@Test
+	@DisplayName("BL-027#55: updateConfig 更新既有行时 nulls updateTime，交由 MetaObjectHandler 重新填充")
+	void updateConfig_existingRow_nullsUpdateTimeSoHandlerBumps() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.rateLimitPerMinute(15)
+				.build();
+
+		AiclawGroupConfig existing = AiclawGroupConfig.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.rateLimitPerMinute(10)
+				.mentionRequired(1)
+				.dailyLimit(1000)
+				.respondToAi(1)
+				.build();
+		// 既有行携带旧的（非空）updateTime——模拟 selectOne 从库里读回的实体
+		existing.setUpdateTime(LocalDateTime.of(2020, 1, 1, 0, 0));
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(existing);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		configService.updateConfig(req, UID);
+
+		ArgumentCaptor<AiclawGroupConfig> captor = ArgumentCaptor.forClass(AiclawGroupConfig.class);
+		verify(aiclawGroupConfigMapper).updateById(captor.capture());
+		assertNull(captor.getValue().getUpdateTime(),
+				"更新既有行时应将 updateTime 置空，交由 LuohuoMetaObjectHandler 重新填充新时间戳");
 	}
 }
