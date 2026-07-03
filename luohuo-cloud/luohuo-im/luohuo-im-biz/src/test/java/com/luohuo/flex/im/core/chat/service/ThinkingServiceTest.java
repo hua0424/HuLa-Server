@@ -8,7 +8,9 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.domain.entity.AiclawThinking;
 import com.luohuo.flex.im.domain.entity.Room;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
+import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -19,6 +21,8 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -367,6 +371,126 @@ class ThinkingServiceTest {
 		void roomMissing_rejected() {
 			BizException ex = rejectFromRoomMissing();
 			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案，不得泄露真实原因");
+		}
+	}
+
+	// ==================== REQ-XXX #138：按房间查询 thinking 归档列表（元数据 only，游标翻页） ====================
+
+	@Nested
+	@DisplayName("listThinkingByRoom 房间归档列表（成员闸门 + 游标翻页 + 元数据 only）")
+	class ListThinkingByRoom {
+
+		private static final Long ROOM_ID = 10L;
+		private static final Long CALLER_UID = 300L;
+
+		private Room groupRoom() {
+			Room room = new Room();
+			room.setType(1); // GROUP
+			return room;
+		}
+
+		/** caller 是群成员：桩通 checkCurrentUserMembership 群分支。 */
+		private void stubMember() {
+			when(roomCache.get(ROOM_ID)).thenReturn(groupRoom());
+			when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(100L, CALLER_UID, 999L));
+		}
+
+		/** 构造一行 thinking（元数据）；mapper 实际不 select content，这里 content 留空即可。 */
+		private AiclawThinking row(long id) {
+			AiclawThinking t = AiclawThinking.builder()
+					.aiclawUid(100L)
+					.roomId(ROOM_ID)
+					.triggerMsgId(7000L + id)
+					.status(1)
+					.durationMs(1234)
+					.hasResponse(1)
+					.build();
+			t.setId(id);
+			t.setCreateTime(LocalDateTime.now());
+			return t;
+		}
+
+		/** ids 降序生成 [start, start-count+1]。 */
+		private List<AiclawThinking> rowsDesc(long start, int count) {
+			List<AiclawThinking> list = new ArrayList<>();
+			for (int i = 0; i < count; i++) {
+				list.add(row(start - i));
+			}
+			return list;
+		}
+
+		@Test
+		@DisplayName("首页：mapper 多返回 1 行 → 截到 size，isLast=false，cursor=第 size 行 id，limit=size+1")
+		void firstPage_notLast() {
+			stubMember();
+			// ids 100..80 = 21 行（size 20 → 请求 21）
+			when(thinkingMapper.selectThinkingListByRoom(ROOM_ID, null, 21)).thenReturn(rowsDesc(100L, 21));
+
+			CursorPageBaseResp<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null);
+
+			assertEquals(20, resp.getList().size(), "多取的第 21 行应被裁掉");
+			assertFalse(resp.getIsLast(), "还有下一页");
+			assertEquals("81", resp.getCursor(), "游标 = 第 20 行 id（100-19=81）");
+			assertNull(resp.getTotal(), "total 不计算");
+			// 元数据映射正确、且不含 content
+			AiclawThinkingListItemResp first = resp.getList().get(0);
+			assertEquals(100L, first.getId());
+			assertEquals(100L, first.getAiclawUid());
+			assertEquals(1, first.getStatus());
+			verify(thinkingMapper).selectThinkingListByRoom(ROOM_ID, null, 21);
+		}
+
+		@Test
+		@DisplayName("末页：mapper 返回不足 size → isLast=true，cursor=最后一行 id")
+		void lastPage() {
+			stubMember();
+			when(thinkingMapper.selectThinkingListByRoom(ROOM_ID, null, 21)).thenReturn(rowsDesc(50L, 5));
+
+			CursorPageBaseResp<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null);
+
+			assertEquals(5, resp.getList().size());
+			assertTrue(resp.getIsLast(), "不足一页即最后一页");
+			assertEquals("46", resp.getCursor(), "游标 = 最后一行 id（50-4=46）");
+		}
+
+		@Test
+		@DisplayName("游标透传 + pageSize 硬上限：cursor=500 → cursorId=500L，pageSize=999 → limit=51")
+		void cursorForwarded_pageSizeClamped() {
+			stubMember();
+			when(thinkingMapper.selectThinkingListByRoom(eq(ROOM_ID), eq(500L), eq(51)))
+					.thenReturn(rowsDesc(400L, 10));
+
+			thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, "500", 999);
+
+			verify(thinkingMapper).selectThinkingListByRoom(ROOM_ID, 500L, 51);
+		}
+
+		@Test
+		@DisplayName("非成员：群成员列表不含 caller → BizException，且 mapper 从不被调用（授权先于查询）")
+		void nonMember_rejected_mapperNeverCalled() {
+			when(roomCache.get(ROOM_ID)).thenReturn(groupRoom());
+			when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(100L, 999L));
+
+			assertThrows(BizException.class,
+					() -> thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null));
+
+			verify(thinkingMapper, never()).selectThinkingListByRoom(anyLong(), any(), anyInt());
+		}
+
+		@Test
+		@DisplayName("空房间：mapper 返回空 → 列表空，isLast=true，cursor=null")
+		void emptyRoom() {
+			stubMember();
+			when(thinkingMapper.selectThinkingListByRoom(ROOM_ID, null, 21)).thenReturn(new ArrayList<>());
+
+			CursorPageBaseResp<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null);
+
+			assertTrue(resp.getList().isEmpty());
+			assertTrue(resp.getIsLast());
+			assertNull(resp.getCursor());
 		}
 	}
 }
