@@ -227,6 +227,18 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			log.info("aiclaw group config updated: aiclawUid={}, roomId={}", aiclawUid, roomId);
 		}
 
+		// aichatoverview#139: 落库后重新 selectOne，用真实落库值（含 DB 列默认）建 Resp/广播。
+		// MyBatis-Plus insert 不把 DB 默认回填进实体，直接用带 null 的 config 会污染 Redis 缓存
+		// 与 WS 广播（→ plugins 门控缓存）。insert/updateById 是 DML，会 flush 本 SqlSession 的
+		// 一级缓存，故此处 selectOne 命中 DB 拿到含默认的真实行。
+		AiclawGroupConfig persisted = aiclawGroupConfigMapper.selectOne(
+				new LambdaQueryWrapper<AiclawGroupConfig>()
+						.eq(AiclawGroupConfig::getAiclawUid, aiclawUid)
+						.eq(AiclawGroupConfig::getRoomId, roomId));
+		if (persisted != null) {
+			config = persisted;   // 缺陷防御：re-select 理应命中；为空则退回内存实体，绝不 NPE
+		}
+
 		// 更新 Redis 缓存
 		// REQ-009#82: BeanUtil 已携带 approved/workspaceDir；再补 account 后入缓存，
 		// 使下游 gate 从缓存读到的 Resp 含完整批准态与群号。

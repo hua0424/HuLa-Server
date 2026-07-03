@@ -398,6 +398,65 @@ class AiclawGroupConfigServiceImplTest {
 		assertEquals("/ws", change.getConfig().getWorkspaceDir());
 	}
 
+	@Test
+	@DisplayName("aichatoverview#139: 部分字段 insert 后，缓存与广播用 DB 真实默认值而非 null")
+	void partialInsert_cacheAndBroadcastUseDbDefaults_notNull() {
+		// 部分字段请求：仅带 approved，其余字段（rate/mention/daily/respondToAi）不带
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.build();
+
+		// 落库后的真实行：DB 列默认已填（rate=10/daily=1000/respond=1/mention=1），approved=1
+		AiclawGroupConfig defaulted = AiclawGroupConfig.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.rateLimitPerMinute(10)
+				.dailyLimit(1000)
+				.respondToAi(1)
+				.mentionRequired(1)
+				.approved(1)
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID); // owner=caller=UID
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+		// 第一次 selectOne（存在性检查）=null → 走 insert 路径；第二次（落库后重读）=defaulted
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null, defaulted);
+
+		configService.updateConfig(req, UID);
+
+		// 走 insert 路径 + 新增落库后重读 → selectOne 被调用两次
+		verify(aiclawGroupConfigMapper).insert(any(AiclawGroupConfig.class));
+		verify(aiclawGroupConfigMapper, times(2)).selectOne(any());
+
+		// 断言写入 Redis 的 Resp 用的是 DB 真实默认值，而非 null
+		ArgumentCaptor<String> jsonCaptor = ArgumentCaptor.forClass(String.class);
+		verify(valueOps).set(anyString(), jsonCaptor.capture(), any());
+		AiclawGroupConfigResp cached = JSONUtil.toBean(jsonCaptor.getValue(), AiclawGroupConfigResp.class);
+		assertEquals(10, cached.getRateLimitPerMinute());
+		assertEquals(1000, cached.getDailyLimit());
+		assertEquals(1, cached.getRespondToAi());
+		assertEquals(1, cached.getMentionRequired());
+		assertEquals(1, cached.getApproved());
+
+		// 断言广播 ConfigDTO 也用 DB 真实默认值（非 null）
+		@SuppressWarnings("unchecked")
+		ArgumentCaptor<WsBaseResp<?>> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
+		verify(pushService).sendPushMsg(msgCaptor.capture(), anyList(), eq(UID));
+		Object data = msgCaptor.getValue().getData();
+		assertTrue(data instanceof WSGroupConfigChange, "WsBaseResp.data 应为 WSGroupConfigChange");
+		WSGroupConfigChange.ConfigDTO dto = ((WSGroupConfigChange) data).getConfig();
+		assertNotNull(dto);
+		assertEquals(10, dto.getRateLimitPerMinute());
+		assertEquals(1000, dto.getDailyLimit());
+		assertEquals(1, dto.getRespondToAi());
+		assertEquals(1, dto.getMentionRequired());
+		assertEquals(1, dto.getApproved());
+	}
+
 	// =====================================================================
 	// REQ-009 #84: 批准门控 —— isApproved 读取 + filterUnapprovedAiclawRecipients 收件人过滤。
 	// 合同（#82）：approved == 1 为已批准；null/0（无记录/默认）为未批准。
