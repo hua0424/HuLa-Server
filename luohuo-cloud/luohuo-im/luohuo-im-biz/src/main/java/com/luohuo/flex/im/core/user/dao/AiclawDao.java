@@ -49,6 +49,24 @@ public class AiclawDao extends ServiceImpl<AiclawMapper, Aiclaw> {
 	}
 
 	/**
+	 * REQ-122: 查询占用指定 machineCode 的「其他」aiclaw（排除自身 uid）。
+	 *
+	 * <p>machineCode 即 WS clientId，推送路由以 clientId→uid 建映射；同一 clientId 被两个 uid
+	 * 共用会静默覆盖、其中一方被永久踢出群推送。激活时用此方法查重，令冲突失败而非静默覆盖。</p>
+	 *
+	 * @param machineCode 机器码（WS clientId）
+	 * @param selfUid     激活中的 aiclaw uid（排除自身，允许其重新绑定自己的码）
+	 * @return 占用该机器码的其他 aiclaw；不存在返回 null
+	 */
+	public Aiclaw getOtherHolderByMachineCode(String machineCode, Long selfUid) {
+		return lambdaQuery()
+				.eq(Aiclaw::getMachineCode, machineCode)
+				.ne(Aiclaw::getUid, selfUid)
+				.last("LIMIT 1")
+				.one();
+	}
+
+	/**
 	 * 查询已停用超过 24h 的 aiclaw 记录
 	 */
 	public List<Aiclaw> listExpiredDeactivated(LocalDateTime cutoff) {
