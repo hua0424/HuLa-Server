@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.service;
 
 import cn.hutool.core.util.IdUtil;
+import cn.hutool.core.util.StrUtil;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
@@ -9,7 +10,9 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.domain.entity.AiclawThinking;
 import com.luohuo.flex.im.domain.entity.Room;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
+import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -20,6 +23,7 @@ import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Thinking 记录管理服务
@@ -42,6 +46,12 @@ public class ThinkingService {
 	 * 从而消除 thinkingId 枚举预言机（enumeration oracle）信息泄露。真实拒绝原因仅记录在服务端日志中。</p>
 	 */
 	private static final String REVIEW_REJECTED_MESSAGE = "思考记录不存在或无权查看";
+
+	/**
+	 * 房间 thinking 归档列表分页默认条数与硬上限。
+	 */
+	private static final int DEFAULT_PAGE_SIZE = 20;
+	private static final int MAX_PAGE_SIZE = 50;
 
 	@Resource
 	private AiclawThinkingMapper thinkingMapper;
@@ -197,6 +207,70 @@ public class ThinkingService {
 				.status(thinking.getStatus())
 				.durationMs(thinking.getDurationMs())
 				.build();
+	}
+
+	/**
+	 * 按房间查询 thinking 归档列表（元数据 only，最近优先，游标翻页）。
+	 *
+	 * <p>供客户端 thinking 抽屉懒加载历史。要点：</p>
+	 * <ul>
+	 *   <li><b>成员闸门</b>：复用 {@link #checkCurrentUserMembership(Long, Long)}，非成员抛统一
+	 *       {@code BizException}，与 {@code reviewThinking} 同一 IDOR 防护；授权在查询之前。</li>
+	 *   <li><b>元数据 only</b>：不返回全文 content（单行可达 200KB），只回 id/aiclawUid/triggerMsgId/
+	 *       status/durationMs/hasResponse/createTime；全文由 {@link #reviewThinking} 按需拉取。</li>
+	 *   <li><b>keyset 倒序</b>：按 id DESC（最近优先），游标为上一页最后一条 id；排除 is_del。</li>
+	 *   <li><b>status 全区间</b>：进行中/成功/错误/超时/超长截断均列出。</li>
+	 * </ul>
+	 *
+	 * @param roomId     房间 ID
+	 * @param callerUid  当前登录用户 uid（授权主体）
+	 * @param cursor     游标（上一页最后一条 id 的字符串），首页传 null/空；非法游标宽松降级为首页
+	 * @param pageSize   每页条数，null/&lt;=0 取默认 {@value #DEFAULT_PAGE_SIZE}，硬上限 {@value #MAX_PAGE_SIZE}
+	 * @return 游标翻页结果（元数据列表 + 下一页游标 + 是否最后一页；total 不计算，留 null）
+	 * @throws BizException caller 非该房间成员时抛统一拒绝异常
+	 */
+	public CursorPageBaseResp<AiclawThinkingListItemResp> listThinkingByRoom(
+			Long roomId, Long callerUid, String cursor, Integer pageSize) {
+		int size = (pageSize == null || pageSize <= 0) ? DEFAULT_PAGE_SIZE : Math.min(pageSize, MAX_PAGE_SIZE);
+
+		// 成员闸门：授权在查询之前（与 reviewThinking 同一 IDOR 防护）
+		checkCurrentUserMembership(callerUid, roomId);
+
+		Long cursorId = null;
+		if (StrUtil.isNotBlank(cursor)) {
+			try {
+				cursorId = Long.parseLong(cursor.trim());
+			} catch (NumberFormatException e) {
+				// 宽松处理：游标非法 → 当作首页
+				cursorId = null;
+			}
+		}
+
+		// 多取一行以判定是否最后一页
+		List<AiclawThinking> rows = thinkingMapper.selectThinkingListByRoom(roomId, cursorId, size + 1);
+		boolean isLast = rows.size() <= size;
+		List<AiclawThinking> pageRows = isLast ? rows : rows.subList(0, size);
+
+		List<AiclawThinkingListItemResp> list = pageRows.stream()
+				.map(t -> AiclawThinkingListItemResp.builder()
+						.id(t.getId())
+						.aiclawUid(t.getAiclawUid())
+						.triggerMsgId(t.getTriggerMsgId())
+						.status(t.getStatus())
+						.durationMs(t.getDurationMs())
+						.hasResponse(t.getHasResponse())
+						.createTime(t.getCreateTime())
+						.build())
+				.collect(Collectors.toList());
+
+		String nextCursor = pageRows.isEmpty() ? null : String.valueOf(pageRows.get(pageRows.size() - 1).getId());
+
+		CursorPageBaseResp<AiclawThinkingListItemResp> resp = new CursorPageBaseResp<>();
+		resp.setList(list);
+		resp.setCursor(nextCursor);
+		resp.setIsLast(isLast);
+		// total 不计算，留 null
+		return resp;
 	}
 
 	/**

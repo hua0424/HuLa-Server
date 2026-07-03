@@ -19,6 +19,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import io.swagger.v3.oas.annotations.Operation;
@@ -48,6 +49,15 @@ public class AiclawController {
 	public R<AiclawThinkingDetailResp> reviewThinking(@PathVariable Long thinkingId) {
 		// IDOR 防护：以当前登录用户（caller）为授权主体，校验其为该 thinking 所属房间成员
 		return R.success(thinkingService.reviewThinking(thinkingId, ContextUtil.getUid()));
+	}
+
+	@GetMapping("/thinking/list")
+	@Operation(summary = "按房间查询 thinking 归档列表（仅房间成员，倒序最近 N 条，元数据 only）")
+	public R<CursorPageBaseResp<AiclawThinkingListItemResp>> listThinkingByRoom(
+			@RequestParam Long roomId,
+			@RequestParam(required = false) String cursor,
+			@RequestParam(required = false) Integer pageSize) {
+		return R.success(thinkingService.listThinkingByRoom(roomId, ContextUtil.getUid(), cursor, pageSize));
 	}
 
 	@PostMapping("/create")
