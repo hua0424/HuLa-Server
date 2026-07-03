@@ -75,9 +75,6 @@ public enum WSRespTypeEnum {
 	GROUP_CONFIG_CHANGE("groupConfigChange", "群配置变更", WSGroupConfigChange.class),
 
 	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class),
-
-	// REQ-010 S9: server→node CC 绑定请求（请目标 CC aiclaw 的 node 生成 owner 启动命令）
-	CC_BIND_REQUEST("ccBindRequest", "CC 绑定请求", CcBindRequestDTO.class)
     ;
 
     private final String type;
