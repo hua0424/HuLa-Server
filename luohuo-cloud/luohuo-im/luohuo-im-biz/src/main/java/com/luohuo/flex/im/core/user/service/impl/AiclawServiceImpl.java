@@ -169,6 +169,18 @@ public class AiclawServiceImpl implements AiclawService {
 			throw new BizException("激活码无效");
 		}
 
+		// 4.1 机器码查重（REQ-122）：machineCode 即 WS clientId，推送路由以 clientId→uid 建映射，
+		// 同一 clientId 被两个 uid 共用会静默覆盖、其中一方被永久踢出群推送。
+		// 仅当「另一个」aiclaw 已占用该码时拒绝（不阻止本 aiclaw 重新绑定自己的码）。
+		if (StrUtil.isNotBlank(req.getMachineCode())) {
+			Aiclaw holder = aiclawDao.getOtherHolderByMachineCode(req.getMachineCode(), uid);
+			if (holder != null) {
+				log.warn("aiclaw activate rejected: machineCode {} already held by uid={}, activating uid={}",
+						req.getMachineCode(), holder.getUid(), uid);
+				throw new BizException("该机器码已被其他AI助理占用，请重新激活");
+			}
+		}
+
 		// 5. 激活：auth_status=1，绑定 machineCode
 		Aiclaw update = new Aiclaw();
 		update.setId(aiclaw.getId());

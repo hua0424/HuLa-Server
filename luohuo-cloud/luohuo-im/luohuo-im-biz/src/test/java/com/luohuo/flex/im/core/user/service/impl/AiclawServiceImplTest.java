@@ -1,7 +1,10 @@
 package com.luohuo.flex.im.core.user.service.impl;
 
+import cn.hutool.crypto.digest.BCrypt;
+import cn.hutool.json.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.OnlineService;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
@@ -27,6 +30,10 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
+
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -147,5 +154,74 @@ class AiclawServiceImplTest {
 
 		verify(aiclawDao, never()).update(any());
 		verify(aiclawOwnerCache, never()).refresh(any());
+	}
+
+	// ==================== REQ-122: 激活机器码查重 ====================
+
+	private static final String CONNECTION_TOKEN = "conn-token-abcdef";
+
+	/**
+	 * 构造一份可被 activate() 消费的解密载荷，并把 self aiclaw 装配好
+	 * （auth_status=0 未激活 + 与 connectionToken 匹配的 bcrypt hash），
+	 * 让流程能走到「机器码查重」这一步。
+	 */
+	private Aiclaw stubActivatablePath(String machineCode) {
+		JSONObject payload = new JSONObject();
+		payload.set("uid", AICLAW_UID);
+		payload.set("connectionToken", CONNECTION_TOKEN);
+		payload.set("timestamp", System.currentTimeMillis());
+		when(cryptoService.decryptActivationToken("act-token")).thenReturn(payload);
+
+		Aiclaw self = existingAiclaw("openclaw");
+		self.setId(1L);
+		self.setAuthStatus(0);
+		self.setTokenHash(BCrypt.hashpw(CONNECTION_TOKEN));
+		self.setTokenPrefix("pref1234");
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(self);
+		return self;
+	}
+
+	private AiclawActivateReq activateReq(String machineCode) {
+		AiclawActivateReq req = new AiclawActivateReq();
+		req.setActivationToken("act-token");
+		req.setMachineCode(machineCode);
+		return req;
+	}
+
+	@Test
+	@DisplayName("activate: machineCode 已被另一个 aiclaw 占用 → 抛 BizException，绝不绑定/覆盖")
+	void activate_machineCodeHeldByAnother_rejected() {
+		stubActivatablePath("dup-machine");
+		// 另一个 uid 已占用该机器码
+		Aiclaw other = Aiclaw.builder().uid(999L).build();
+		when(aiclawDao.getOtherHolderByMachineCode("dup-machine", AICLAW_UID)).thenReturn(other);
+
+		BizException ex = assertThrows(BizException.class,
+				() -> aiclawService.activate(activateReq("dup-machine")));
+		assertTrue(ex.getMessage().contains("已被其他AI助理占用"), "应给出机器码占用的明确错误");
+
+		// 失败要 LOUD：不得写库、不得刷缓存
+		verify(aiclawDao, never()).updateById(any());
+		verify(aiclawOwnerCache, never()).refresh(any());
+	}
+
+	@Test
+	@DisplayName("activate: machineCode 无其他占用 → 正常激活并绑定机器码")
+	void activate_machineCodeFree_proceeds() {
+		stubActivatablePath("free-machine");
+		// 无其他占用者
+		when(aiclawDao.getOtherHolderByMachineCode("free-machine", AICLAW_UID)).thenReturn(null);
+		// saveTokenCache 会写 Redis，桩掉 opsForValue 避免 NPE
+		@SuppressWarnings("unchecked")
+		ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+
+		AiclawActivateResp resp = aiclawService.activate(activateReq("free-machine"));
+
+		assertEquals(AICLAW_UID, resp.getUid());
+		// 走过查重且落库激活
+		verify(aiclawDao).getOtherHolderByMachineCode("free-machine", AICLAW_UID);
+		verify(aiclawDao).updateById(any());
+		verify(aiclawOwnerCache).refresh(AICLAW_UID);
 	}
 }

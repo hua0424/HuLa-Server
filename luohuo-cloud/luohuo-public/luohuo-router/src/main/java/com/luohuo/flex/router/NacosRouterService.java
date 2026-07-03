@@ -153,7 +153,14 @@ public class NacosRouterService {
 				if (!targetUids.contains(uid)) continue;
 
 				// 5.5 构建映射：节点 → 设备 → UID
-				result.computeIfAbsent(nodeId, k -> new ConcurrentHashMap<>()).put(clientId, uid);
+				// REQ-122: clientId 冲突告警 —— 同一节点上同一 clientId 若已映射到「另一个」uid，
+				// 该 clientId→uid 覆盖会让其中一方从本次推送中静默丢失（群消息漏投）。仅告警，不改路由行为。
+				Long prevUid = result.computeIfAbsent(nodeId, k -> new ConcurrentHashMap<>()).put(clientId, uid);
+				if (prevUid != null && !prevUid.equals(uid)) {
+					log.warn("clientId 冲突：节点 {} 上 clientId={} 同时映射到 uid={} 与 uid={}，" +
+							"后者覆盖前者，将有一方从本次推送中丢失（设备指纹/机器码冲突）",
+							nodeId, clientId, prevUid, uid);
+				}
 			}
 		}
 		return result;
