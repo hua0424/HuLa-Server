@@ -1,5 +1,10 @@
 package com.luohuo.flex.im.core.chat.service.impl;
 
+import com.fasterxml.jackson.databind.MapperFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.flex.im.core.chat.dao.*;
@@ -576,6 +581,93 @@ class ChatServiceImplTest {
 					() -> batchWithMockedHandler(Arrays.asList(validMsg(999L, NORMAL_UID), null), NORMAL_UID),
 					"混入 null 元素的批次不应 NPE");
 			assertEquals(1, resps.size(), "null 被过滤，仅保留 1 条真实消息");
+		}
+	}
+
+	// ==================== #144 P1a: friend 房间 RoomFriend 一次请求内只读一次（减少重复直查） ====================
+
+	@Nested
+	@DisplayName("#144 P1a friend 房间 RoomFriend 复用 + ChatMessageResp VO 字节等价")
+	class SendMsgRoundTripReduction {
+
+		private static final Long FRIEND_ROOM_ID = 20L;
+
+		/** 稳定序列化：字段字母序 + Map 键序 + LocalDateTime 走 ISO 文本，保证跨运行字节一致。 */
+		private final ObjectMapper stableMapper = JsonMapper.builder()
+				.addModule(new JavaTimeModule())
+				.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+				.enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
+				.enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+				.build();
+
+		/**
+		 * 重构前（checkDeFriend + syncContactLastMsgId 各读一次 im_room_friend）从当前 getMsgResp 读路径
+		 * 采集的基线；P1a 仅改 sendMsg 写路径的读取去重，未触碰任何生产 VO 的代码行，故字节等价必然成立。
+		 */
+		private static final String EXPECTED_SEND_MSG_RESP_JSON =
+				"{\"fromUser\":{\"name\":\"发送者\",\"uid\":\"200\",\"userType\":3},"
+				+ "\"message\":{\"aiclaw\":null,\"body\":null,\"extra\":null,\"id\":\"999\","
+				+ "\"messageMarks\":{},\"roomId\":\"20\",\"roomType\":null,"
+				+ "\"sendTime\":\"2026-07-04T12:00:00\",\"type\":1}}";
+
+		private SummeryInfoDTO senderSummary(Long uid, Integer userType, String name) {
+			SummeryInfoDTO dto = new SummeryInfoDTO();
+			dto.setUid(uid);
+			dto.setUserType(userType);
+			dto.setName(name);
+			return dto;
+		}
+
+		@Test
+		@DisplayName("friend 房间发送：im_room_friend 只读 1 次（重构前为 2 次）+ VO 字节等价")
+		void sendMsgFriendRoom_readsRoomFriendOnce_andRespVoUnchanged() throws Exception {
+			Room friendRoom = new Room();
+			friendRoom.setType(RoomTypeEnum.FRIEND.getType());
+			when(roomCache.get(FRIEND_ROOM_ID)).thenReturn(friendRoom);
+			when(userCache.get(NORMAL_UID)).thenReturn(normalUser());
+
+			RoomFriend rf = new RoomFriend();
+			rf.setUid1(NORMAL_UID);
+			rf.setUid2(201L);
+			rf.setDeFriend1(false);
+			rf.setDeFriend2(false);
+			when(roomFriendDao.getByRoomId(FRIEND_ROOM_ID)).thenReturn(rf);
+
+			// getMsgResp 重读路径：sendMsg 落库后 controller 再取完整 VO
+			Message saved = new Message();
+			saved.setId(999L);
+			saved.setFromUid(NORMAL_UID);
+			saved.setRoomId(FRIEND_ROOM_ID);
+			saved.setType(1);
+			saved.setCreateTime(LocalDateTime.of(2026, 7, 4, 12, 0, 0));
+			when(messageDao.getById(999L)).thenReturn(saved);
+			when(messageMarkDao.getValidMarkByMsgIdBatch(anyList())).thenReturn(List.of());
+			when(userSummaryCache.getBatch(anyList()))
+					.thenReturn(Map.of(NORMAL_UID, senderSummary(NORMAL_UID, UserTypeEnum.NORMAL.getValue(), "发送者")));
+			when(groupMemberDao.getMemberBatchByRoomId(anyLong(), anyCollection())).thenReturn(List.of());
+
+			String json;
+			try (MockedStatic<MsgHandlerFactory> mf = mockStatic(MsgHandlerFactory.class);
+				 MockedStatic<SpringUtils> su = mockStatic(SpringUtils.class)) {
+				AbstractMsgHandler<?> handler = mock(AbstractMsgHandler.class);
+				when(handler.checkAndSaveMsg(any(), any())).thenReturn(999L);
+				mf.when(() -> MsgHandlerFactory.getStrategyNoNull(1)).thenReturn(handler);
+				su.when(() -> SpringUtils.publishEvent(any())).thenAnswer(inv -> null);
+
+				Long msgId = chatService.sendMsg(baseReq(FRIEND_ROOM_ID), NORMAL_UID);
+				assertEquals(999L, msgId);
+
+				ChatMessageResp resp = chatService.getMsgResp(msgId, NORMAL_UID);
+				assertNotNull(resp);
+				json = stableMapper.writeValueAsString(resp);
+			}
+
+			// 断言 a（调用数下降）：一次发送内 im_room_friend 只读 1 次；
+			// 重构前 checkDeFriend 与 syncContactLastMsgId 各直查 1 次 = 2 次（此断言在重构前为 RED：Wanted 1 but was 2）。
+			verify(roomFriendDao, times(1)).getByRoomId(FRIEND_ROOM_ID);
+
+			// 断言 b（VO 字节等价）：完整 sendMsg + getMsgResp 路径产出的 ChatMessageResp 序列化与基线逐字节一致。
+			assertEquals(EXPECTED_SEND_MSG_RESP_JSON, json);
 		}
 	}
 }

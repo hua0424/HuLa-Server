@@ -87,7 +87,13 @@ public class ChatServiceImpl implements ChatService {
         // aichatoverview#3: aiclaw 房间成员校验（先于 checkDeFriend，确保非成员抛正确异常）
         checkAiclawRoomMembership(request, uid);
 
-        check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid);
+        // BL-010 #144 P1a: friend 房间的 RoomFriend 在一次发送内只读一次，供 checkDeFriend 与
+        // syncContactLastMsgId 复用，消除对同一 im_room_friend 行的重复直查（RoomFriendDao 无缓存，
+        // 远程 DB 每次 ~50-80ms RTT）。群聊/热点房/缺失 Room 返回 null，下游按 null 回退到各自原有加载逻辑，
+        // 数据同一请求内不变（deFriend 标志、uid1/uid2 在事务窗口内稳定），行为等价。
+        RoomFriend preloadedRoomFriend = preloadRoomFriend(request.getRoomId());
+
+        check(true, request.isSkip(), request.isTemp(), request.getRoomId(), uid, preloadedRoomFriend);
 
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
@@ -96,7 +102,7 @@ public class ChatServiceImpl implements ChatService {
         associateThinking(request, uid, msgId);
 
         // ISS-003: 同事务推进房间内所有成员的 contact.last_msg_id,避免写入路径与 /chat/msg/page 游标失同步
-        syncContactLastMsgId(request.getRoomId(), msgId);
+        syncContactLastMsgId(request.getRoomId(), msgId, preloadedRoomFriend);
 
 		// 临时会话单独处理一下消息计数器
 		if (request.isTemp()) {
@@ -125,6 +131,26 @@ public class ChatServiceImpl implements ChatService {
         }
         return msgId;
     }
+
+	/**
+	 * BL-010 #144 P1a: 仅 friend 房间预取 RoomFriend，供同一 {@code sendMsg} 内的
+	 * {@link #checkDeFriend} 与 {@link #syncContactLastMsgId} 复用，消除对同一 im_room_friend 行的重复直查。
+	 *
+	 * <p>群聊 / 热点房 / Room 缺失时返回 {@code null}，下游遇 {@code null} 回退到各自原有的
+	 * {@code roomFriendDao.getByRoomId} 加载路径，行为与预取前完全一致。
+	 * <p>{@code roomCache.get} 为缓存读（Redis / 本地），非 DB round-trip，不新增 DB 往返；
+	 * 且 Room 类型判定沿用下游相同语义（{@link Room#isRoomFriend()}）。
+	 */
+	private RoomFriend preloadRoomFriend(Long roomId) {
+		if (roomId == null) {
+			return null;
+		}
+		Room room = roomCache.get(roomId);
+		if (room != null && room.isRoomFriend()) {
+			return roomFriendDao.getByRoomId(roomId);
+		}
+		return null;
+	}
 
 	/**
 	 * REQ-004 [S4]: 将本次发送的消息关联到对应的 thinking 记录。
@@ -202,6 +228,15 @@ public class ChatServiceImpl implements ChatService {
      * </ul>
      */
     private void syncContactLastMsgId(Long roomId, Long msgId) {
+        syncContactLastMsgId(roomId, msgId, null);
+    }
+
+    /**
+     * BL-010 #144 P1a 重载：{@code preloadedRoomFriend} 非空时复用已预取的 RoomFriend，
+     * 避免与 {@code sendMsg}→{@code checkDeFriend} 对同一 im_room_friend 行的重复直查；
+     * 为空时（群聊 / 旧调用方）回退到原有 {@code roomFriendDao.getByRoomId} 加载，行为不变。
+     */
+    private void syncContactLastMsgId(Long roomId, Long msgId, RoomFriend preloadedRoomFriend) {
         if (roomId == null || msgId == null) {
             return;
         }
@@ -218,7 +253,7 @@ public class ChatServiceImpl implements ChatService {
                 return;
             }
         } else if (room.isRoomFriend()) {
-            RoomFriend roomFriend = roomFriendDao.getByRoomId(roomId);
+            RoomFriend roomFriend = preloadedRoomFriend != null ? preloadedRoomFriend : roomFriendDao.getByRoomId(roomId);
             if (roomFriend == null) {
                 log.warn("syncContactLastMsgId: room_friend not found, roomId={}, msgId={}", roomId, msgId);
                 return;
@@ -235,6 +270,15 @@ public class ChatServiceImpl implements ChatService {
     }
 
     private void checkDeFriend(Boolean isSend, Boolean isTemp, Long roomId, Long uid) {
+        checkDeFriend(isSend, isTemp, roomId, uid, null);
+    }
+
+    /**
+     * BL-010 #144 P1a 重载：{@code preloadedRoomFriend} 非空时复用已预取的 RoomFriend，
+     * 消除与 {@code syncContactLastMsgId} 对同一 im_room_friend 行的重复直查；
+     * 为空时（群聊分支 / getMsgPage 读路径等旧调用方）回退到原有 {@code roomFriendDao.getByRoomId}，行为不变。
+     */
+    private void checkDeFriend(Boolean isSend, Boolean isTemp, Long roomId, Long uid, RoomFriend preloadedRoomFriend) {
         Room room = roomCache.get(roomId);
         Assert.notNull(room, "房间不存在!");
         if (room.isRoomGroup()) {
@@ -246,7 +290,7 @@ public class ChatServiceImpl implements ChatService {
 				throw new BizException("你已屏蔽群聊，无法发送消息");
 			}
         } else {
-            RoomFriend roomFriend = roomFriendDao.getByRoomId(roomId);
+            RoomFriend roomFriend = preloadedRoomFriend != null ? preloadedRoomFriend : roomFriendDao.getByRoomId(roomId);
             boolean u1State = uid.equals(roomFriend.getUid1());
             boolean u2State = uid.equals(roomFriend.getUid2());
 			if(isTemp){
@@ -291,10 +335,18 @@ public class ChatServiceImpl implements ChatService {
 	 * @param uid 登录用户id
 	 */
     private void check(Boolean isSend, Boolean skip, Boolean isTemp, Long roomId, Long uid) {
+        check(isSend, skip, isTemp, roomId, uid, null);
+    }
+
+    /**
+     * BL-010 #144 P1a 重载：把 {@code sendMsg} 预取的 RoomFriend 透传给 {@link #checkDeFriend}，
+     * 复用同一 im_room_friend 行；{@code preloadedRoomFriend} 为空时行为与原 5 参重载完全一致。
+     */
+    private void check(Boolean isSend, Boolean skip, Boolean isTemp, Long roomId, Long uid, RoomFriend preloadedRoomFriend) {
         if (skip) {
             return;
         }
-        checkDeFriend(isSend, isTemp, roomId, uid);
+        checkDeFriend(isSend, isTemp, roomId, uid, preloadedRoomFriend);
     }
 
     @Override
@@ -308,6 +360,11 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public ChatMessageResp getMsgResp(Long msgId, Long receiveUid) {
+        // ponytail: #144 P1b DEFERRED — 这里的 messageDao.getById(msgId) 重读了 sendMsg 刚落库的消息。
+        // 想省掉这次 DB 往返需把 sendMsg 已保存的 Message 实体透传进来，但 checkAndSaveMsg 只返回 Long，
+        // 且内存态 Message 与 DB 重读态不字节等价：MySQL DATETIME 会截断 create_time 亚秒精度，
+        // 而本 VO 的 sendTime=create_time —— 透传内存实体会改变 ChatMessageResp 输出（VO 回归风险，见 #46/#24）。
+        // 故在能证明 VO 字节等价前不做（PRD 要求“不确定即不做”）。
         Message msg = messageDao.getById(msgId);
         // getById 返 null（消息不存在）时优雅返 null，不构造 singletonList(null)→下游 NPE→500。
         if (msg == null) {
