@@ -33,4 +33,7 @@ public class BaseFileDTO implements Serializable {
 
     @Schema(description ="文件 MIME 类型，如 image/png、application/pdf")
     private String mime;
+
+    @Schema(description ="对象存储 objectKey，用于按需重新签名下载地址（可选，url 为空时使用）")
+    private String objectKey;
 }

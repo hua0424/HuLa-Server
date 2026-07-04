@@ -33,8 +33,8 @@ public class StorageDriver {
         cfg.put("minioSecretKey", sysConfigService.get("minioSecretKey"));
         cfg.put("minioBucket", sysConfigService.get("minioBucket"));
         cfg.put("minioUrlPrefix", sysConfigService.get("minioUrlPrefix"));
-        // REQ-007: 下载预签名有效期 (秒) 与 region，均可选；MinioStorage 内部有默认值与钳制。
-        cfg.put("minioDownloadExpiry", sysConfigService.get("minioDownloadExpiry"));
+        // sign-on-access(#146): 短效下载签名有效期 (秒) 与 region，均可选；MinioStorage 内部有默认值与钳制。
+        cfg.put("minioSignExpiry", sysConfigService.get("minioSignExpiry"));
         cfg.put("minioRegion", sysConfigService.get("minioRegion"));
         return cfg;
     }

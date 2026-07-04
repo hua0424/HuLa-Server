@@ -11,11 +11,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Hermetic unit tests for {@link MinioStorage#presignPut(String)}.
+ * Hermetic unit tests for {@link MinioStorage}.
  *
  * <p>MinIO presigning is pure local SigV4 crypto — {@code getPresignedObjectUrl} does NOT hit the
  * network — so these tests run fully offline against a dummy endpoint / creds / bucket.</p>
@@ -43,36 +45,29 @@ class MinioStorageTest {
         return new MinioStorage(config).presignPut(OBJECT_KEY);
     }
 
+    private String presignGet(Map<String, String> config, int expiry) {
+        return new MinioStorage(config).presignGet(OBJECT_KEY, expiry);
+    }
+
     private int extractExpires(String url) {
         Matcher m = EXPIRES_PATTERN.matcher(url);
-        assertTrue(m.find(), "downloadUrl must contain X-Amz-Expires=<n>, got: " + url);
+        assertTrue(m.find(), "url must contain X-Amz-Expires=<n>, got: " + url);
         return Integer.parseInt(m.group(1));
     }
 
+    // ---------------------------------------------------------------------
+    // presignPut
+    // ---------------------------------------------------------------------
+
     @Test
-    void downloadUrlIsPresignedGet() {
+    void presignPutNoLongerEmitsDownloadUrl() {
         JSONObject json = presign(baseConfig());
-        String downloadUrl = json.getString("downloadUrl");
-        assertNotNull(downloadUrl, "downloadUrl must be present");
-        // The whole point of REQ-007: downloadUrl must be a presigned GET, not a raw path.
-        assertTrue(downloadUrl.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
-                "downloadUrl must be SigV4 presigned (X-Amz-Algorithm), got: " + downloadUrl);
-        assertTrue(downloadUrl.contains("X-Amz-Signature="),
-                "downloadUrl must carry a signature, got: " + downloadUrl);
-        assertTrue(downloadUrl.contains("X-Amz-Expires="),
-                "downloadUrl must carry an expiry, got: " + downloadUrl);
+        assertNull(json.getString("downloadUrl"),
+                "sign-on-access: presignPut must no longer emit a 7-day downloadUrl");
     }
 
     @Test
-    void downloadUrlContainsBucketAndObjectPath() {
-        JSONObject json = presign(baseConfig());
-        String downloadUrl = URLDecoder.decode(json.getString("downloadUrl"), StandardCharsets.UTF_8);
-        assertTrue(downloadUrl.contains(BUCKET), "downloadUrl must contain bucket, got: " + downloadUrl);
-        assertTrue(downloadUrl.contains(OBJECT_KEY), "downloadUrl must contain objectKey, got: " + downloadUrl);
-    }
-
-    @Test
-    void uploadUrlIsStillPresignedPut() {
+    void presignPutStillReturnsUploadUrlAndObjectKey() {
         JSONObject json = presign(baseConfig());
         String uploadUrl = json.getString("uploadUrl");
         assertNotNull(uploadUrl, "uploadUrl must be present");
@@ -80,49 +75,62 @@ class MinioStorageTest {
                 "uploadUrl must remain a presigned URL, got: " + uploadUrl);
         // PUT presign keeps the existing 3600s expiry.
         assertEquals(3600, extractExpires(uploadUrl), "uploadUrl expiry must stay at 3600s");
+        assertEquals(OBJECT_KEY, json.getString("objectKey"), "objectKey must be echoed back");
+    }
+
+    // ---------------------------------------------------------------------
+    // presignGet — sign-on-access short-expiry GET
+    // ---------------------------------------------------------------------
+
+    @Test
+    void presignGetReturnsPresignedGetContainingObjectKey() {
+        String url = presignGet(baseConfig(), 600);
+        assertNotNull(url, "presignGet must return a url");
+        assertFalse(url.isBlank(), "presignGet url must not be blank");
+        assertTrue(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"),
+                "presignGet must be SigV4 presigned, got: " + url);
+        String decoded = URLDecoder.decode(url, StandardCharsets.UTF_8);
+        assertTrue(decoded.contains(OBJECT_KEY),
+                "presignGet url must contain the objectKey, got: " + decoded);
     }
 
     @Test
-    void objectKeyEchoedBack() {
-        JSONObject json = presign(baseConfig());
-        assertEquals(OBJECT_KEY, json.getString("objectKey"));
+    void presignGetHonoursExpiryInRange() {
+        assertEquals(600, extractExpires(presignGet(baseConfig(), 600)));
     }
 
     @Test
-    void downloadExpiryDefaultsToSevenDaysWhenAbsent() {
-        JSONObject json = presign(baseConfig());
-        assertEquals(604800, extractExpires(json.getString("downloadUrl")));
+    void presignGetClampsExpiryToMinWhenTooSmall() {
+        assertEquals(60, extractExpires(presignGet(baseConfig(), 10)));
     }
 
     @Test
-    void downloadExpiryClampedToMinWhenTooSmall() {
+    void presignGetClampsExpiryToMaxWhenTooLarge() {
+        assertEquals(3600, extractExpires(presignGet(baseConfig(), 99999999)));
+    }
+
+    @Test
+    void presignGetFallsBackToConfiguredDefaultWhenNonPositive() {
         Map<String, String> config = baseConfig();
-        config.put("minioDownloadExpiry", "100");
-        assertEquals(1800, extractExpires(presign(config).getString("downloadUrl")));
+        config.put("minioSignExpiry", "900");
+        assertEquals(900, extractExpires(presignGet(config, 0)));
     }
 
     @Test
-    void downloadExpiryClampedToMaxWhenTooLarge() {
-        Map<String, String> config = baseConfig();
-        config.put("minioDownloadExpiry", "99999999");
-        assertEquals(604800, extractExpires(presign(config).getString("downloadUrl")));
-    }
-
-    @Test
-    void downloadExpiryHonouredWhenInRange() {
-        Map<String, String> config = baseConfig();
-        config.put("minioDownloadExpiry", "3600");
-        assertEquals(3600, extractExpires(presign(config).getString("downloadUrl")));
-    }
-
-    @Test
-    void downloadExpiryDefaultsWhenBlankOrUnparseable() {
-        Map<String, String> blank = baseConfig();
-        blank.put("minioDownloadExpiry", "   ");
-        assertEquals(604800, extractExpires(presign(blank).getString("downloadUrl")));
+    void presignGetFallsBackToBuiltinDefaultWhenConfigAbsentOrBadAndNonPositive() {
+        // absent config → DEFAULT_SIGN_EXPIRY_SECONDS = 300
+        assertEquals(300, extractExpires(presignGet(baseConfig(), 0)));
 
         Map<String, String> garbage = baseConfig();
-        garbage.put("minioDownloadExpiry", "not-a-number");
-        assertEquals(604800, extractExpires(presign(garbage).getString("downloadUrl")));
+        garbage.put("minioSignExpiry", "not-a-number");
+        assertEquals(300, extractExpires(presignGet(garbage, -5)));
+    }
+
+    @Test
+    void presignGetClampsConfiguredDefaultToo() {
+        // configured default below the floor → clamped up to 60
+        Map<String, String> config = baseConfig();
+        config.put("minioSignExpiry", "5");
+        assertEquals(60, extractExpires(presignGet(config, 0)));
     }
 }

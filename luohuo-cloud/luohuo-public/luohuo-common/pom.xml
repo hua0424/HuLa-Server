@@ -19,6 +19,13 @@
             <groupId>com.luohuo.basic</groupId>
             <artifactId>luohuo-core</artifactId>
         </dependency>
+        <!-- sign-on-access(#146)：MinioPresigner 下沉预签名，供 im/system 共用（版本由 luohuo-parent 管理）。
+             注意：这里不 exclude okhttp——common 无其它 okhttp3 提供方，MinioClient.Builder#build() 编译期需要
+             okhttp3.HttpUrl（system-biz 能 exclude 是因为 base-biz 另行提供了 okhttp3）。 -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+        </dependency>
         <dependency>
             <groupId>com.luohuo.flex</groupId>
             <artifactId>luohuo-model</artifactId>
