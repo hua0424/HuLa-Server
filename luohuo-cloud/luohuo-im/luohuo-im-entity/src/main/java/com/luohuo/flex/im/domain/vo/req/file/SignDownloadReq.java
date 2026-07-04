@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.domain.vo.req.file;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -20,5 +21,6 @@ public class SignDownloadReq implements Serializable {
 
     @Schema(description = "消息 id")
     @NotNull
+    @Min(value = 1, message = "msgId 必须为正整数")
     private Long msgId;
 }

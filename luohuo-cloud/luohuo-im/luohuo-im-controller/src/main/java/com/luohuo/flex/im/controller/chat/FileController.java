@@ -54,6 +54,10 @@ public class FileController {
     @Operation(summary = "为消息中的文件/图片按需生成短效预签名下载地址")
     public R<SignDownloadResp> signDownload(@Valid @RequestBody SignDownloadReq req) {
         Long uid = ContextUtil.getUid();
+        // #146 review P1：显式防御 null uid——否则私聊成员校验 null.equals(uid1) 会 NPE→500 掩盖真实的 401/403。
+        if (uid == null) {
+            throw new BizException("未登录或登录已过期");
+        }
 
         // 1. 载入消息
         Message message = messageDao.getById(req.getMsgId());
@@ -78,7 +82,9 @@ public class FileController {
         }
 
         // 4. 短效预签名 GET；先解析有效期再签名，保证返回的 expiresIn 与 url 生命周期一致
-        int expiresIn = MinioPresigner.resolveSignExpiry(sysConfigService.get("minioSignExpiry"), 0);
+        //    #146 review P0：双键过渡——新键 minioSignExpiry 优先，旧键 minioDownloadExpiry 兜底（WARN 提示迁移）。
+        int expiresIn = MinioPresigner.resolveSignExpiry(
+                sysConfigService.get("minioSignExpiry"), sysConfigService.get("minioDownloadExpiry"), 0);
         String url = MinioPresigner.presignGet(minioConfig(bucket), objectKey, expiresIn);
         return R.success(SignDownloadResp.builder().url(url).expiresIn(expiresIn).build());
     }

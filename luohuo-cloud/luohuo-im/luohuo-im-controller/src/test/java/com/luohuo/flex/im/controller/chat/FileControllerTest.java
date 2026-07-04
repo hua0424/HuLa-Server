@@ -88,7 +88,7 @@ class FileControllerTest {
         try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class);
              MockedStatic<MinioPresigner> presigner = mockStatic(MinioPresigner.class)) {
             ctx.when(ContextUtil::getUid).thenReturn(UID);
-            presigner.when(() -> MinioPresigner.resolveSignExpiry(any(), anyInt())).thenReturn(RESOLVED_EXPIRY);
+            presigner.when(() -> MinioPresigner.resolveSignExpiry(any(), any(), anyInt())).thenReturn(RESOLVED_EXPIRY);
             presigner.when(() -> MinioPresigner.presignGet(any(), eq("ai/2026/06/photo.png"), eq(RESOLVED_EXPIRY)))
                     .thenReturn(SIGNED_URL);
 
@@ -149,7 +149,7 @@ class FileControllerTest {
         try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class);
              MockedStatic<MinioPresigner> presigner = mockStatic(MinioPresigner.class)) {
             ctx.when(ContextUtil::getUid).thenReturn(UID);
-            presigner.when(() -> MinioPresigner.resolveSignExpiry(any(), anyInt())).thenReturn(RESOLVED_EXPIRY);
+            presigner.when(() -> MinioPresigner.resolveSignExpiry(any(), any(), anyInt())).thenReturn(RESOLVED_EXPIRY);
             presigner.when(() -> MinioPresigner.presignGet(any(), eq("chat/1717_photo.png"), eq(RESOLVED_EXPIRY)))
                     .thenReturn(SIGNED_URL);
 
@@ -159,6 +159,22 @@ class FileControllerTest {
             assertEquals(SIGNED_URL, resp.getData().getUrl());
             // 从老 url 回推出的 objectKey 被喂给 presigner
             presigner.verify(() -> MinioPresigner.presignGet(any(), eq("chat/1717_photo.png"), eq(RESOLVED_EXPIRY)));
+        }
+    }
+
+    @Test
+    @DisplayName("未登录：uid 为 null → 抛 BizException，不查消息不签名（P1 防御 NPE→500）")
+    void nullUidRejected() {
+        try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class);
+             MockedStatic<MinioPresigner> presigner = mockStatic(MinioPresigner.class)) {
+            ctx.when(ContextUtil::getUid).thenReturn(null);
+
+            assertThrows(BizException.class, () -> controller.signDownload(req()));
+
+            // uid 为 null 直接短路：不载入消息、不做成员校验、不签名
+            verify(messageDao, never()).getById(any());
+            verify(roomMembershipService, never()).checkMembership(any(), any());
+            presigner.verify(() -> MinioPresigner.presignGet(any(), any(), anyInt()), never());
         }
     }
 
@@ -176,7 +192,7 @@ class FileControllerTest {
         try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class);
              MockedStatic<MinioPresigner> presigner = mockStatic(MinioPresigner.class)) {
             ctx.when(ContextUtil::getUid).thenReturn(UID);
-            presigner.when(() -> MinioPresigner.resolveSignExpiry(any(), anyInt())).thenReturn(RESOLVED_EXPIRY);
+            presigner.when(() -> MinioPresigner.resolveSignExpiry(any(), any(), anyInt())).thenReturn(RESOLVED_EXPIRY);
             presigner.when(() -> MinioPresigner.presignGet(any(), eq("chat/pic.png"), eq(RESOLVED_EXPIRY)))
                     .thenReturn(SIGNED_URL);
 

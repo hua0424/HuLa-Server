@@ -73,6 +73,36 @@ class MinioPresignerTest {
     }
 
     // ---------------------------------------------------------------------
+    // resolveSignExpiry(3-arg) — 双键过渡（#146 review P0）
+    // ---------------------------------------------------------------------
+
+    @Test
+    void newKeyPreferredOverLegacy() {
+        // 新键存在 → 用新键，忽略旧键
+        assertEquals(900, MinioPresigner.resolveSignExpiry("900", "1200", 0));
+    }
+
+    @Test
+    void legacyKeyUsedWhenNewAbsentOrUnparseable() {
+        // 新键缺省 → 回退旧键（并钳制）
+        assertEquals(1200, MinioPresigner.resolveSignExpiry(null, "1200", 0));
+        assertEquals(3600, MinioPresigner.resolveSignExpiry(null, "999999", 0));
+        // 新键无法解析 → 同样回退旧键（不静默取内置默认）
+        assertEquals(1200, MinioPresigner.resolveSignExpiry("bad", "1200", 0));
+    }
+
+    @Test
+    void bothKeysAbsentOrBadFallsBackToBuiltinDefault() {
+        assertEquals(300, MinioPresigner.resolveSignExpiry(null, null, 0));
+        assertEquals(300, MinioPresigner.resolveSignExpiry("bad", "alsobad", 0));
+    }
+
+    @Test
+    void requestedStillWinsOverBothKeys() {
+        assertEquals(600, MinioPresigner.resolveSignExpiry("900", "1200", 600));
+    }
+
+    // ---------------------------------------------------------------------
     // presignGet — pure local SigV4
     // ---------------------------------------------------------------------
 

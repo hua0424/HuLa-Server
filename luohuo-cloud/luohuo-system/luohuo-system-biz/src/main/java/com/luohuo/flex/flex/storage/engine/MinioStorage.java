@@ -74,7 +74,8 @@ public class MinioStorage {
      * @return 预签名 GET url 字符串
      */
     public String presignGet(String objectKey, int expirySeconds) {
-        int expiry = MinioPresigner.resolveSignExpiry(this.config.get("minioSignExpiry"), expirySeconds);
+        int expiry = MinioPresigner.resolveSignExpiry(
+                this.config.get("minioSignExpiry"), this.config.get("minioDownloadExpiry"), expirySeconds);
         try {
             return MinioPresigner.presignGet(this.config, objectKey, expiry);
         } catch (Exception e) {

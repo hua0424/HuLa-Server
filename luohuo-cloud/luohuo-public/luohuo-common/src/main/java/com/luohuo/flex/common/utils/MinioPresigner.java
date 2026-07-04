@@ -3,6 +3,8 @@ package com.luohuo.flex.common.utils;
 import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MinioClient;
 import io.minio.http.Method;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 
@@ -19,6 +21,8 @@ import java.util.Map;
  * @author sign-on-access (aichatoverview#146)
  */
 public final class MinioPresigner {
+
+    private static final Logger log = LoggerFactory.getLogger(MinioPresigner.class);
 
     /** sign-on-access 下载预签名 (GET) 有效期下限：60 秒。 */
     private static final int MIN_SIGN_EXPIRY_SECONDS = 60;
@@ -88,19 +92,49 @@ public final class MinioPresigner {
      * @return 钳制后的有效期秒数
      */
     public static int resolveSignExpiry(String rawMinioSignExpiry, int requested) {
-        int seconds = requested > 0 ? requested : parseConfigured(rawMinioSignExpiry);
-        return clamp(seconds);
+        return resolveSignExpiry(rawMinioSignExpiry, null, requested);
     }
 
-    private static int parseConfigured(String raw) {
-        if (raw != null && !raw.isBlank()) {
-            try {
-                return Integer.parseInt(raw.trim());
-            } catch (NumberFormatException ignore) {
-                // 无法解析 → 回退内置默认值
-            }
+    /**
+     * 解析下载有效期（秒），支持配置键**双键过渡**：新键 {@code minioSignExpiry} 优先，
+     * 缺省/无效时回退旧键 {@code minioDownloadExpiry}（打 WARN 提示迁移），仍无则回退内置默认。
+     * 最终钳制到 [{@link #MIN_SIGN_EXPIRY_SECONDS}, {@link #MAX_SIGN_EXPIRY_SECONDS}]。
+     *
+     * <p>#146 review P0：配置键重命名不能静默丢配置——旧键仍生效由代码兜住（不靠部署人肉同步 Nacos）。</p>
+     *
+     * @param rawSignExpiry   新键 {@code minioSignExpiry} 原始字符串（可为 {@code null}）
+     * @param rawLegacyExpiry 旧键 {@code minioDownloadExpiry} 原始字符串（可为 {@code null}）
+     * @param requested       调用方期望值（{@code <= 0} 表示未指定，回退配置）
+     * @return 钳制后的有效期秒数
+     */
+    public static int resolveSignExpiry(String rawSignExpiry, String rawLegacyExpiry, int requested) {
+        if (requested > 0) {
+            return clamp(requested);
+        }
+        Integer fromNew = tryParse("minioSignExpiry", rawSignExpiry);
+        if (fromNew != null) {
+            return clamp(fromNew);
+        }
+        Integer fromLegacy = tryParse("minioDownloadExpiry", rawLegacyExpiry);
+        if (fromLegacy != null) {
+            log.warn("[MinioPresigner] 配置键 minioDownloadExpiry 已弃用，请迁移到 minioSignExpiry；" +
+                    "本次沿用旧键值 {}s（将钳制到 [{},{}]）", fromLegacy, MIN_SIGN_EXPIRY_SECONDS, MAX_SIGN_EXPIRY_SECONDS);
+            return clamp(fromLegacy);
         }
         return DEFAULT_SIGN_EXPIRY_SECONDS;
+    }
+
+    /** 解析整数配置；空值返回 null（无值），解析失败打 WARN 并返回 null（别静默吞——#146 review P1）。 */
+    private static Integer tryParse(String key, String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException ignore) {
+            log.warn("[MinioPresigner] 配置 {} 无法解析为整数:{}，忽略该值", key, raw);
+            return null;
+        }
     }
 
     private static int clamp(int seconds) {
