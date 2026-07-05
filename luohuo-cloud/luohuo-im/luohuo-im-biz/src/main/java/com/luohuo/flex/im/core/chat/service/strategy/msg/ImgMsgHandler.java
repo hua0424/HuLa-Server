@@ -1,5 +1,6 @@
 package com.luohuo.flex.im.core.chat.service.strategy.msg;
 
+import cn.hutool.core.collection.CollectionUtil;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.vo.response.msg.ImgMsgDTO;
@@ -32,6 +33,10 @@ public class ImgMsgHandler extends AbstractMsgHandler<ImgMsgDTO> {
         update.setExtra(extra);
 		update.setReplyMsgId(body.getReplyMsgId());
         extra.setImgMsgDTO(body);
+        // #149：上提 @ 列表到 extra 顶层（与 TextMsgHandler 一致）——否则群里图片消息 @aiclaw 不触发、@真人 不高亮。
+        if (CollectionUtil.isNotEmpty(body.getAtUidList())) {
+            extra.setAtUidList(body.getAtUidList());
+        }
         messageDao.updateById(update);
     }
 
