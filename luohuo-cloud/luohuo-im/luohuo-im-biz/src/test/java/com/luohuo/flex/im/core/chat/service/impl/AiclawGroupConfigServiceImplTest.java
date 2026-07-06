@@ -30,6 +30,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -726,5 +727,69 @@ class AiclawGroupConfigServiceImplTest {
 		configService.updateConfig(req, UID);
 
 		verify(stringRedisTemplate, never()).delete(APPROVE_NOTIFY_KEY);
+	}
+
+	// ---------------------------------------------------------------------
+	// PR#49 reviewer P0-2 / P1-3 修复：去重 key 泄漏 → 正常邀请被误压 24h 族。
+	// ---------------------------------------------------------------------
+
+	@Test
+	@DisplayName("#153 P0-2: tryMarkApproveNotified —— Redis 抛异常时 fail-OPEN 返回 true（宁可重复通知也不静默入群）")
+	void tryMarkApproveNotified_redisThrows_failsOpenReturnsTrue() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.setIfAbsent(eq(APPROVE_NOTIFY_KEY), eq("1"), any(Duration.class)))
+				.thenThrow(new RuntimeException("redis down"));
+
+		// Redis 不可用 → 返回 true（应发通知）；绝不能因去重门控挂掉而让 aiclaw 静默入群、主人收不到待批准通知
+		assertTrue(configService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("#153 P0-2: clearApproveNotified —— Redis 抛异常时吞掉不外抛（best-effort，TTL 兜底）")
+	void clearApproveNotified_redisThrows_swallows() {
+		doThrow(new RuntimeException("redis down")).when(stringRedisTemplate).delete(anyString());
+
+		// 清标记失败不得中断 approve/踢人/退群流程
+		assertDoesNotThrow(() -> configService.clearApproveNotified(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("#153 P1-3: aiclaw 已被踢出群（不在 memberUids）—— membership 校验抛异常前已先清去重 key")
+	void updateConfig_approvedButAiclawKicked_clearsKeyBeforeMembershipThrow() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(0)
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID); // UID = 群主，owner 校验通过
+		// aiclaw 不在成员列表 → membership 校验会抛「该AI助理不在此群中」
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(UID));
+
+		BizException ex = assertThrows(BizException.class, () -> configService.updateConfig(req, UID));
+		assertTrue(ex.getMessage().contains("不在此群中"));
+
+		// 关键（P1-3）：即便随后 membership 校验抛出，清 key 也已在校验之前执行——放宽了成员检查对清 key 的阻断
+		verify(stringRedisTemplate).delete(APPROVE_NOTIFY_KEY);
+		// 抛异常路径不落库
+		verify(aiclawGroupConfigMapper, never()).insert(any(AiclawGroupConfig.class));
+		verify(aiclawGroupConfigMapper, never()).updateById(any(AiclawGroupConfig.class));
+	}
+
+	@Test
+	@DisplayName("#153 P1-3: 非群主（aiclaw 本人）带 approved —— 权限校验先抛，绝不清 key")
+	void updateConfig_nonOwnerApproved_doesNotClearKey() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.build();
+
+		// owner=UID，调用者=aiclaw 本人（非群主）→ 字段级权限校验先抛出；清 key 在其后，绝不应执行
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+
+		assertThrows(BizException.class, () -> configService.updateConfig(req, AICLAW_UID));
+
+		verify(stringRedisTemplate, never()).delete(anyString());
 	}
 }
