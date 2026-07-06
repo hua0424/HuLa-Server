@@ -123,15 +123,15 @@ public class NoticeServiceImpl implements NoticeService {
 		vo.setCreateTime(notice.getCreateTime());
 		vo.setRead(notice.getIsRead());
 
-		// 填充发送人信息
+		// 填充发送人信息（#157: sender 可能为已删除/停用用户 → null，需空安全）
 		SummeryInfoDTO sender = userSummaryCache.get(notice.getSenderId());
-		vo.setSenderName(sender.getName());
-		vo.setSenderAvatar(sender.getAvatar());
+		vo.setSenderName(sender != null ? sender.getName() : null);
+		vo.setSenderAvatar(sender != null ? sender.getAvatar() : null);
 
-		// 填充接收人信息
+		// 填充接收人信息（#157: receiver 可能为已删除/停用用户 → null，需空安全）
 		SummeryInfoDTO receiver = userSummaryCache.get(notice.getReceiverId());
-		vo.setReceiverName(receiver.getName());
-		vo.setReceiverAvatar(receiver.getAvatar());
+		vo.setReceiverName(receiver != null ? receiver.getName() : null);
+		vo.setReceiverAvatar(receiver != null ? receiver.getAvatar() : null);
 
 		// receiverUserType 取实际被申请目标（operateId）的 userType
 		// aiclaw 场景：operateId=aiclaw uid（userType=4），receiverId=owner uid（已转发）
@@ -139,7 +139,8 @@ public class NoticeServiceImpl implements NoticeService {
 		SummeryInfoDTO targetUser = targetUid.equals(notice.getReceiverId())
 				? receiver
 				: userSummaryCache.get(targetUid);
-		vo.setReceiverUserType(targetUser != null ? targetUser.getUserType() : receiver.getUserType());
+		Integer fallbackType = receiver != null ? receiver.getUserType() : null;
+		vo.setReceiverUserType(targetUser != null ? targetUser.getUserType() : fallbackType);
 		return vo;
 	}
 
