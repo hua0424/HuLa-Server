@@ -11,6 +11,7 @@ import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.entity.msg.MessageExtra;
 import com.luohuo.flex.im.domain.vo.req.file.SignDownloadReq;
 import com.luohuo.flex.im.domain.vo.response.msg.BaseFileDTO;
+import com.luohuo.flex.im.domain.vo.response.msg.VideoMsgDTO;
 import com.luohuo.flex.im.domain.vo.resp.file.SignDownloadResp;
 import com.luohuo.flex.service.SysConfigService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -68,15 +69,30 @@ public class FileController {
         // 2. 成员校验：调用者必须是该房间成员（非成员时抛 BizException = 403 路径）
         roomMembershipService.checkMembership(uid, message.getRoomId());
 
-        // 3. 从消息体派生 objectKey（新消息 objectKey 优先，老消息回退从 url 解析）
-        BaseFileDTO body = fileBody(message.getExtra());
-        if (body == null) {
-            throw new BizException("消息不含可下载文件");
-        }
+        // 3. 从消息体派生 objectKey（新消息 objectKey 优先，老消息回退从 url 解析）。
+        //    #158：objectKey 始终服务端从「已存储的消息」派生，绝不取自客户端入参——保留 #146 的安全属性；
+        //    req.target 仅选择取消息里的哪个字段（file=主文件 / thumb=视频缩略图）。
         String bucket = sysConfigService.get("minioBucket");
-        String objectKey = hasText(body.getObjectKey())
-                ? body.getObjectKey()
-                : StorageUrlUtil.parseObjectKeyFromUrl(body.getUrl(), bucket);
+        MessageExtra extra = message.getExtra();
+        String objectKey;
+        if ("thumb".equalsIgnoreCase(req.getTarget())) {
+            VideoMsgDTO video = extra == null ? null : extra.getVideoMsgDTO();
+            if (video == null) {
+                throw new BizException("该消息不含缩略图");
+            }
+            objectKey = hasText(video.getThumbObjectKey())
+                    ? video.getThumbObjectKey()
+                    : StorageUrlUtil.parseObjectKeyFromUrl(video.getThumbUrl(), bucket);   // 存量：老消息只有 thumbUrl → 反解
+        } else {
+            // target 缺省/"file"：主文件（含视频主体）
+            BaseFileDTO body = fileBody(extra);
+            if (body == null) {
+                throw new BizException("消息不含可下载文件");
+            }
+            objectKey = hasText(body.getObjectKey())
+                    ? body.getObjectKey()
+                    : StorageUrlUtil.parseObjectKeyFromUrl(body.getUrl(), bucket);
+        }
         if (!hasText(objectKey)) {
             throw new BizException("无法解析文件对象，无法生成下载地址");
         }
@@ -90,7 +106,10 @@ public class FileController {
     }
 
     /**
-     * 取消息体中的文件/图片（二者取非空者；文件优先）。
+     * 取消息体中的主文件（文件 / 图片 / 视频主体，取非空者；文件优先，视频兜底）。
+     *
+     * <p>视频消息挂的是 {@code videoMsgDTO}（{@link VideoMsgDTO} extends {@link BaseFileDTO}，其继承的
+     * objectKey/url 即视频主体），与 fileMsg 互斥，故追加在末尾不会与前者冲突。</p>
      */
     private BaseFileDTO fileBody(MessageExtra extra) {
         if (extra == null) {
@@ -99,7 +118,10 @@ public class FileController {
         if (extra.getFileMsg() != null) {
             return extra.getFileMsg();
         }
-        return extra.getImgMsgDTO();
+        if (extra.getImgMsgDTO() != null) {
+            return extra.getImgMsgDTO();
+        }
+        return extra.getVideoMsgDTO();
     }
 
     private Map<String, String> minioConfig(String bucket) {

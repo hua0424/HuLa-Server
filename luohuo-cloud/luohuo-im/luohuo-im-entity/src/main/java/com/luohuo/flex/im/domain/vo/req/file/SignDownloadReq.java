@@ -23,4 +23,7 @@ public class SignDownloadReq implements Serializable {
     @NotNull
     @Min(value = 1, message = "msgId 必须为正整数")
     private Long msgId;
+
+    @Schema(description ="下载目标：file=主文件(默认)｜thumb=缩略图（仅视频消息）")
+    private String target;
 }

@@ -1,8 +1,9 @@
 package com.luohuo.flex.im.domain.vo.response.msg;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.luohuo.flex.im.domain.entity.msg.ReplyMsg;
 import io.swagger.v3.oas.annotations.media.Schema;
-import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
 import lombok.Data;
@@ -39,9 +40,13 @@ public class VideoMsgDTO extends BaseFileDTO implements Serializable {
     @NotNull
     private Long thumbSize;
 
-    @Schema(description ="缩略图下载地址")
-    @NotBlank
+    // sign-on-access(#158，镜像 #146)：thumbUrl 不再强制——新消息只带 thumbObjectKey、thumbUrl 置空；
+    // 旧消息带长效 thumbUrl。由 #hasThumbRef 保证「thumbObjectKey 与 thumbUrl 至少一个非空」。
+    @Schema(description ="缩略图下载地址（可选；新消息置空，改用 thumbObjectKey 按需换签）")
     private String thumbUrl;
+
+    @Schema(description ="缩略图对象存储 objectKey，用于按需重新签名（可选，thumbUrl 为空时使用）")
+    private String thumbObjectKey;
 
 	@Schema(description ="回复的消息id")
 	private Long replyMsgId;
@@ -51,4 +56,13 @@ public class VideoMsgDTO extends BaseFileDTO implements Serializable {
 
 	@Schema(description ="父消息，如果没有父消息，返回的是null")
 	private ReplyMsg reply;
+
+    /** #158（镜像 #146）：thumbObjectKey 与 thumbUrl 至少一个非空（否则缩略图无法定位）。 */
+    @JsonIgnore
+    @Schema(hidden = true)
+    @AssertTrue(message = "thumbObjectKey 与 thumbUrl 至少一个非空")
+    public boolean isHasThumbRef() {
+        return (getThumbUrl() != null && !getThumbUrl().isBlank())
+                || (thumbObjectKey != null && !thumbObjectKey.isBlank());
+    }
 }
