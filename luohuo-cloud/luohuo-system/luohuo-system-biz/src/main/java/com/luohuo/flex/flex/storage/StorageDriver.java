@@ -32,7 +32,6 @@ public class StorageDriver {
         cfg.put("minioAccessKey", sysConfigService.get("minioAccessKey"));
         cfg.put("minioSecretKey", sysConfigService.get("minioSecretKey"));
         cfg.put("minioBucket", sysConfigService.get("minioBucket"));
-        cfg.put("minioUrlPrefix", sysConfigService.get("minioUrlPrefix"));
         // sign-on-access(#146): 短效下载签名有效期 (秒) 与 region，均可选；MinioStorage 内部有默认值与钳制。
         cfg.put("minioSignExpiry", sysConfigService.get("minioSignExpiry"));
         // #146 review P0：旧键双键过渡——保留旧 minioDownloadExpiry 供 resolveSignExpiry 回退（打 WARN 提示迁移），不静默丢配置。

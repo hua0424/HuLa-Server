@@ -121,6 +121,9 @@ public final class MinioPresigner {
                     "本次沿用旧键值 {}s（将钳制到 [{},{}]）", fromLegacy, MIN_SIGN_EXPIRY_SECONDS, MAX_SIGN_EXPIRY_SECONDS);
             return clamp(fromLegacy);
         }
+        // #155: 双键均未配置/为空 → 静默回退默认值，补 DEBUG 可观测（不改回退语义）
+        log.debug("[MinioPresigner] minioSignExpiry/minioDownloadExpiry 均未配置或为空, 使用默认值 {}s",
+                DEFAULT_SIGN_EXPIRY_SECONDS);
         return DEFAULT_SIGN_EXPIRY_SECONDS;
     }
 
