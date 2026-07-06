@@ -41,6 +41,10 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	private static final String REDIS_CONFIG_KEY_PREFIX = "im:aiclaw:group:config:";
 	private static final Duration CONFIG_CACHE_TTL = Duration.ofMinutes(30);
 
+	// #153: 入群待批准通知去重标记 —— key 前缀 + TTL（未决通知的兜底过期，主人一直不决定也不会永久占用）
+	private static final String APPROVE_NOTIFY_KEY_PREFIX = "im:aiclaw:approve:notify:";
+	private static final Duration APPROVE_NOTIFY_TTL = Duration.ofHours(24);
+
 	private final AiclawGroupConfigMapper aiclawGroupConfigMapper;
 	private final AiclawOwnerCache aiclawOwnerCache;
 	private final GroupMemberCache groupMemberCache;
@@ -200,6 +204,14 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			throw new BizException("只有AI助理主人可以批准或配置工作目录");
 		}
 
+		// #153 P1-3: 主人对该 (aiclaw, room) 做出批准/拒绝决定即清入群待批准去重标记——即使 aiclaw 已被踢出群
+		// (下面的 membership 校验会抛「不在此群中」)，清 key 也应先执行，保证后续再邀请可重新通知主人。
+		// 必须在 owner-permission 校验之后（非群主不得清 key）、membership 校验之前。
+		// clearApproveNotified 已 fail-open（吞 Redis 异常），不会阻断本流程。
+		if (request.getApproved() != null) {
+			clearApproveNotified(aiclawUid, roomId);
+		}
+
 		// 校验 aiclaw 在该群中
 		List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
 		if (memberUids == null || !memberUids.contains(aiclawUid)) {
@@ -264,6 +276,38 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				.build();
 		pushService.sendPushMsg(WsAdapter.buildGroupConfigChange(change), memberUids, uid);
 		log.debug("group config change broadcast: aiclawUid={}, roomId={}, members={}", aiclawUid, roomId, memberUids.size());
+	}
+
+	@Override
+	public boolean tryMarkApproveNotified(Long aiclawUid, Long roomId) {
+		// SETNX + TTL：原子占位。首次占位成功返回 true（应发通知）；已存在未决标记返回 false（应跳过）。
+		try {
+			Boolean ok = stringRedisTemplate.opsForValue()
+					.setIfAbsent(buildApproveNotifyKey(aiclawUid, roomId), "1", APPROVE_NOTIFY_TTL);
+			return Boolean.TRUE.equals(ok);
+		} catch (Exception e) {
+			// #153 P0-2: Redis 不可用时 fail-OPEN —— 返回 true（发通知）。宁可重复通知，也绝不能因为
+			// 去重门控挂了而让 aiclaw 静默入群、主人永远收不到待批准通知（silent no-notify 是不可接受的）。
+			log.warn("tryMarkApproveNotified failed, fail-open (will notify): aiclawUid={}, roomId={}",
+					aiclawUid, roomId, e);
+			return true;
+		}
+	}
+
+	@Override
+	public void clearApproveNotified(Long aiclawUid, Long roomId) {
+		try {
+			stringRedisTemplate.delete(buildApproveNotifyKey(aiclawUid, roomId));
+		} catch (Exception e) {
+			// #153 P0-2: 清标记是 best-effort —— Redis 抖动不得中断 approve/踢人/退群流程；
+			// 标记未清最坏是漏发一次再邀请通知，且 24h TTL 会兜底过期。
+			log.warn("clearApproveNotified failed, swallowed (TTL will expire the key): aiclawUid={}, roomId={}",
+					aiclawUid, roomId, e);
+		}
+	}
+
+	private String buildApproveNotifyKey(Long aiclawUid, Long roomId) {
+		return APPROVE_NOTIFY_KEY_PREFIX + aiclawUid + ":" + roomId;
 	}
 
 	private String buildConfigCacheKey(Long aiclawUid, Long roomId) {
