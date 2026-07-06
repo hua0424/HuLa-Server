@@ -1116,9 +1116,18 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			return;
 		}
 
+		// #157: 停用/注销用户（已停用 aiclaw 的 im_user.is_del=1）不被 listByIds 返回；旧逻辑放它们进普通
+		// 邀请路径 → NoticeServiceImpl.convertToVO 查不到 summary → NPE→500。此处明确拦截给可读业务错误。
+		List<User> resolvedUsers = userDao.listByIds(validUids);
+		Set<Long> resolvedUids = resolvedUsers.stream().map(User::getId).collect(Collectors.toSet());
+		List<Long> unresolvable = validUids.stream().filter(u -> !resolvedUids.contains(u)).collect(Collectors.toList());
+		if (!unresolvable.isEmpty()) {
+			throw new BizException("无法邀请：目标用户不存在或已注销/停用");
+		}
+
 		// REQ-009 #88: 识别被邀请人中的所有 aiclaw（userType=4），无论归属，统一自动入群（pending）。
 		// 别人拉你的 aiclaw 也走自动入群，避免落入普通邀请流程而无 UI 可接受。
-		Set<Long> autoAgreeUids = userDao.listByIds(validUids).stream()
+		Set<Long> autoAgreeUids = resolvedUsers.stream()
 				.filter(user -> Integer.valueOf(4).equals(user.getUserType()))
 				.map(User::getId)
 				.collect(Collectors.toSet());
