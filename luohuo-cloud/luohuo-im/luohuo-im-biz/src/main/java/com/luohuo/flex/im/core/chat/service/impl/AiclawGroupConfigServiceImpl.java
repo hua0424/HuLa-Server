@@ -41,6 +41,10 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	private static final String REDIS_CONFIG_KEY_PREFIX = "im:aiclaw:group:config:";
 	private static final Duration CONFIG_CACHE_TTL = Duration.ofMinutes(30);
 
+	// #153: 入群待批准通知去重标记 —— key 前缀 + TTL（未决通知的兜底过期，主人一直不决定也不会永久占用）
+	private static final String APPROVE_NOTIFY_KEY_PREFIX = "im:aiclaw:approve:notify:";
+	private static final Duration APPROVE_NOTIFY_TTL = Duration.ofHours(24);
+
 	private final AiclawGroupConfigMapper aiclawGroupConfigMapper;
 	private final AiclawOwnerCache aiclawOwnerCache;
 	private final GroupMemberCache groupMemberCache;
@@ -239,6 +243,12 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			config = persisted;   // 缺陷防御：re-select 理应命中；为空则退回内存实体，绝不 NPE
 		}
 
+		// #153: 主人对该 (aiclaw, room) 做出批准/拒绝决定（approved 显式置 1 或 0）→ 清入群待批准去重标记，
+		// 使后续再次邀请（如先被移出群再被拉回）可再次给主人发待批准通知。
+		if (request.getApproved() != null) {
+			clearApproveNotified(aiclawUid, roomId);
+		}
+
 		// 更新 Redis 缓存
 		// REQ-009#82: BeanUtil 已携带 approved/workspaceDir；再补 account 后入缓存，
 		// 使下游 gate 从缓存读到的 Resp 含完整批准态与群号。
@@ -264,6 +274,23 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				.build();
 		pushService.sendPushMsg(WsAdapter.buildGroupConfigChange(change), memberUids, uid);
 		log.debug("group config change broadcast: aiclawUid={}, roomId={}, members={}", aiclawUid, roomId, memberUids.size());
+	}
+
+	@Override
+	public boolean tryMarkApproveNotified(Long aiclawUid, Long roomId) {
+		// SETNX + TTL：原子占位。首次占位成功返回 true（应发通知）；已存在未决标记返回 false（应跳过）。
+		Boolean ok = stringRedisTemplate.opsForValue()
+				.setIfAbsent(buildApproveNotifyKey(aiclawUid, roomId), "1", APPROVE_NOTIFY_TTL);
+		return Boolean.TRUE.equals(ok);
+	}
+
+	@Override
+	public void clearApproveNotified(Long aiclawUid, Long roomId) {
+		stringRedisTemplate.delete(buildApproveNotifyKey(aiclawUid, roomId));
+	}
+
+	private String buildApproveNotifyKey(Long aiclawUid, Long roomId) {
+		return APPROVE_NOTIFY_KEY_PREFIX + aiclawUid + ":" + roomId;
 	}
 
 	private String buildConfigCacheKey(Long aiclawUid, Long roomId) {

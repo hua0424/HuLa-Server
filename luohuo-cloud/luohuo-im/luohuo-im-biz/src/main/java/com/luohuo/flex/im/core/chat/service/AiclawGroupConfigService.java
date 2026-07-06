@@ -65,4 +65,25 @@ public interface AiclawGroupConfigService {
 	 * @return 剔除未批准 aiclaw 后的新列表
 	 */
 	List<Long> filterUnapprovedAiclawRecipients(List<Long> memberUids, Long roomId);
+
+	/**
+	 * #153: 标记「已给主人发过该 (aiclaw, room) 的入群待批准通知」；返回 true=首次标记（应发通知），
+	 * false=已有未决通知（应跳过）。Redis SETNX + TTL。
+	 *
+	 * <p>SETNX 是原子操作 → 天然处理并发双邀请竞态：并发 N 个邀请只有一个能取到 true，
+	 * 其余取 false，从而每个 (aiclaw, room) 未决期内只给主人发一条待批准通知。
+	 *
+	 * @param aiclawUid aiclaw 的 uid
+	 * @param roomId    群聊 room_id
+	 * @return 首次标记返回 true（应发通知），已有未决标记返回 false（应跳过）
+	 */
+	boolean tryMarkApproveNotified(Long aiclawUid, Long roomId);
+
+	/**
+	 * #153: 清除入群待批准去重标记；主人做出批准/拒绝决定后调用，使后续再次邀请可再通知。
+	 *
+	 * @param aiclawUid aiclaw 的 uid
+	 * @param roomId    群聊 room_id
+	 */
+	void clearApproveNotified(Long aiclawUid, Long roomId);
 }

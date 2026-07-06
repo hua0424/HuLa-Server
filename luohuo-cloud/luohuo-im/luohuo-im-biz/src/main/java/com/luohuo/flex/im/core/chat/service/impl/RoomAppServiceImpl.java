@@ -87,6 +87,7 @@ import com.luohuo.flex.im.domain.vo.response.ChatMemberListResp;
 import com.luohuo.flex.im.domain.vo.response.ChatRoomResp;
 import com.luohuo.flex.im.domain.vo.response.MemberResp;
 import com.luohuo.flex.im.domain.vo.response.ReadAnnouncementsResp;
+import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomAppService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
@@ -162,6 +163,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	private RoomService roomService;
 	private UidGenerator uidGenerator;
 	private NoticeService noticeService;
+	private final AiclawGroupConfigService aiclawGroupConfigService;
 	private GroupMemberCache groupMemberCache;
 	private PushService pushService;
 	private FriendService friendService;
@@ -1197,8 +1199,11 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			log.info("aiclaw auto-joined group: aiclawUid={}, roomId={}, inviter={}", aiclawUid, roomGroup.getRoomId(), inviterUid);
 
 			// REQ-009 #88: 别人拉你的 aiclaw 入群 → 给主人发「待批准」通知；主人自己拉自己的不发（主人在群里有就地审批弹窗）。
+			// #153: 去重门控——同一 (aiclaw, room) 未决期内只发一条待批准通知。tryMarkApproveNotified 用 Redis SETNX
+			// 原子占位，处理「移出群后再被拉回」的重复邀请与并发双邀请竞态；主人做出决定后清标记（见 updateConfig）。
 			Long ownerUid = aiclawOwnerCache.getOwnerUid(aiclawUid);
-			if (ownerUid != null && !ownerUid.equals(inviterUid)) {
+			if (ownerUid != null && !ownerUid.equals(inviterUid)
+					&& aiclawGroupConfigService.tryMarkApproveNotified(aiclawUid, roomGroup.getRoomId())) {
 				noticeService.createNotice(
 						RoomTypeEnum.GROUP, NoticeTypeEnum.AICLAW_GROUP_APPROVE,
 						aiclawUid,                 // senderId

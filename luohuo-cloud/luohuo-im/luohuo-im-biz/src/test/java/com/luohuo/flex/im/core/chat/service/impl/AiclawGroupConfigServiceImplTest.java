@@ -632,4 +632,99 @@ class AiclawGroupConfigServiceImplTest {
 		assertNull(captor.getValue().getUpdateTime(),
 				"更新既有行时应将 updateTime 置空，交由 LuohuoMetaObjectHandler 重新填充新时间戳");
 	}
+
+	// =====================================================================
+	// #153 (BL-009): aiclaw 入群邀请「待批准」通知去重 —— Redis SETNX 占位 + 主人决定后清标记。
+	// 残余滥用向量：aiclaw 被移出群后再被反复邀请、并发双邀请竞态。SETNX 原子性保证未决期内
+	// 每个 (aiclaw, room) 只发一条待批准通知；updateConfig 里主人做出批准/拒绝决定后清标记，
+	// 使后续再邀请可再通知。
+	// =====================================================================
+
+	private static final String APPROVE_NOTIFY_KEY = "im:aiclaw:approve:notify:" + AICLAW_UID + ":" + ROOM_ID;
+
+	@Test
+	@DisplayName("#153: tryMarkApproveNotified —— setIfAbsent=true → 首次标记，返回 true（应发通知）")
+	void tryMarkApproveNotified_firstMark_returnsTrue() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.setIfAbsent(eq(APPROVE_NOTIFY_KEY), eq("1"), any())).thenReturn(true);
+
+		assertTrue(configService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("#153: tryMarkApproveNotified —— setIfAbsent=false → 已有未决通知，返回 false（应跳过）")
+	void tryMarkApproveNotified_alreadyMarked_returnsFalse() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.setIfAbsent(eq(APPROVE_NOTIFY_KEY), eq("1"), any())).thenReturn(false);
+
+		assertFalse(configService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("#153: tryMarkApproveNotified —— setIfAbsent=null（无返回）→ 保守返回 false（应跳过）")
+	void tryMarkApproveNotified_nullReply_returnsFalse() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(valueOps.setIfAbsent(eq(APPROVE_NOTIFY_KEY), eq("1"), any())).thenReturn(null);
+
+		assertFalse(configService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID));
+	}
+
+	@Test
+	@DisplayName("#153: 并发双邀请竞态 —— SETNX 先 true 后 false，只有第一个邀请应发通知")
+	void tryMarkApproveNotified_concurrentRace_onlyFirstWins() {
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		// 模拟原子 SETNX：两个「并发」邀请先后落到 Redis，只有第一个占位成功
+		when(valueOps.setIfAbsent(eq(APPROVE_NOTIFY_KEY), eq("1"), any())).thenReturn(true, false);
+
+		assertTrue(configService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID), "第一次邀请应取得标记 → 发通知");
+		assertFalse(configService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID), "第二次并发邀请应被去重 → 跳过");
+	}
+
+	@Test
+	@DisplayName("#153: clearApproveNotified —— delete 正确的 approve-notify key")
+	void clearApproveNotified_deletesCorrectKey() {
+		configService.clearApproveNotified(AICLAW_UID, ROOM_ID);
+
+		verify(stringRedisTemplate).delete(APPROVE_NOTIFY_KEY);
+	}
+
+	@Test
+	@DisplayName("#153: updateConfig 携带 approved（主人决定）→ 清 approve-notify 去重标记")
+	void updateConfig_withApproved_clearsApproveNotifyMark() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.approved(1)
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		configService.updateConfig(req, UID);
+
+		verify(stringRedisTemplate).delete(APPROVE_NOTIFY_KEY);
+	}
+
+	@Test
+	@DisplayName("#153: updateConfig 不带 approved（仅旧字段）→ 不清 approve-notify 去重标记")
+	void updateConfig_withoutApproved_doesNotClearApproveNotifyMark() {
+		AiclawGroupConfigUpdateReq req = AiclawGroupConfigUpdateReq.builder()
+				.aiclawUid(AICLAW_UID)
+				.roomId(ROOM_ID)
+				.rateLimitPerMinute(15)
+				.build();
+
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(UID);
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(AICLAW_UID, UID));
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(null);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroupWithAccount());
+
+		configService.updateConfig(req, UID);
+
+		verify(stringRedisTemplate, never()).delete(APPROVE_NOTIFY_KEY);
+	}
 }
