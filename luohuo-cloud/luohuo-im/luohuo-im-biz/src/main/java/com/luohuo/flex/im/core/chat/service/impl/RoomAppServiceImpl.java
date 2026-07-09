@@ -87,7 +87,7 @@ import com.luohuo.flex.im.domain.vo.response.ChatMemberListResp;
 import com.luohuo.flex.im.domain.vo.response.ChatRoomResp;
 import com.luohuo.flex.im.domain.vo.response.MemberResp;
 import com.luohuo.flex.im.domain.vo.response.ReadAnnouncementsResp;
-import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
+import com.luohuo.flex.im.core.chat.service.AiclawParticipant;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomAppService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
@@ -103,8 +103,6 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomFriendCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.AbstractMsgHandler;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
-import com.luohuo.flex.im.core.user.dao.AiclawDao;
-import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.im.domain.vo.req.MergeMessageReq;
@@ -142,8 +140,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	private final RoomFriendDao roomFriendDao;
 	private final NoticeDao noticeDao;
 	private final UserApplyDao userApplyDao;
-	private final AiclawDao aiclawDao;
-	private final AiclawOwnerCache aiclawOwnerCache;
+	private final AiclawParticipant aiclawParticipant;
 	private ContactDao contactDao;
 	private RoomCache roomCache;
 	private final UserFriendDao userFriendDao;
@@ -163,7 +160,6 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	private RoomService roomService;
 	private UidGenerator uidGenerator;
 	private NoticeService noticeService;
-	private final AiclawGroupConfigService aiclawGroupConfigService;
 	private GroupMemberCache groupMemberCache;
 	private PushService pushService;
 	private FriendService friendService;
@@ -1083,11 +1079,9 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 						roomGroup.getName()
 				));
 
-				// #153 P1-1: 被踢者若是 aiclaw（getOwnerUid != null 表示其为 aiclaw）→ 清入群待批准去重标记。
+				// #153 P1-1: 被踢者若是 aiclaw → 清入群待批准去重标记（接缝内按 aiclaw 判定）。
 				// 踢出 = 明确不想要这个 aiclaw，若之后再被拉回应重新给主人发待批准通知，不能被旧标记压制 24h。
-				if (aiclawOwnerCache.getOwnerUid(removedUid) != null) {
-					aiclawGroupConfigService.clearApproveNotified(removedUid, roomGroup.getRoomId());
-				}
+				aiclawParticipant.onMembersRemoved(roomGroup.getRoomId(), Collections.singletonList(removedUid));
 			}
 		});
 	}
@@ -1125,18 +1119,11 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			throw new BizException("无法邀请：目标用户不存在或已注销/停用");
 		}
 
-		// REQ-009 #88: 识别被邀请人中的所有 aiclaw（userType=4），无论归属，统一自动入群（pending）。
-		// 别人拉你的 aiclaw 也走自动入群，避免落入普通邀请流程而无 UI 可接受。
-		Set<Long> autoAgreeUids = resolvedUsers.stream()
-				.filter(user -> Integer.valueOf(4).equals(user.getUserType()))
-				.map(User::getId)
-				.collect(Collectors.toSet());
+		// REQ-009 #88: 被邀请人中的所有 aiclaw（userType=4）无论归属，统一自动入群（pending），
+		// 并按需给主人发待批准通知（接缝内含 #153 去重+补偿回滚）。别人拉你的 aiclaw 也走自动入群，
+		// 避免落入普通邀请流程而无 UI 可接受。返回已自动入群的 aiclaw，从普通邀请流程剔除。
+		Set<Long> autoAgreeUids = aiclawParticipant.autoJoinInvitedAiclaws(roomGroup, resolvedUsers, uid);
 		validUids.removeAll(autoAgreeUids);
-
-		// 自动同意：直接入群，不走 UserApply
-		if (!autoAgreeUids.isEmpty()) {
-			batchAddAiclawMembers(roomGroup, autoAgreeUids, uid);
-		}
 
 		// 非 aiclaw：走原有邀请流程
 		if (CollectionUtils.isEmpty(validUids)) {
@@ -1179,63 +1166,6 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 					roomGroup.getName()
 			));
 		});
-	}
-
-	/**
-	 * 批量添加 aiclaw 入群（自动同意，不走 UserApply）
-	 */
-	private void batchAddAiclawMembers(RoomGroup roomGroup, Set<Long> aiclawUids, Long inviterUid) {
-		for (Long aiclawUid : aiclawUids) {
-			GroupMember member = groupMemberDao.getMemberByGroupId(roomGroup.getId(), aiclawUid);
-			if (member != null) {
-				continue; // 已在群中，跳过
-			}
-
-			transactionTemplate.execute(e -> {
-				groupMemberDao.save(MemberAdapter.buildMemberAdd(roomGroup.getId(), aiclawUid));
-				chatService.createContact(aiclawUid, roomGroup.getRoomId());
-				return true;
-			});
-
-			// 更新缓存
-			groupMemberCache.evictMemberList(roomGroup.getRoomId());
-			groupMemberCache.evictExceptMemberList(roomGroup.getRoomId());
-			CacheKey uKey = PresenceCacheKeyBuilder.userGroupsKey(aiclawUid);
-			CacheKey gKey = PresenceCacheKeyBuilder.groupMembersKey(roomGroup.getRoomId());
-			CacheKey onlineGroupMembersKey = PresenceCacheKeyBuilder.onlineGroupMembersKey(roomGroup.getRoomId());
-			cachePlusOps.sAdd(uKey, roomGroup.getRoomId());
-			cachePlusOps.sAdd(gKey, aiclawUid);
-
-			SpringUtils.publishEvent(new GroupMemberAddEvent(this, roomGroup.getRoomId(),
-					Math.toIntExact(cachePlusOps.sCard(gKey)),
-					Math.toIntExact(cachePlusOps.sCard(onlineGroupMembersKey)),
-					Arrays.asList(aiclawUid), inviterUid));
-
-			log.info("aiclaw auto-joined group: aiclawUid={}, roomId={}, inviter={}", aiclawUid, roomGroup.getRoomId(), inviterUid);
-
-			// REQ-009 #88: 别人拉你的 aiclaw 入群 → 给主人发「待批准」通知；主人自己拉自己的不发（主人在群里有就地审批弹窗）。
-			// #153: 去重门控——同一 (aiclaw, room) 未决期内只发一条待批准通知。tryMarkApproveNotified 用 Redis SETNX
-			// 原子占位，处理「移出群后再被拉回」的重复邀请与并发双邀请竞态；主人做出决定后清标记（见 updateConfig）。
-			Long ownerUid = aiclawOwnerCache.getOwnerUid(aiclawUid);
-			if (ownerUid != null && !ownerUid.equals(inviterUid)
-					&& aiclawGroupConfigService.tryMarkApproveNotified(aiclawUid, roomGroup.getRoomId())) {
-				try {
-					noticeService.createNotice(
-							RoomTypeEnum.GROUP, NoticeTypeEnum.AICLAW_GROUP_APPROVE,
-							aiclawUid,                 // senderId
-							ownerUid,                  // receiverId（aiclaw 的主人）
-							0L,                        // applyId
-							aiclawUid,                 // operate（= aiclaw uid → 服务端置 receiverUserType=4，转发给主人）
-							roomGroup.getRoomId(),     // roomId
-							roomGroup.getName());      // content = 群名
-				} catch (RuntimeException ex) {
-					// #153 P0-1: 通知创建失败 → 补偿回滚 SETNX 去重标记，否则标记会占位 24h 而通知永久丢失，
-					// 主人在这 24h 内再也收不到该 (aiclaw, room) 的待批准通知。只有通知真正落地，标记才应永久保留。
-					aiclawGroupConfigService.clearApproveNotified(aiclawUid, roomGroup.getRoomId());
-					throw ex;
-				}
-			}
-		}
 	}
 
 	/**
@@ -1341,11 +1271,9 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 				WsBaseResp<WSMemberChange> ws = MemberAdapter.buildMemberRemoveWS(roomGroup.getRoomId(), Math.toIntExact(cachePlusOps.sCard(gKey)), Math.toIntExact(cachePlusOps.sCard(PresenceCacheKeyBuilder.onlineGroupMembersKey(room.getId()))), Arrays.asList(uid), WSMemberChange.CHANGE_TYPE_QUIT);
 				pushService.sendPushMsg(ws, memberUidList, uid);
 
-				// #153 P1-2: 退群者若是 aiclaw（getOwnerUid != null 表示其为 aiclaw）→ 清入群待批准去重标记。
+				// #153 P1-2: 退群者若是 aiclaw → 清入群待批准去重标记（接缝内按 aiclaw 判定）。
 				// aiclaw 主动退群后若再被拉回，应重新给主人发待批准通知，不能被旧标记压制 24h。
-				if (aiclawOwnerCache.getOwnerUid(uid) != null) {
-					aiclawGroupConfigService.clearApproveNotified(uid, roomId);
-				}
+				aiclawParticipant.onMembersRemoved(roomId, Collections.singletonList(uid));
 			}
 		}
 	}

@@ -15,7 +15,6 @@ import com.luohuo.flex.im.core.user.dao.NoticeDao;
 import com.luohuo.flex.im.core.user.dao.UserApplyDao;
 import com.luohuo.flex.im.core.user.dao.UserDao;
 import com.luohuo.flex.im.core.user.service.NoticeService;
-import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
@@ -23,13 +22,11 @@ import com.luohuo.flex.im.domain.entity.GroupMember;
 import com.luohuo.flex.im.domain.entity.Room;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.entity.User;
-import com.luohuo.flex.im.domain.enums.NoticeTypeEnum;
-import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.im.domain.vo.req.room.GroupMemberPageReq;
 import com.luohuo.flex.im.domain.vo.request.member.MemberAddReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
-import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
+import com.luohuo.flex.im.core.chat.service.AiclawParticipant;
 import com.luohuo.flex.model.entity.ws.WSNotice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -48,9 +45,9 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -76,7 +73,6 @@ class RoomAppServiceImplTest {
 	@Mock private RoomGroupCache roomGroupCache;
 	@Mock private UserApplyDao userApplyDao;
 	@Mock private NoticeDao noticeDao;
-	@Mock private AiclawOwnerCache aiclawOwnerCache;
 	@Mock private NoticeService noticeService;
 	@Mock private ChatService chatService;
 	@Mock private GroupMemberCache groupMemberCache;
@@ -84,7 +80,7 @@ class RoomAppServiceImplTest {
 	@Mock private UserSummaryCache userSummaryCache;
 	@Mock private PushService pushService;
 	@Mock private TransactionTemplate transactionTemplate;
-	@Mock private AiclawGroupConfigService aiclawGroupConfigService;
+	@Mock private AiclawParticipant aiclawParticipant;
 
 	@InjectMocks
 	private RoomAppServiceImpl roomAppService;
@@ -205,54 +201,33 @@ class RoomAppServiceImplTest {
 	}
 
 	@Test
-	@DisplayName("别人拉你的 aiclaw（inviter != owner）：aiclaw 自动入群 + 发 AICLAW_GROUP_APPROVE 给主人")
-	void addMember_invitesOthersAiclaw_autoJoinsAndNotifiesOwner() {
+	@DisplayName("被邀请含 aiclaw：委派 AiclawParticipant.autoJoinInvitedAiclaws 并把返回的 aiclaw 从普通邀请流程剔除")
+	void addMember_delegatesAiclawAutoJoinToSeam_andRemovesFromNormalInvite() {
 		stubAddMemberCommon();
-		// 被邀请的 200 是 aiclaw（userType=4），主人是 999，邀请者是 100
+		// 被邀请的 200 是 aiclaw（userType=4）；接缝负责自动入群 + 通知，返回被自动入群的集合
 		when(userDao.listByIds(any())).thenReturn(List.of(user(AICLAW_UID, USER_TYPE_AICLAW)));
-		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(OWNER);
-		// #171: REQ-009 去重门控（tryMarkApproveNotified 用 Redis SETNX 占位）在本用例需返回 true 才发通知
-		when(aiclawGroupConfigService.tryMarkApproveNotified(any(), any())).thenReturn(true);
+		when(aiclawParticipant.autoJoinInvitedAiclaws(any(RoomGroup.class), anyList(), eq(INVITER)))
+				.thenReturn(new HashSet<>(List.of(AICLAW_UID)));
 
 		roomAppService.addMember(INVITER, addReq(AICLAW_UID));
 
-		// aiclaw 已入群
-		verify(groupMemberDao, atLeastOnce()).save(any(GroupMember.class));
-		// 发了一条待批准通知给主人
-		verify(noticeService).createNotice(
-				eq(RoomTypeEnum.GROUP),
-				eq(NoticeTypeEnum.AICLAW_GROUP_APPROVE),
-				eq(AICLAW_UID),   // senderId
-				eq(OWNER),        // receiverId
-				eq(0L),           // applyId
-				eq(AICLAW_UID),   // operate
-				eq(ROOM_ID),      // roomId
-				eq(GROUP_NAME));  // content
+		// 委派接缝，且以邀请者身份传入（owner-notify 判定在接缝内，见 AiclawParticipantTest）
+		verify(aiclawParticipant).autoJoinInvitedAiclaws(any(RoomGroup.class), anyList(), eq(INVITER));
+		// 唯一被邀者是 aiclaw → 被接缝吸收 → 普通邀请流程不再执行（无 UserApply 落库）
+		verify(userApplyDao, never()).saveBatch(any());
 	}
 
 	@Test
-	@DisplayName("主人自己拉自己的 aiclaw（inviter == owner）：入群但不发 AICLAW_GROUP_APPROVE")
-	void addMember_ownerInvitesOwnAiclaw_autoJoinsNoNotice() {
+	@DisplayName("混合邀请（aiclaw + 人类）：aiclaw 交接缝自动入群，人类仍走普通邀请流程（仅人类落 UserApply）")
+	@SuppressWarnings("unchecked")
+	void addMember_mixedInvite_aiclawToSeam_humanToNormalInvite() {
 		stubAddMemberCommon();
-		when(userDao.listByIds(any())).thenReturn(List.of(user(AICLAW_UID, USER_TYPE_AICLAW)));
-		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(OWNER);
-
-		// 邀请者就是主人 999
-		roomAppService.addMember(OWNER, addReq(AICLAW_UID));
-
-		verify(groupMemberDao, atLeastOnce()).save(any(GroupMember.class));
-		verify(noticeService, never()).createNotice(
-				any(RoomTypeEnum.class),
-				eq(NoticeTypeEnum.AICLAW_GROUP_APPROVE),
-				anyLong(), anyLong(), anyLong(), anyLong(), anyLong(), any());
-	}
-
-	@Test
-	@DisplayName("非 aiclaw 被邀（userType=3）：不发 AICLAW_GROUP_APPROVE（走普通邀请流程）")
-	void addMember_invitesNonAiclaw_noAutoJoinNoNotice() {
-		stubAddMemberCommon();
-		// 200 是普通用户（userType=3）→ 不应被当作 aiclaw 自动入群
-		when(userDao.listByIds(any())).thenReturn(List.of(user(AICLAW_UID, 3)));
+		Long humanInvitee = 300L;
+		when(userDao.listByIds(any()))
+				.thenReturn(List.of(user(AICLAW_UID, USER_TYPE_AICLAW), user(humanInvitee, 3)));
+		// 接缝只吸收 aiclaw，返回 {200}
+		when(aiclawParticipant.autoJoinInvitedAiclaws(any(RoomGroup.class), anyList(), eq(INVITER)))
+				.thenReturn(new HashSet<>(List.of(AICLAW_UID)));
 
 		// 普通邀请流程触达的依赖
 		SummeryInfoDTO summary = new SummeryInfoDTO();
@@ -261,12 +236,34 @@ class RoomAppServiceImplTest {
 		lenient().when(noticeDao.getUnReadCount(anyLong(), anyLong())).thenReturn(new WSNotice());
 		lenient().when(groupMemberDao.getGroupUsers(eq(GROUP_ID), eq(true))).thenReturn(List.of());
 
+		roomAppService.addMember(INVITER, addReq(AICLAW_UID, humanInvitee));
+
+		// 人类走普通邀请：UserApply 落库，且仅含人类（aiclaw 已被接缝剔除）
+		org.mockito.ArgumentCaptor<List<com.luohuo.flex.im.domain.entity.UserApply>> captor =
+				org.mockito.ArgumentCaptor.forClass(List.class);
+		verify(userApplyDao).saveBatch(captor.capture());
+		List<Long> invitedTargets = captor.getValue().stream()
+				.map(com.luohuo.flex.im.domain.entity.UserApply::getTargetId).toList();
+		assertEquals(List.of(humanInvitee), invitedTargets, "仅人类进入普通邀请流程，aiclaw 已交接缝");
+	}
+
+	@Test
+	@DisplayName("被邀全是非 aiclaw：接缝返回空集，正常跑普通邀请流程（UserApply 落库）")
+	void addMember_noAiclaw_seamReturnsEmpty_runsNormalInvite() {
+		stubAddMemberCommon();
+		when(userDao.listByIds(any())).thenReturn(List.of(user(AICLAW_UID, 3)));
+		when(aiclawParticipant.autoJoinInvitedAiclaws(any(RoomGroup.class), anyList(), eq(INVITER)))
+				.thenReturn(new HashSet<>());
+
+		SummeryInfoDTO summary = new SummeryInfoDTO();
+		summary.setName("inviter");
+		lenient().when(userSummaryCache.get(anyLong())).thenReturn(summary);
+		lenient().when(noticeDao.getUnReadCount(anyLong(), anyLong())).thenReturn(new WSNotice());
+		lenient().when(groupMemberDao.getGroupUsers(eq(GROUP_ID), eq(true))).thenReturn(List.of());
+
 		roomAppService.addMember(INVITER, addReq(AICLAW_UID));
 
-		// 没有发待批准通知（200 不是 aiclaw）
-		verify(noticeService, never()).createNotice(
-				any(RoomTypeEnum.class),
-				eq(NoticeTypeEnum.AICLAW_GROUP_APPROVE),
-				anyLong(), anyLong(), anyLong(), anyLong(), anyLong(), any());
+		verify(aiclawParticipant).autoJoinInvitedAiclaws(any(RoomGroup.class), anyList(), eq(INVITER));
+		verify(userApplyDao).saveBatch(any());
 	}
 }
