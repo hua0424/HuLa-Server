@@ -46,11 +46,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -352,6 +354,25 @@ class AiclawParticipantTest {
 		verify(noticeService, never()).createNotice(
 				any(RoomTypeEnum.class), any(NoticeTypeEnum.class),
 				anyLong(), anyLong(), anyLong(), anyLong(), anyLong(), any());
+	}
+
+	@Test
+	@DisplayName("autoJoin: #153 P0-1 通知创建失败 → 补偿回滚 SETNX 去重标记并向上抛出")
+	void autoJoin_notifyFails_rollsBackDedupMark() {
+		stubAutoJoinCommon();
+		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(OWNER);
+		when(aiclawGroupConfigService.tryMarkApproveNotified(AICLAW_UID, ROOM_ID)).thenReturn(true);
+		RuntimeException boom = new RuntimeException("notice service down");
+		doThrow(boom).when(noticeService).createNotice(
+				eq(RoomTypeEnum.GROUP), eq(NoticeTypeEnum.AICLAW_GROUP_APPROVE),
+				eq(AICLAW_UID), eq(OWNER), eq(0L), eq(AICLAW_UID), eq(ROOM_ID), eq(GROUP_NAME));
+
+		RuntimeException thrown = assertThrows(RuntimeException.class, () ->
+				participant.autoJoinInvitedAiclaws(roomGroup(), List.of(user(AICLAW_UID, 4)), HUMAN_UID));
+
+		assertSame(boom, thrown, "原始异常应原样向上抛出（不吞不包）");
+		// #153 P0-1: 标记必须被回滚，否则未落地的通知会让主人 24h 收不到待批准
+		verify(aiclawGroupConfigService).clearApproveNotified(AICLAW_UID, ROOM_ID);
 	}
 
 	// ---- onMembersRemoved ----

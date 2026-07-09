@@ -152,7 +152,7 @@ public class AiclawParticipantImpl implements AiclawParticipant {
 		// REQ-009 #88: 识别被邀请人中的所有 aiclaw（userType=4），无论归属，统一自动入群（pending）。
 		// 别人拉你的 aiclaw 也走自动入群，避免落入普通邀请流程而无 UI 可接受。
 		Set<Long> autoAgreeUids = resolvedInvitees.stream()
-				.filter(user -> Integer.valueOf(4).equals(user.getUserType()))
+				.filter(user -> Objects.equals(user.getUserType(), UserTypeEnum.AICLAW.getValue()))
 				.map(User::getId)
 				.collect(Collectors.toSet());
 		if (!autoAgreeUids.isEmpty()) {
