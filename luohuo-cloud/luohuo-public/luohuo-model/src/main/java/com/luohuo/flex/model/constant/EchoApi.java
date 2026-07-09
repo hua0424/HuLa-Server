@@ -5,13 +5,11 @@ package com.luohuo.flex.model.constant;
  * <p>
  * 切记，该类下的接口和方法，一定要自己手动创建，否则会注入失败
  * <p>
- * 本类中的 @luohuo.generator auto insert 请勿删除
  *
  * @author 乾乾
  * @date 2020年01月20日11:16:37
  */
 public interface EchoApi {
-    // @luohuo.generator auto insert EchoApi
 
     /**
      * 字典 回显实现类

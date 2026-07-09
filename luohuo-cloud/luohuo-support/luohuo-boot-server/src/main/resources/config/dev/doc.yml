@@ -63,7 +63,6 @@ springdoc:
     enabled: ${knife4j.enable}
     path: /v3/api-docs
   group-configs:
-    # @luohuo.generator auto insert springdoc.groupconfigs
     - group: 'oauth_auth'
       displayName: 'oauth'
       paths-to-match: '/**'

@@ -14,7 +14,6 @@
     <description>luohuo-boot-启动模块</description>
 
     <dependencies>
-        <!-- @luohuo.generator auto insert server.pom.xml -->
         <dependency>
             <groupId>com.luohuo.flex</groupId>
             <artifactId>luohuo-database-mode</artifactId>
