@@ -7,13 +7,6 @@ import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.dao.RoomDao;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
-import com.luohuo.flex.im.core.user.dao.AiclawDao;
-import com.luohuo.flex.im.core.user.dao.AiclawFriendExtDao;
-import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
-import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
-import com.luohuo.flex.im.domain.entity.Aiclaw;
-import com.luohuo.flex.im.domain.entity.AiclawFriendExt;
-import com.luohuo.flex.im.enums.UserTypeEnum;
 import com.luohuo.flex.im.domain.MsgSendMessageDTO;
 import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.entity.Room;
@@ -25,7 +18,7 @@ import com.luohuo.flex.im.domain.enums.MessageTypeEnum;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
-import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
+import com.luohuo.flex.im.core.chat.service.AiclawParticipant;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -66,10 +59,7 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 	private OnlineService onlineService;
     private PushService pushService;
 	private CachePlusOps cachePlusOps;
-	private AiclawDao aiclawDao;
-	private AiclawFriendExtDao aiclawFriendExtDao;
-	private UserSummaryCache userSummaryCache;
-	private AiclawGroupConfigService aiclawGroupConfigService;
+	private AiclawParticipant aiclawParticipant;
 
     @Override
     public void onMessage(MsgSendMessageDTO dto) {
@@ -94,7 +84,7 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 			memberUidList = groupMemberCache.getMemberExceptUidList(room.getId());
 			// REQ-009#84 (ADR-0002): 在收件人计算处剔除「未批准」的 aiclaw 成员，
 			// 使其完全收不到该群消息（agent 永不触达 → 不会执行代码）。私聊不受此门控约束。
-			memberUidList = aiclawGroupConfigService.filterUnapprovedAiclawRecipients(memberUidList, room.getId());
+			memberUidList = aiclawParticipant.filterGroupRecipients(memberUidList, room.getId());
 		} else if (Objects.equals(room.getType(), RoomTypeEnum.FRIEND.getType())) {
 			// 单聊对象, 对单人推送
 			RoomFriend roomFriend = roomFriendDao.getByRoomId(room.getId());
@@ -165,38 +155,27 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				}
 				WsBaseResp<ChatMessageResp> wsBaseResp = WsAdapter.buildMsgSend(chatMessageResp);
 
-				// 单聊场景：检测是否有 aiclaw 目标，为其附加扩展字段
-				if (Objects.equals(room.getType(), RoomTypeEnum.FRIEND.getType())) {
-					RoomFriend rf = roomFriendDao.getByRoomId(room.getId());
-					Long aiclawUid = findAiclawUid(rf.getUid1(), rf.getUid2());
-					if (aiclawUid != null) {
-						Long senderUid = message.getFromUid();
-						// 为 aiclaw 构建带扩展字段的 payload
-						ChatMessageResp aiclawResp = chatService.getMsgResp(message, null);
-						// REQ-004 S5: aiclaw 变体也回填房间类型（单聊=2）
-						MessageAdapter.fillRoomType(aiclawResp, room.getType());
-						// REQ-004 M2-2: aiclaw 响应也透传 extra
-						if (dto.getExtra() != null && aiclawResp.getMessage() != null) {
-							aiclawResp.getMessage().setExtra(dto.getExtra());
-						}
-						fillAiclawExt(aiclawResp, aiclawUid, senderUid);
-						WsBaseResp<ChatMessageResp> aiclawWsResp = WsAdapter.buildMsgSend(aiclawResp);
+				// 单聊定向投递：若对端是 aiclaw，接缝返回带扩展字段的 payload → 分别推送
+				Optional<AiclawParticipant.DirectChatDelivery> delivery =
+						aiclawParticipant.resolveDirectChatDelivery(message, room, dto);
+				if (delivery.isPresent()) {
+					Long aiclawUid = delivery.get().getTargetUid();
+					WsBaseResp<ChatMessageResp> aiclawWsResp = WsAdapter.buildMsgSend(delivery.get().getPayload());
 
-						// 分别推送：aiclaw 收带扩展的，其他人收原版
-						List<Long> normalUsers = new ArrayList<>(onlineUsersList);
-						normalUsers.remove(aiclawUid);
-						if (!normalUsers.isEmpty()) {
-							pushService.sendPushMsg(wsBaseResp, normalUsers, dto.getUid());
-						}
-						if (onlineUsersList.contains(aiclawUid)) {
-							pushService.sendPushMsg(aiclawWsResp, aiclawUid, dto.getUid());
-						}
-						asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
-						break;
+					// 分别推送：aiclaw 收带扩展的，其他人收原版
+					List<Long> normalUsers = new ArrayList<>(onlineUsersList);
+					normalUsers.remove(aiclawUid);
+					if (!normalUsers.isEmpty()) {
+						pushService.sendPushMsg(wsBaseResp, normalUsers, dto.getUid());
 					}
+					if (onlineUsersList.contains(aiclawUid)) {
+						pushService.sendPushMsg(aiclawWsResp, aiclawUid, dto.getUid());
+					}
+					asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
+					break;
 				}
 
-				// 非 aiclaw 场景：原有逻辑
+				// 常规场景：原有逻辑
 				pushService.sendPushMsg(wsBaseResp, new ArrayList<>(onlineUsersList), dto.getUid());
 				asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
 			}
@@ -210,45 +189,6 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 	 * @param memberUidList 推送的列表
 	 * @param cuid 操作人
 	 */
-	/**
-	 * 检查两个 uid 中是否有 aiclaw 用户，有则返回其 uid，否则返回 null
-	 */
-	private Long findAiclawUid(Long uid1, Long uid2) {
-		SummeryInfoDTO info1 = userSummaryCache.get(uid1);
-		if (info1 != null && Objects.equals(info1.getUserType(), UserTypeEnum.AICLAW.getValue())) {
-			return uid1;
-		}
-		SummeryInfoDTO info2 = userSummaryCache.get(uid2);
-		if (info2 != null && Objects.equals(info2.getUserType(), UserTypeEnum.AICLAW.getValue())) {
-			return uid2;
-		}
-		return null;
-	}
-
-	/**
-	 * 为推送给 aiclaw 的消息附加扩展字段
-	 */
-	private void fillAiclawExt(ChatMessageResp resp, Long aiclawUid, Long senderUid) {
-		Aiclaw aiclaw = aiclawDao.getByUid(aiclawUid);
-		if (aiclaw == null) return;
-
-		boolean isOwner = Objects.equals(senderUid, aiclaw.getOwnerUid());
-		SummeryInfoDTO senderInfo = userSummaryCache.get(senderUid);
-
-		ChatMessageResp.AiclawExt ext = ChatMessageResp.AiclawExt.builder()
-				.senderName(senderInfo != null ? senderInfo.getName() : null)
-				.isOwner(isOwner)
-				.build();
-
-		if (!isOwner) {
-			ext.setPublicPersona(aiclaw.getPublicPersona());
-			AiclawFriendExt friendExt = aiclawFriendExtDao.getByAiclawAndFriend(aiclawUid, senderUid);
-			ext.setRelationDesc(friendExt != null ? friendExt.getRelationDesc() : null);
-		}
-
-		resp.getMessage().setAiclaw(ext);
-	}
-
 	@Async
 	public void asyncSavePassageMsg(Long messageId, WsBaseResp<?> wsBaseResp, Set<Long> memberUidList, Long cuid) {
 		// 1. 发送重试消息

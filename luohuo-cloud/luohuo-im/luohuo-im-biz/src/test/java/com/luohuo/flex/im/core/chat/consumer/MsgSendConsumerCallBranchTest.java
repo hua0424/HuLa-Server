@@ -8,9 +8,6 @@ import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
-import com.luohuo.flex.im.core.user.dao.AiclawDao;
-import com.luohuo.flex.im.core.user.dao.AiclawFriendExtDao;
-import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.MsgSendMessageDTO;
 import com.luohuo.flex.im.domain.entity.Message;
@@ -22,7 +19,7 @@ import com.luohuo.flex.im.domain.vo.response.msg.VideoCallMsgDTO;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import org.junit.jupiter.api.DisplayName;
-import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
+import com.luohuo.flex.im.core.chat.service.AiclawParticipant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -68,18 +65,15 @@ class MsgSendConsumerCallBranchTest {
 	@Mock private OnlineService onlineService;
 	@Mock private PushService pushService;
 	@Mock private CachePlusOps cachePlusOps;
-	@Mock private AiclawDao aiclawDao;
-	@Mock private AiclawFriendExtDao aiclawFriendExtDao;
-	@Mock private UserSummaryCache userSummaryCache;
-	@Mock private AiclawGroupConfigService aiclawGroupConfigService;
+	@Mock private AiclawParticipant aiclawParticipant;
 
 	@InjectMocks private MsgSendConsumer consumer;
 
 	@BeforeEach
-	void stubAiclawApprovalPassthrough() {
-		// REQ-009#84: onMessage 群路径经 aiclawGroupConfigService 过滤收件人；本类不测该门控，
-		// 透传原始列表以保持既有断言语义（#171：补 REQ-009 遗留的 @Mock）。类级 strictness=LENIENT。
-		when(aiclawGroupConfigService.filterUnapprovedAiclawRecipients(anyList(), any()))
+	void stubAiclawRecipientPassthrough() {
+		// REQ-009#84: onMessage 群路径经 AiclawParticipant 过滤收件人；本类不测该门控，
+		// 透传原始列表以保持既有断言语义（#169：接缝替换原 AiclawGroupConfigService @Mock）。类级 strictness=LENIENT。
+		when(aiclawParticipant.filterGroupRecipients(anyList(), any()))
 				.thenAnswer(inv -> inv.getArgument(0));
 	}
 
