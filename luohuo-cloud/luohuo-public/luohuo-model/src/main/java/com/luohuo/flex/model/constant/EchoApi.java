@@ -27,8 +27,6 @@ public interface EchoApi {
     String POSITION_ID_CLASS = "positionFacadeImpl";
     /** 用户 回显实现类 */
     String DEF_USER_ID_CLASS = "defUserFacadeImpl";
-	/** IM用户 回显实现类 */
-	String IM_USER_ID_CLASS = "ImUserFacadeImpl";
 
     String DEF_TENANT_SERVICE_IMPL_CLASS = "defTenantManagerImpl";
     String DEF_APPLICATION_SERVICE_IMPL_CLASS = "defApplicationManagerImpl";

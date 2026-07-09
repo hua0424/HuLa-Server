@@ -27,11 +27,6 @@
         </dependency>
         <dependency>
             <groupId>com.luohuo.flex</groupId>
-            <artifactId>luohuo-generator-controller</artifactId>
-            <version>${luohuo-project.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.luohuo.flex</groupId>
             <artifactId>luohuo-base-controller</artifactId>
             <version>${luohuo-project.version}</version>
         </dependency>

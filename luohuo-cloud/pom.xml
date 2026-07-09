@@ -20,8 +20,6 @@
         <module>luohuo-im</module>
         <module>luohuo-gateway</module>
         <module>luohuo-support</module>
-        <module>luohuo-generator</module>
-        <module>luohuo-ai</module>
         <module>luohuo-system</module>
     </modules>
 </project>

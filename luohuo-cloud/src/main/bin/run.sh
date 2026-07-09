@@ -23,9 +23,6 @@ if [ "$PROFILES" = "" ]; then
 fi
 
 case $MODULER in
-  "luohuo-ai-server")
-    JAVA_OPT="-server -Xms1024M -Xmx1024M -Xss256k -XX:MetaspaceSize=256M -XX:MaxMetaspaceSize=256M -XX:+UseG1GC"
-    ;;
   "luohuo-system-server")
     JAVA_OPT="-server -Xms1024M -Xmx1024M -Xss256k -XX:MetaspaceSize=256M -XX:MaxMetaspaceSize=256M -XX:+UseG1GC"
     ;;

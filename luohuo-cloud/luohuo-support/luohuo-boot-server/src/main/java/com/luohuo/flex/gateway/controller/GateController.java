@@ -44,7 +44,6 @@ public class GateController {
         List<Option> list = new ArrayList<>();
         list.add(Option.builder().value("base").text(application).label("luohuo-base").build());
         list.add(Option.builder().value("system").text(application).label("luohuo-system").build());
-        list.add(Option.builder().value("generator").text(application).label("luohuo-generator").build());
         return R.success(list);
     }
 }

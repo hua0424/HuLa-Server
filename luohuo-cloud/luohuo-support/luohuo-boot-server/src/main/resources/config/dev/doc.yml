@@ -86,10 +86,4 @@ springdoc:
       displayName: 'system'
       paths-to-match: '/**'
       packages-to-scan: com.luohuo.flex.system.controller
-    - group: 'generator'
-      displayName: 'generator'
-      paths-to-match: '/**'
-      packages-to-scan:
-        - com.luohuo.flex.generator
-        - com.luohuo.flex.test.controller
 
