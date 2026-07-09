@@ -43,14 +43,14 @@ Each `*-server` ships only a thin `bootstrap.yml` (filtered placeholders) + `boo
 
 ## Module anatomy
 
-`luohuo-cloud` aggregates these reactors (see root `pom.xml`): `luohuo-dependencies-parent` (BOM / version management), `luohuo-public` (shared SDKs), `luohuo-base`, `luohuo-oauth`, `luohuo-ws`, `luohuo-im`, `luohuo-gateway`, `luohuo-support`, `luohuo-generator`, `luohuo-ai`, `luohuo-system`.
+`luohuo-cloud` aggregates these reactors (see root `pom.xml`): `luohuo-dependencies-parent` (BOM / version management), `luohuo-public` (shared SDKs), `luohuo-base`, `luohuo-oauth`, `luohuo-ws`, `luohuo-im`, `luohuo-gateway`, `luohuo-support`, `luohuo-system`. (The upstream `luohuo-ai` direct-LLM module and `luohuo-generator` scaffolding tool were retired wholesale in aichatoverview#168 — AI capability lives exclusively on the aiclaw path via `plugins`, see below.)
 
 Each business service follows the same **five-layer split** (e.g. `luohuo-im/`):
 
 - `*-entity` — domain entities, DTOs, enums
 - `*-facade` — Feign client interfaces + DTOs exposed to **other** services (inter-service contract)
 - `*-biz` — business logic, mappers, services (the bulk of the code)
-- `*-controller` — REST controllers (some services keep controllers inside `*-biz` instead, e.g. `luohuo-ai`)
+- `*-controller` — REST controllers
 - `*-server` — the Spring Boot entry point (`*ServerApplication.java`) + `bootstrap.yml`; this is the deployable
 
 `luohuo-public` holds cross-service building blocks: `luohuo-common`, `luohuo-model`, `luohuo-router`, `luohuo-config-sdk`, `luohuo-file-sdk`, `luohuo-data-scope-sdk`, `luohuo-database-mode`, `luohuo-login-user-facade`, `luohuo-sa-token-ext`.
@@ -66,7 +66,8 @@ The gateway (`luohuo-gateway`) is the single entry. It has a virtual `context-pa
 | `/ws/**` | luohuo-ws-server | WebFlux+Netty long connections, push, WebRTC P2P (SRS) |
 | `/base/**` | luohuo-base-server | multi-tenant, org/role/RBAC, application registry |
 | `/system/**` | luohuo-system-server | admin/config, stats, content audit |
-| `/ai/**` | luohuo-ai-server | multimodal AI (chat / image / audio / video / music) |
+
+(`/ai/**` → luohuo-ai-server was removed in aichatoverview#168; a 404 on `/api/ai/**` is expected.)
 
 `spring.application.path` in each `bootstrap.yml` (e.g. `/im`) must match its gateway prefix — `luohuo-scan-starter` uses it to register endpoint URIs for permission scanning.
 
@@ -74,9 +75,9 @@ The gateway (`luohuo-gateway`) is the single entry. It has a virtual `context-pa
 
 Single/group message path: **client → gateway → luohuo-im (persist) → `PushService` → query routing table for the target user's WS node → resolve node-device-user mapping → publish to that WS node's dedicated RocketMQ topic → WS node consumes → look up local session (fingerprint) map → push to client → client ACK → mark delivered**. This "precise routing" (vs. broadcast) is what keeps push O(k) instead of O(N) across nodes — do not reintroduce all-node broadcast. RocketMQ is also used for transactional/ordered messaging in IM.
 
-## AI module (`luohuo-ai`)
+## AI capability (aiclaw only — `luohuo-ai` is retired)
 
-Built on **Spring AI 1.0.0-M6**, integrating 20+ providers (OpenAI, DeepSeek, Kimi, 通义千问, Gitee AI/魔力方舟, 硅基流动/SiliconFlow, etc.) plus image (Midjourney, Stable Diffusion), TTS, text-to-video, and Suno music. Provider/model instances are created through `core/AiModelFactory` (impl `AiModelFactoryImpl`); chat provider selection goes through `core/model/strategy/chat/ChatStrategyFactory`. Image/audio/video generation are async task + status-polling flows. Controllers are organized by capability under `.../ai/controller/{chat,image,audio,video,music,knowledge,mindmap,model,platform}`. TinyFlow workflow engine is integrated for orchestrated AI scenarios.
+All AI goes through the **aiclaw** path inside `luohuo-im`: client → `/im/aiclaw/*` + message dispatch → `plugins` (aichat-node) → openclaw gateway → the user's own agent. The upstream direct-LLM module `luohuo-ai` (Spring AI, 20+ providers, image/TTS/video/music) was deleted wholesale with its `ai_*` tables, gateway route, and deploy scripts in aichatoverview#168 — do not reintroduce it or route AI features through server-side LLM calls.
 
 ## Conventions
 
