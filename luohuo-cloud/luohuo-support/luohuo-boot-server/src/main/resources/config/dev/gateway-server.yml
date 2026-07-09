@@ -48,10 +48,3 @@ spring:
             - Path=/system/**
           filters:
             - StripPrefix=1
-
-        - id: ai
-          uri: lb://luohuo-ai-server
-          predicates:
-            - Path=/ai/**
-          filters:
-            - StripPrefix=1

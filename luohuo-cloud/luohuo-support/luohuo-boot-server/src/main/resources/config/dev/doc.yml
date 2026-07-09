@@ -63,7 +63,6 @@ springdoc:
     enabled: ${knife4j.enable}
     path: /v3/api-docs
   group-configs:
-    # @luohuo.generator auto insert springdoc.groupconfigs
     - group: 'oauth_auth'
       displayName: 'oauth'
       paths-to-match: '/**'
@@ -86,10 +85,4 @@ springdoc:
       displayName: 'system'
       paths-to-match: '/**'
       packages-to-scan: com.luohuo.flex.system.controller
-    - group: 'generator'
-      displayName: 'generator'
-      paths-to-match: '/**'
-      packages-to-scan:
-        - com.luohuo.flex.generator
-        - com.luohuo.flex.test.controller
 

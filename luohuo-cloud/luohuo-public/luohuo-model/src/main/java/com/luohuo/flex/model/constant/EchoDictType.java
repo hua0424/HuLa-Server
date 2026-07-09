@@ -5,19 +5,16 @@ package com.luohuo.flex.model.constant;
  * <p>
  * 存放系统中常用的类型
  * <p>
- * 本类中的 @luohuo.generator auto insert 请勿删除
  *
  * @author 乾乾
  * @date 2019/07/26
  */
 public interface EchoDictType {
-    // @luohuo.generator auto insert EchoDictType
 
     /**
      * 全局字典类型
      */
     interface Global {
-        // @luohuo.generator auto insert Global
 
         /**
          * 行政级别
@@ -54,7 +51,6 @@ public interface EchoDictType {
      * 基础服务
      */
     interface Base {
-        // @luohuo.generator auto insert Base
         String MSG_INTERFACE_LOGGING_STATUS = "MSG_INTERFACE_LOGGING_STATUS";
         String INTERFACE_EXEC_MODE = "INTERFACE_EXEC_MODE";
         String MSG_TEMPLATE_TYPE = "MSG_TEMPLATE_TYPE";
@@ -84,7 +80,6 @@ public interface EchoDictType {
      * 租户服务
      */
     interface System {
-        // @luohuo.generator auto insert System
 
         /**
          * 数据范围 [01-全部 02-本单位及子级 03-本单位 04-本部门 05-本部门及子级 06-个人 07-自定义]
@@ -144,7 +139,6 @@ public interface EchoDictType {
      * 认证服务
      */
     interface Oauth {
-        // @luohuo.generator auto insert Oauth
 
     }
 
@@ -152,7 +146,6 @@ public interface EchoDictType {
      * 文件服务
      */
     interface File {
-        // @luohuo.generator auto insert File
 
     }
 
@@ -160,7 +153,6 @@ public interface EchoDictType {
      * 消息服务
      */
     interface Msg {
-        // @luohuo.generator auto insert Msg
 
     }
 
@@ -168,7 +160,6 @@ public interface EchoDictType {
      * 网关服务
      */
     interface Gateway {
-        // @luohuo.generator auto insert Gateway
 
     }
 

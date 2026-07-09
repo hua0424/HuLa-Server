@@ -14,7 +14,6 @@
     <description>luohuo-boot-启动模块</description>
 
     <dependencies>
-        <!-- @luohuo.generator auto insert server.pom.xml -->
         <dependency>
             <groupId>com.luohuo.flex</groupId>
             <artifactId>luohuo-database-mode</artifactId>
@@ -24,11 +23,6 @@
             <groupId>com.alibaba.cloud</groupId>
             <artifactId>spring-cloud-alibaba-commons</artifactId>
             <version>${spring-cloud-alibaba-dependencies.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.luohuo.flex</groupId>
-            <artifactId>luohuo-generator-controller</artifactId>
-            <version>${luohuo-project.version}</version>
         </dependency>
         <dependency>
             <groupId>com.luohuo.flex</groupId>
