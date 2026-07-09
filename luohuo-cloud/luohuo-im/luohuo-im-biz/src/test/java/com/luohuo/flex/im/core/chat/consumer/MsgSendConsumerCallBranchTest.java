@@ -22,6 +22,8 @@ import com.luohuo.flex.im.domain.vo.response.msg.VideoCallMsgDTO;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import org.junit.jupiter.api.DisplayName;
+import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -69,8 +71,17 @@ class MsgSendConsumerCallBranchTest {
 	@Mock private AiclawDao aiclawDao;
 	@Mock private AiclawFriendExtDao aiclawFriendExtDao;
 	@Mock private UserSummaryCache userSummaryCache;
+	@Mock private AiclawGroupConfigService aiclawGroupConfigService;
 
 	@InjectMocks private MsgSendConsumer consumer;
+
+	@BeforeEach
+	void stubAiclawApprovalPassthrough() {
+		// REQ-009#84: onMessage 群路径经 aiclawGroupConfigService 过滤收件人；本类不测该门控，
+		// 透传原始列表以保持既有断言语义（#171：补 REQ-009 遗留的 @Mock）。类级 strictness=LENIENT。
+		when(aiclawGroupConfigService.filterUnapprovedAiclawRecipients(anyList(), any()))
+				.thenAnswer(inv -> inv.getArgument(0));
+	}
 
 	private static final Long ROOM_ID = 10L;
 	private static final Long MSG_ID = 1L;

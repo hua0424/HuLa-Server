@@ -29,6 +29,7 @@ import com.luohuo.flex.im.domain.vo.req.room.GroupMemberPageReq;
 import com.luohuo.flex.im.domain.vo.request.member.MemberAddReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
+import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.model.entity.ws.WSNotice;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -83,6 +84,7 @@ class RoomAppServiceImplTest {
 	@Mock private UserSummaryCache userSummaryCache;
 	@Mock private PushService pushService;
 	@Mock private TransactionTemplate transactionTemplate;
+	@Mock private AiclawGroupConfigService aiclawGroupConfigService;
 
 	@InjectMocks
 	private RoomAppServiceImpl roomAppService;
@@ -209,6 +211,8 @@ class RoomAppServiceImplTest {
 		// 被邀请的 200 是 aiclaw（userType=4），主人是 999，邀请者是 100
 		when(userDao.listByIds(any())).thenReturn(List.of(user(AICLAW_UID, USER_TYPE_AICLAW)));
 		when(aiclawOwnerCache.getOwnerUid(AICLAW_UID)).thenReturn(OWNER);
+		// #171: REQ-009 去重门控（tryMarkApproveNotified 用 Redis SETNX 占位）在本用例需返回 true 才发通知
+		when(aiclawGroupConfigService.tryMarkApproveNotified(any(), any())).thenReturn(true);
 
 		roomAppService.addMember(INVITER, addReq(AICLAW_UID));
 
