@@ -22,7 +22,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,28 +30,31 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.when;
 
 /**
  * REQ-010 S4 (#94): aiclaw 群成员列表端点 —— 服务层硬鉴权 + 在线过滤 + 精简响应。
  *
+ * <p>#170: aiclawListMembers 从 RoomAppServiceImpl 下沉到 {@link GroupMembershipManager}，
+ * 本用例整体 repoint 到该协作者，断言与错误文案契约一字不改。</p>
+ *
  * <p>ADR-0002「server 侧硬鉴权」：AI agent 不得读取自己未加入的群（或私聊）的成员。
  * 错误文案即结构化错误契约（plugins 侧透传 msg 给 agent），故对文案做精确断言。</p>
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
-class RoomAppServiceImplAiclawMembersTest {
+class GroupMembershipManagerAiclawMembersTest {
 
 	@Mock private RoomCache roomCache;
 	@Mock private RoomGroupCache roomGroupCache;
 	@Mock private GroupMemberDao groupMemberDao;
 	@Mock private UserSummaryCache userSummaryCache;
 	@Mock private OnlineService onlineService;
+	@Mock private GroupLifecycleManager groupLifecycleManager;
 
 	@InjectMocks
-	private RoomAppServiceImpl roomAppService;
+	private GroupMembershipManager membershipManager;
 
 	private static final Long ROOM_ID = 10L;
 	private static final Long GROUP_ID = 99L;
@@ -126,7 +128,7 @@ class RoomAppServiceImplAiclawMembersTest {
 		when(roomCache.get(ROOM_ID)).thenReturn(friendRoom());
 
 		BizException ex = assertThrows(BizException.class,
-				() -> roomAppService.aiclawListMembers(ROOM_ID, false, AICLAW_UID));
+				() -> membershipManager.aiclawListMembers(ROOM_ID, false, AICLAW_UID));
 		assertEquals("当前不在群聊中", ex.getMessage());
 	}
 
@@ -136,7 +138,7 @@ class RoomAppServiceImplAiclawMembersTest {
 		when(roomCache.get(ROOM_ID)).thenReturn(null);
 
 		BizException ex = assertThrows(BizException.class,
-				() -> roomAppService.aiclawListMembers(ROOM_ID, false, AICLAW_UID));
+				() -> membershipManager.aiclawListMembers(ROOM_ID, false, AICLAW_UID));
 		assertEquals("当前不在群聊中", ex.getMessage());
 	}
 
@@ -147,7 +149,7 @@ class RoomAppServiceImplAiclawMembersTest {
 		when(groupMemberDao.getMember(ROOM_ID, AICLAW_UID)).thenReturn(null);
 
 		BizException ex = assertThrows(BizException.class,
-				() -> roomAppService.aiclawListMembers(ROOM_ID, false, AICLAW_UID));
+				() -> membershipManager.aiclawListMembers(ROOM_ID, false, AICLAW_UID));
 		assertEquals("未加入该群聊，无法查询成员", ex.getMessage());
 	}
 
@@ -164,7 +166,7 @@ class RoomAppServiceImplAiclawMembersTest {
 						OFFLINE_UID, summary(OFFLINE_UID, "离线用户", "acc-off")),
 				Set.of(ONLINE_UID));
 
-		List<AiclawMemberResp> list = roomAppService.aiclawListMembers(ROOM_ID, false, AICLAW_UID);
+		List<AiclawMemberResp> list = membershipManager.aiclawListMembers(ROOM_ID, false, AICLAW_UID);
 
 		assertEquals(2, list.size());
 
@@ -192,7 +194,7 @@ class RoomAppServiceImplAiclawMembersTest {
 						OFFLINE_UID, summary(OFFLINE_UID, "离线用户", "acc-off")),
 				Set.of(ONLINE_UID));
 
-		List<AiclawMemberResp> list = roomAppService.aiclawListMembers(ROOM_ID, true, AICLAW_UID);
+		List<AiclawMemberResp> list = membershipManager.aiclawListMembers(ROOM_ID, true, AICLAW_UID);
 
 		assertEquals(1, list.size(), "online=true 时仅保留在线成员");
 		assertEquals(String.valueOf(ONLINE_UID), list.get(0).getUid());
