@@ -90,6 +90,7 @@ class GroupMembershipManagerTest {
 	@Mock private AiclawParticipant aiclawParticipant;
 	@Mock private com.baidu.fsg.uid.UidGenerator uidGenerator;
 	@Mock private GroupLifecycleManager groupLifecycleManager;
+	@Mock private PresenceSyncHelper presenceSyncHelper;
 
 	@InjectMocks
 	private GroupMembershipManager membershipManager;

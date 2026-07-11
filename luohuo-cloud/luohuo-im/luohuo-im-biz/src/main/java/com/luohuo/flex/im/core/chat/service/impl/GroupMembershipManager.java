@@ -102,6 +102,7 @@ public class GroupMembershipManager {
 	private OnlineService onlineService;
 	private TransactionTemplate transactionTemplate;
 	private final GroupLifecycleManager groupLifecycleManager;
+	private final PresenceSyncHelper presenceSyncHelper;
 
 	/** 暖群成员缓存；供 shell.afterPropertiesSet 遍历调用（无注解，无代理语义）。 */
 	public void warmUpGroupMemberCache(Long roomId) {
@@ -110,32 +111,6 @@ public class GroupMembershipManager {
 		// 2. 更新 群里与用户的关系
 		CacheKey cacheKey = PresenceCacheKeyBuilder.groupMembersKey(roomId);
 		memberUidList.forEach(memberId -> cachePlusOps.sAdd(cacheKey, memberId));
-	}
-
-	/**
-	 * 处理用户在线状态（私有副本，见 #170：manager 不依赖 shell 以避免环）。
-	 * 逻辑与 RoomAppServiceImpl.asyncOnline 一致；无注解，纯内部调用，无代理语义。
-	 */
-	private void asyncOnline(List<Long> uidList, Long roomId, boolean online) {
-		Set<Long> onlineList = onlineService.getOnlineUsersList(uidList);
-		if (CollUtil.isEmpty(onlineList)) {
-			return;
-		}
-
-		CacheKey ogmKey = PresenceCacheKeyBuilder.onlineGroupMembersKey(roomId);
-		for (Long uid : onlineList) {
-			CacheKey ougKey = PresenceCacheKeyBuilder.onlineUserGroupsKey(uid);
-
-			if (online) {
-				// 处理在线的状态
-				cachePlusOps.sAdd(ogmKey, uid);
-				cachePlusOps.sAdd(ougKey, roomId);
-			} else {
-				// 处理离线的状态
-				cachePlusOps.sRem(ougKey, roomId);
-				cachePlusOps.sRem(ogmKey, uid);
-			}
-		}
 	}
 
 	/**
@@ -365,7 +340,7 @@ public class GroupMembershipManager {
 				CacheKey uKey = PresenceCacheKeyBuilder.userGroupsKey(removedUid);
 				cachePlusOps.sRem(membersKey, removedUid);
 				cachePlusOps.sRem(uKey, room.getId());
-				asyncOnline(Arrays.asList(removedUid), room.getId(), false);
+				presenceSyncHelper.syncOnline(Arrays.asList(removedUid), room.getId(), false);
 
 				// 推送状态到前端
 				List<Long> memberUidList = groupMemberCache.getMemberExceptUidList(roomGroup.getRoomId());

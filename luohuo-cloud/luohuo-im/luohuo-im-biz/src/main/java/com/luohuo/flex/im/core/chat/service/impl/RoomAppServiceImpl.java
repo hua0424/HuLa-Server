@@ -139,6 +139,8 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	// #170 拆出的两个内部协作者
 	private final GroupMembershipManager membershipManager;
 	private final GroupLifecycleManager lifecycleManager;
+	// #170: 在线状态同步的无环单点（消除拆分前的手抄副本）
+	private final PresenceSyncHelper presenceSyncHelper;
 
 	private void warmUpUserRoomCache(Long uid) {
 		// 1. 查询房间中所有用户
@@ -316,25 +318,7 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	 */
 //	@Async(LUOHUO_EXECUTOR)
 	public void asyncOnline(List<Long> uidList, Long roomId, boolean online) {
-		Set<Long> onlineList = onlineService.getOnlineUsersList(uidList);
-		if (CollUtil.isEmpty(onlineList)) {
-			return;
-		}
-
-		CacheKey ogmKey = PresenceCacheKeyBuilder.onlineGroupMembersKey(roomId);
-		for (Long uid : onlineList) {
-			CacheKey ougKey = PresenceCacheKeyBuilder.onlineUserGroupsKey(uid);
-
-			if (online) {
-				// 处理在线的状态
-				cachePlusOps.sAdd(ogmKey, uid);
-				cachePlusOps.sAdd(ougKey, roomId);
-			} else {
-				// 处理离线的状态
-				cachePlusOps.sRem(ougKey, roomId);
-				cachePlusOps.sRem(ogmKey, uid);
-			}
-		}
+		presenceSyncHelper.syncOnline(uidList, roomId, online);
 	}
 
 	// ==================== 委派：群信息维护（GroupLifecycleManager） ====================

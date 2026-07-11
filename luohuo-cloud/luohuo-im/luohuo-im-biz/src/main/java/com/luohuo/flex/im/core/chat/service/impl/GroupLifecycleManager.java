@@ -104,32 +104,7 @@ public class GroupLifecycleManager {
 	private TransactionTemplate transactionTemplate;
 	private ContactDao contactDao;
 	private final AiclawParticipant aiclawParticipant;
-
-	/**
-	 * 处理用户在线状态（私有副本，见 #170：manager 不依赖 shell 以避免环）。
-	 * 逻辑与 RoomAppServiceImpl.asyncOnline 一致；无注解，纯内部调用，无代理语义。
-	 */
-	private void asyncOnline(List<Long> uidList, Long roomId, boolean online) {
-		Set<Long> onlineList = onlineService.getOnlineUsersList(uidList);
-		if (CollUtil.isEmpty(onlineList)) {
-			return;
-		}
-
-		CacheKey ogmKey = PresenceCacheKeyBuilder.onlineGroupMembersKey(roomId);
-		for (Long uid : onlineList) {
-			CacheKey ougKey = PresenceCacheKeyBuilder.onlineUserGroupsKey(uid);
-
-			if (online) {
-				// 处理在线的状态
-				cachePlusOps.sAdd(ogmKey, uid);
-				cachePlusOps.sAdd(ougKey, roomId);
-			} else {
-				// 处理离线的状态
-				cachePlusOps.sRem(ougKey, roomId);
-				cachePlusOps.sRem(ogmKey, uid);
-			}
-		}
-	}
+	private final PresenceSyncHelper presenceSyncHelper;
 
 	public List<MemberResp> groupList(Long uid) {
 		List<MemberResp> voList = roomService.groupList(uid);
@@ -520,7 +495,7 @@ public class GroupLifecycleManager {
 			// 新版解散群聊
 			CacheKey uKey = PresenceCacheKeyBuilder.userGroupsKey(uid);
 			cachePlusOps.del(uKey, gKey);
-			asyncOnline(memberUidList, room.getId(), false);
+			presenceSyncHelper.syncOnline(memberUidList, room.getId(), false);
 			pushService.sendPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid);
 		} else {
 			// 如果房间人员小于3人 那么直接解散群聊
@@ -546,7 +521,7 @@ public class GroupLifecycleManager {
 
 				cachePlusOps.sRem(gKey, uid);
 				cachePlusOps.sRem(uKey, room.getId());
-				asyncOnline(Arrays.asList(uid), room.getId(), false);
+				presenceSyncHelper.syncOnline(Arrays.asList(uid), room.getId(), false);
 
 				// 4.8 发送移除事件告知群成员
 				groupMemberCache.evictMemberList(room.getId());
@@ -600,7 +575,7 @@ public class GroupLifecycleManager {
 				cachePlusOps.sAdd(gKey, id);
 				cachePlusOps.sAdd(PresenceCacheKeyBuilder.userGroupsKey(id), roomIdAtomic.get());
 			});
-			asyncOnline(inviteUidList, roomIdAtomic.get(), true);
+			presenceSyncHelper.syncOnline(inviteUidList, roomIdAtomic.get(), true);
 			SpringUtils.publishEvent(new GroupMemberAddEvent(this, roomIdAtomic.get(), Math.toIntExact(cachePlusOps.sCard(gKey)), Math.toIntExact(cachePlusOps.sCard(onlineGroupMembersKey)), request.getUidList(), uid));
 		}
 		return roomIdAtomic.get();

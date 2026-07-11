@@ -67,6 +67,7 @@ class GroupLifecycleManagerTest {
 	@Mock private TransactionTemplate transactionTemplate;
 	@Mock private ContactDao contactDao;
 	@Mock private AiclawParticipant aiclawParticipant;
+	@Mock private PresenceSyncHelper presenceSyncHelper;
 
 	@InjectMocks
 	private GroupLifecycleManager lifecycleManager;

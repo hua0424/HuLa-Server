@@ -52,6 +52,7 @@ class GroupMembershipManagerAiclawMembersTest {
 	@Mock private UserSummaryCache userSummaryCache;
 	@Mock private OnlineService onlineService;
 	@Mock private GroupLifecycleManager groupLifecycleManager;
+	@Mock private PresenceSyncHelper presenceSyncHelper;
 
 	@InjectMocks
 	private GroupMembershipManager membershipManager;
