@@ -343,6 +343,5 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		if (request.getWorkspaceDir() != null) {
 			config.setWorkspaceDir(request.getWorkspaceDir());
 		}
-		// aichatoverview#3: shortReplyThreshold / shortReplyLookback 已从 UpdateReq 移除，不再处理
 	}
 }

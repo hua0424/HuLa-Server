@@ -447,24 +447,10 @@ public class ChatServiceImpl implements ChatService {
 				return Collections.emptyList();
 			}
 
-			// 2. 如果开启同步功能，那么把最近N天的消息拉回去, 否则获取所有未ack的消息 [要排除屏蔽的房间的消息]
-			if(true || msgReq.getAsync()){
-				LocalDateTime effectiveStartTime = calculateStartTime(TimeUtils.getTime(LocalDateTime.now().minusDays(14)));
-				messages = messageDao.list(new LambdaQueryWrapper<Message>().in(Message::getRoomId, roomIds)
-						.between(Message::getCreateTime, effectiveStartTime, LocalDateTime.now()));
-			} else {
-				// 3. 获取到需要拉取的消息的会话，根据会话拿到最后一个ack的消息id TODO 需要走缓存
-				List<Contact> contacts = contactDao.get(receiveUid, roomIds);
-
-				// 查询每个房间中消息id 之后的所有消息
-				LambdaQueryWrapper<Message> batchWrapper = new LambdaQueryWrapper<>();
-				for (Contact contact : contacts) {
-					Long lastMsgId = contact.getLastMsgId() != null ? contact.getLastMsgId() : 0;
-					batchWrapper.or(w -> w.eq(Message::getRoomId, contact.getRoomId()).ge(Message::getId, lastMsgId));
-				}
-				batchWrapper.orderByAsc(Message::getId);
-				messages = messageDao.list(batchWrapper);
-			}
+			// 2. 把最近N天的消息拉回去 [要排除屏蔽的房间的消息]
+			LocalDateTime effectiveStartTime = calculateStartTime(TimeUtils.getTime(LocalDateTime.now().minusDays(14)));
+			messages = messageDao.list(new LambdaQueryWrapper<Message>().in(Message::getRoomId, roomIds)
+					.between(Message::getCreateTime, effectiveStartTime, LocalDateTime.now()));
 		} else {
 			messages = getMsgByIds(msgReq.getMsgIds());
 		}
