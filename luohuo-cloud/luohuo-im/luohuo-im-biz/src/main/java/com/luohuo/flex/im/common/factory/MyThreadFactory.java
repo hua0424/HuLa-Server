@@ -1,6 +1,6 @@
 package com.luohuo.flex.im.common.factory;
 
-import com.luohuo.flex.im.common.handler.GlobalUncaughtExceptionHandler;
+import com.luohuo.flex.common.handler.GlobalUncaughtExceptionHandler;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 

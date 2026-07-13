@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.chat.service.impl;
 
 import com.luohuo.basic.exception.BizException;
 import cn.hutool.json.JSONUtil;
+import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -54,6 +56,9 @@ class AiclawGroupConfigServiceImplTest {
 	@Mock private ValueOperations<String, String> valueOps;
 	@Mock private RoomGroupCache roomGroupCache;
 	@Mock private AiclawDao aiclawDao;
+	// #177: 用真实实例（@Spy 委托真实方法）注入，保留历史默认值 10/1000/30min/24h，
+	// 使默认值路径断言（rate=10、daily=1000）不变；非 @Mock 以免 stub 返回 null NPE。
+	@Spy private AiclawProperties aiclawProperties = new AiclawProperties();
 
 	@InjectMocks
 	private AiclawGroupConfigServiceImpl configService;

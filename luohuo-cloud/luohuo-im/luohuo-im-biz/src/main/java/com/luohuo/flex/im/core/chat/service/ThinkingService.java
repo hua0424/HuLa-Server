@@ -289,7 +289,7 @@ public class ThinkingService {
 
 		if (room.isRoomGroup()) {
 			List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
-			if (memberUids == null || !memberUids.contains(currentUid)) {
+			if (!memberUids.contains(currentUid)) {
 				log.warn("reviewThinking rejected: not a group member, roomId={}, currentUid={}", roomId, currentUid);
 				throw new BizException(REVIEW_REJECTED_MESSAGE);
 			}

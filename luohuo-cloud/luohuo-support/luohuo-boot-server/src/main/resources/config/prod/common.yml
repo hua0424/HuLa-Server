@@ -4,3 +4,17 @@ luohuo:
     notAllowWrite: true
 server:
   port: 28760
+
+# aiclaw 运维参数（REFACTOR-S2 B #177）—— 默认值=历史硬编码值
+aiclaw:
+  rate:
+    default-per-minute: 10
+    default-daily: 1000
+  thinking:
+    timeout-ms: 300000
+  stream:
+    timeout-ms: 30000
+  config:
+    cache-ttl-minutes: 30
+  approve:
+    notify-ttl-hours: 24

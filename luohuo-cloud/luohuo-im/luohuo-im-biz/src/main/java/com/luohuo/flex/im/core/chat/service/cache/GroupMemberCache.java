@@ -12,6 +12,7 @@ import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -37,7 +38,7 @@ public class GroupMemberCache {
     public List<Long> getMemberUidList(Long roomId) {
         RoomGroup roomGroup = roomGroupDao.getByRoomId(roomId);
         if (Objects.isNull(roomGroup)) {
-            return null;
+            return Collections.emptyList();
         }
         return groupMemberDao.getMemberUidList(roomGroup.getId(), null);
     }
@@ -51,7 +52,7 @@ public class GroupMemberCache {
 	public List<Long> getMemberExceptUidList(Long roomId) {
 		RoomGroup roomGroup = roomGroupDao.getByRoomId(roomId);
 		if (Objects.isNull(roomGroup)) {
-			return null;
+			return Collections.emptyList();
 		}
 		return groupMemberDao.getMemberUidList(roomGroup.getId(), false);
 	}

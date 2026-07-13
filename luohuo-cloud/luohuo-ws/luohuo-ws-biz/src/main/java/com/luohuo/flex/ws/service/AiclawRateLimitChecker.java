@@ -2,6 +2,8 @@ package com.luohuo.flex.ws.service;
 
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.luohuo.flex.common.config.AiclawProperties;
+import com.luohuo.flex.common.constant.AiclawRedisKeys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
@@ -18,21 +20,20 @@ import java.time.format.DateTimeFormatter;
 public class AiclawRateLimitChecker {
 
 	private final RedisTemplate<String, Object> redisTemplate;
+	private final AiclawProperties aiclawProperties;
 
 	private static final String RATE_KEY_PREFIX = "im:aiclaw:rate:";
 	private static final String DAILY_KEY_PREFIX = "im:aiclaw:daily:";
-	private static final String CONFIG_KEY_PREFIX = "im:aiclaw:group:config:";
 
-	private static final int DEFAULT_RATE_LIMIT = 10;
-	private static final int DEFAULT_DAILY_LIMIT = 1000;
 	private static final Duration RATE_TTL = Duration.ofMinutes(2);
 	private static final Duration DAILY_TTL = Duration.ofHours(25);
 
 	private static final DateTimeFormatter MINUTE_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmm");
 	private static final DateTimeFormatter DAY_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-	public AiclawRateLimitChecker(RedisTemplate<String, Object> redisTemplate) {
+	public AiclawRateLimitChecker(RedisTemplate<String, Object> redisTemplate, AiclawProperties aiclawProperties) {
 		this.redisTemplate = redisTemplate;
+		this.aiclawProperties = aiclawProperties;
 	}
 
 	public enum LimitResult {
@@ -95,19 +96,19 @@ public class AiclawRateLimitChecker {
 	 */
 	private Config resolveConfig(Long aiclawUid, Long roomId) {
 		try {
-			String cacheKey = CONFIG_KEY_PREFIX + aiclawUid + ":" + roomId;
+			String cacheKey = AiclawRedisKeys.GROUP_CONFIG_PREFIX + aiclawUid + ":" + roomId;
 			Object cached = redisTemplate.opsForValue().get(cacheKey);
 			if (cached != null) {
 				JSONObject json = JSONUtil.parseObj(cached.toString());
 				return new Config(
-						json.getInt("rateLimitPerMinute", DEFAULT_RATE_LIMIT),
-						json.getInt("dailyLimit", DEFAULT_DAILY_LIMIT)
+						json.getInt("rateLimitPerMinute", aiclawProperties.getRate().getDefaultPerMinute()),
+						json.getInt("dailyLimit", aiclawProperties.getRate().getDefaultDaily())
 				);
 			}
 		} catch (Exception e) {
 			log.warn("Failed to resolve aiclaw config from Redis: aiclawUid={}, roomId={}", aiclawUid, roomId, e);
 		}
-		return new Config(DEFAULT_RATE_LIMIT, DEFAULT_DAILY_LIMIT);
+		return new Config(aiclawProperties.getRate().getDefaultPerMinute(), aiclawProperties.getRate().getDefaultDaily());
 	}
 
 	private record Config(int rateLimitPerMinute, int dailyLimit) {

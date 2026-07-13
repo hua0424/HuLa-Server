@@ -1,4 +1,4 @@
-package com.luohuo.flex.im.common.handler;
+package com.luohuo.flex.common.handler;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;

@@ -48,11 +48,12 @@ public class AiclawRoomMembershipServiceImpl implements AiclawRoomMembershipServ
 
 	/**
 	 * 群聊成员校验。
-	 * null 语义：GroupMemberCache 在 RoomGroup 记录缺失时返回 null，属数据异常。
+	 * 空列表语义：GroupMemberCache 在 RoomGroup 记录缺失时返回空列表，属数据异常
+	 * （正常群聊至少含群主，故空列表 ⇔ 房间缺失/损坏）。
 	 */
 	private void checkGroupMembership(Long aiclawUid, Long roomId) {
 		List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
-		if (memberUids == null) {
+		if (memberUids.isEmpty()) {
 			// 群聊数据异常（RoomGroup 记录缺失），与「非成员」语义分离
 			log.error("aiclaw room membership check: group data missing, aiclawUid={}, roomId={}", aiclawUid, roomId);
 			throw new BizException("群聊数据异常，无法校验成员身份");

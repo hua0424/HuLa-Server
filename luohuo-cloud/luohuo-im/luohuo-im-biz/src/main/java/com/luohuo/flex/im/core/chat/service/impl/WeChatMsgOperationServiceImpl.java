@@ -1,7 +1,7 @@
 package com.luohuo.flex.im.core.chat.service.impl;
 
 import cn.hutool.core.thread.NamedThreadFactory;
-import com.luohuo.flex.im.common.handler.GlobalUncaughtExceptionHandler;
+import com.luohuo.flex.common.handler.GlobalUncaughtExceptionHandler;
 import com.luohuo.flex.im.core.chat.service.WeChatMsgOperationService;
 import com.luohuo.flex.im.core.frequencyControl.FrequencyControlException;
 import com.luohuo.flex.im.core.frequencyControl.constant.FrequencyControlConstant;

@@ -6,6 +6,7 @@ import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 import com.luohuo.flex.model.entity.ws.WSThinkingStart;
 import com.luohuo.flex.model.enums.WSReqTypeEnum;
 import com.luohuo.flex.model.ws.WSBaseReq;
+import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.ws.ReactiveContextUtil;
 import com.luohuo.flex.ws.service.AiclawRateLimitChecker;
 import com.luohuo.flex.ws.service.PushService;
@@ -42,6 +43,8 @@ public class ThinkingProcessor implements MessageProcessor {
 	private DiscoveryClient discoveryClient;
 	@Resource
 	private AiclawRateLimitChecker rateLimitChecker;
+	@Resource
+	private AiclawProperties aiclawProperties;
 
 	private final WebClient webClient = WebClient.create();
 
@@ -54,11 +57,6 @@ public class ThinkingProcessor implements MessageProcessor {
 	 * 二级索引：aiclawUid:roomId → thinkingId（用于 delta/end 缺失 thinkingId 时反查）
 	 */
 	private final ConcurrentHashMap<String, String> aiclawRoomIndex = new ConcurrentHashMap<>();
-
-	/**
-	 * thinking 超时阈值（毫秒），默认 5 分钟
-	 */
-	private static final long THINKING_TIMEOUT_MS = 5 * 60 * 1000;
 
 	@Override
 	public boolean supports(WSBaseReq req) {
@@ -212,7 +210,7 @@ public class ThinkingProcessor implements MessageProcessor {
 		List<String> timedOut = new ArrayList<>();
 
 		activeThinkings.forEach((thinkingId, ctx) -> {
-			if (now - ctx.getLastActivityTime() > THINKING_TIMEOUT_MS) {
+			if (now - ctx.getLastActivityTime() > aiclawProperties.getThinking().getTimeoutMs()) {
 				timedOut.add(thinkingId);
 			}
 		});
