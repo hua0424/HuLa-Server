@@ -1,5 +1,6 @@
 package com.luohuo.flex.ws.config;
 
+import com.luohuo.flex.common.handler.GlobalUncaughtExceptionHandler;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 

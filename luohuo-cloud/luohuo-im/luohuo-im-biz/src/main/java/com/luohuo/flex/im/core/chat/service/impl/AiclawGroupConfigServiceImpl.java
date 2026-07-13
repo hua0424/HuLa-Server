@@ -4,6 +4,8 @@ import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.exception.BizException;
+import com.luohuo.flex.common.config.AiclawProperties;
+import com.luohuo.flex.common.constant.AiclawRedisKeys;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -38,14 +40,11 @@ import java.util.stream.Collectors;
 @AllArgsConstructor
 public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 
-	private static final String REDIS_CONFIG_KEY_PREFIX = "im:aiclaw:group:config:";
-	private static final Duration CONFIG_CACHE_TTL = Duration.ofMinutes(30);
-
-	// #153: 入群待批准通知去重标记 —— key 前缀 + TTL（未决通知的兜底过期，主人一直不决定也不会永久占用）
+	// #153: 入群待批准通知去重标记 —— key 前缀（未决通知的兜底过期，主人一直不决定也不会永久占用）
 	private static final String APPROVE_NOTIFY_KEY_PREFIX = "im:aiclaw:approve:notify:";
-	private static final Duration APPROVE_NOTIFY_TTL = Duration.ofHours(24);
 
 	private final AiclawGroupConfigMapper aiclawGroupConfigMapper;
+	private final AiclawProperties aiclawProperties;
 	private final AiclawOwnerCache aiclawOwnerCache;
 	private final GroupMemberCache groupMemberCache;
 	private final PushService pushService;
@@ -57,7 +56,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	public AiclawGroupConfigResp getConfig(Long aiclawUid, Long roomId, Long uid) {
 		// 校验调用者是群成员
 		List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
-		if (memberUids == null || !memberUids.contains(uid)) {
+		if (!memberUids.contains(uid)) {
 			throw new BizException("您不在该群中，无法查看配置");
 		}
 
@@ -81,9 +80,9 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			resp = AiclawGroupConfigResp.builder()
 					.aiclawUid(aiclawUid)
 					.roomId(roomId)
-					.rateLimitPerMinute(10)
+					.rateLimitPerMinute(aiclawProperties.getRate().getDefaultPerMinute())
 					.mentionRequired(1)
-					.dailyLimit(1000)
+					.dailyLimit(aiclawProperties.getRate().getDefaultDaily())
 					.respondToAi(1)
 					.approved(0)
 					.build();
@@ -94,7 +93,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		resp.setAccount(accountOf(roomId));
 
 		// 写入 Redis 缓存（默认值也缓存，避免穿透）
-		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp), CONFIG_CACHE_TTL);
+		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp),
+				Duration.ofMinutes(aiclawProperties.getConfig().getCacheTtlMinutes()));
 		return resp;
 	}
 
@@ -141,9 +141,9 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 			resp = AiclawGroupConfigResp.builder()
 					.aiclawUid(aiclawUid)
 					.roomId(roomId)
-					.rateLimitPerMinute(10)
+					.rateLimitPerMinute(aiclawProperties.getRate().getDefaultPerMinute())
 					.mentionRequired(1)
-					.dailyLimit(1000)
+					.dailyLimit(aiclawProperties.getRate().getDefaultDaily())
 					.respondToAi(1)
 					.approved(0)
 					.build();
@@ -153,7 +153,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		resp.setAccount(accountOf(roomId));
 
 		// 预热缓存（避免穿透），与 getConfig 行为一致
-		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp), CONFIG_CACHE_TTL);
+		stringRedisTemplate.opsForValue().set(cacheKey, JSONUtil.toJsonStr(resp),
+				Duration.ofMinutes(aiclawProperties.getConfig().getCacheTtlMinutes()));
 		return Integer.valueOf(1).equals(resp.getApproved());
 	}
 
@@ -214,7 +215,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 
 		// 校验 aiclaw 在该群中
 		List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
-		if (memberUids == null || !memberUids.contains(aiclawUid)) {
+		if (!memberUids.contains(aiclawUid)) {
 			throw new BizException("该AI助理不在此群中");
 		}
 
@@ -257,7 +258,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		AiclawGroupConfigResp cachedResp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
 		cachedResp.setAccount(accountOf(roomId));
 		stringRedisTemplate.opsForValue().set(
-				buildConfigCacheKey(aiclawUid, roomId), JSONUtil.toJsonStr(cachedResp), CONFIG_CACHE_TTL);
+				buildConfigCacheKey(aiclawUid, roomId), JSONUtil.toJsonStr(cachedResp),
+				Duration.ofMinutes(aiclawProperties.getConfig().getCacheTtlMinutes()));
 
 		// aichatoverview#3: WS 广播配置变更到群内所有成员
 		WSGroupConfigChange.ConfigDTO configDTO = WSGroupConfigChange.ConfigDTO.builder()
@@ -283,7 +285,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		// SETNX + TTL：原子占位。首次占位成功返回 true（应发通知）；已存在未决标记返回 false（应跳过）。
 		try {
 			Boolean ok = stringRedisTemplate.opsForValue()
-					.setIfAbsent(buildApproveNotifyKey(aiclawUid, roomId), "1", APPROVE_NOTIFY_TTL);
+					.setIfAbsent(buildApproveNotifyKey(aiclawUid, roomId), "1",
+							Duration.ofHours(aiclawProperties.getApprove().getNotifyTtlHours()));
 			return Boolean.TRUE.equals(ok);
 		} catch (Exception e) {
 			// #153 P0-2: Redis 不可用时 fail-OPEN —— 返回 true（发通知）。宁可重复通知，也绝不能因为
@@ -311,7 +314,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	}
 
 	private String buildConfigCacheKey(Long aiclawUid, Long roomId) {
-		return REDIS_CONFIG_KEY_PREFIX + aiclawUid + ":" + roomId;
+		return AiclawRedisKeys.GROUP_CONFIG_PREFIX + aiclawUid + ":" + roomId;
 	}
 
 	/**

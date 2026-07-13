@@ -2,6 +2,7 @@ package com.luohuo.flex.ws.websocket.processor;
 
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.json.JSONUtil;
+import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.common.constant.DefValConstants;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSStreamDelta;
@@ -46,6 +47,8 @@ public class StreamProcessor implements MessageProcessor {
 	private PushService pushService;
 	@Resource
 	private DiscoveryClient discoveryClient;
+	@Resource
+	private AiclawProperties aiclawProperties;
 
 	private final WebClient webClient = WebClient.create();
 
@@ -53,11 +56,6 @@ public class StreamProcessor implements MessageProcessor {
 	 * 活跃流状态：aiclawUid → StreamContext
 	 */
 	private final ConcurrentHashMap<Long, StreamContext> activeStreams = new ConcurrentHashMap<>();
-
-	/**
-	 * 流式超时阈值（毫秒），默认 30 秒
-	 */
-	private static final long STREAM_TIMEOUT_MS = 30_000;
 
 	@Override
 	public boolean supports(WSBaseReq req) {
@@ -173,7 +171,7 @@ public class StreamProcessor implements MessageProcessor {
 		List<Long> timedOut = new ArrayList<>();
 
 		activeStreams.forEach((aiclawUid, ctx) -> {
-			if (now - ctx.getLastActivityTime() > STREAM_TIMEOUT_MS) {
+			if (now - ctx.getLastActivityTime() > aiclawProperties.getStream().getTimeoutMs()) {
 				timedOut.add(aiclawUid);
 			}
 		});

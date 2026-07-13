@@ -75,25 +75,16 @@ class AiclawRoomMembershipServiceImplTest {
 		}
 
 		@Test
-		@DisplayName("GroupMemberCache 返回 null → 抛 BizException(数据异常)")
-		void nullMemberList_shouldThrowDataError() {
-			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(groupRoom());
-			when(groupMemberCache.getMemberUidList(GROUP_ROOM_ID)).thenReturn(null);
-
-			BizException ex = assertThrows(BizException.class,
-					() -> membershipService.checkMembership(AICLAW_UID, GROUP_ROOM_ID));
-			assertTrue(ex.getMessage().contains("数据异常"), "实际消息: " + ex.getMessage());
-		}
-
-		@Test
-		@DisplayName("GroupMemberCache 返回空列表 → 抛 BizException(非房间成员)")
-		void emptyMemberList_shouldThrow() {
+		@DisplayName("GroupMemberCache 返回空列表(房间缺失/损坏) → 抛 BizException(数据异常)")
+		void emptyMemberList_shouldThrowDataError() {
+			// 新契约：GroupMemberCache 在 RoomGroup 缺失时返回空列表（不再返回 null）；
+			// 正常群聊至少含群主，故空列表 ⇔ 房间缺失/损坏 ⇔ 旧的 null 语义。
 			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(groupRoom());
 			when(groupMemberCache.getMemberUidList(GROUP_ROOM_ID)).thenReturn(List.of());
 
 			BizException ex = assertThrows(BizException.class,
 					() -> membershipService.checkMembership(AICLAW_UID, GROUP_ROOM_ID));
-			assertTrue(ex.getMessage().contains("非房间成员"), "实际消息: " + ex.getMessage());
+			assertTrue(ex.getMessage().contains("数据异常"), "实际消息: " + ex.getMessage());
 		}
 	}
 
