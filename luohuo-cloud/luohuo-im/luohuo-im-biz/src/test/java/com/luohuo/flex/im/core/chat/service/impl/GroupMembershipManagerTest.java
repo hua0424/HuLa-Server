@@ -20,6 +20,7 @@ import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.GroupMember;
+import com.luohuo.flex.im.domain.entity.Notice;
 import com.luohuo.flex.im.domain.entity.Room;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.entity.User;
@@ -48,12 +49,14 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -168,6 +171,14 @@ class GroupMembershipManagerTest {
 				inv -> ((TransactionCallback<?>) inv.getArgument(0)).doInTransaction(null));
 
 		lenient().when(cachePlusOps.sCard(any())).thenReturn(1L);
+
+		// ITEM 4: buildNotice 返回一条携带 receiverId 的通知（供 createNotices 收集/计数），不落库、不推送。
+		lenient().when(noticeService.buildNotice(any(), any(), anyLong(), anyLong(), any(), any(), any(), any()))
+				.thenAnswer(inv -> {
+					Notice n = new Notice();
+					n.setReceiverId(inv.getArgument(3));
+					return n;
+				});
 	}
 
 	// ==================== 迁移自 RoomAppServiceImplTest ====================
@@ -276,6 +287,46 @@ class GroupMembershipManagerTest {
 		verify(userApplyDao).saveBatch(any());
 	}
 
+	@Test
+	@DisplayName("addMember ITEM 4：邀请通知一次批量落库，条数 = N + N×M（N 被邀请人、M 管理员），且逐条推送")
+	@SuppressWarnings("unchecked")
+	void addMember_batchesInviteNotices_countEqualsNPlusNTimesM() {
+		stubAddMemberCommon();
+		Long human1 = 300L, human2 = 301L;
+		int N = 2; // 两个被邀请人
+		when(userDao.listByIds(any())).thenReturn(List.of(user(human1, 3), user(human2, 3)));
+		when(aiclawParticipant.autoJoinInvitedAiclaws(any(RoomGroup.class), anyList(), eq(INVITER)))
+				.thenReturn(new HashSet<>());
+
+		SummeryInfoDTO summary = new SummeryInfoDTO();
+		summary.setName("inviter");
+		lenient().when(userSummaryCache.get(anyLong())).thenReturn(summary);
+		lenient().when(noticeDao.getUnReadCount(anyLong(), anyLong())).thenReturn(new WSNotice());
+		// M = 2 个管理员
+		Long mgr1 = 400L, mgr2 = 401L;
+		int M = 2;
+		when(groupMemberDao.getGroupUsers(eq(GROUP_ID), eq(true))).thenReturn(List.of(mgr1, mgr2));
+
+		membershipManager.addMember(INVITER, addReq(human1, human2));
+
+		// 每人 1 条 GROUP_INVITE_ME + 每人 M 条 GROUP_INVITE → build 调用 N + N×M 次
+		int expected = N + N * M; // 2 + 2*2 = 6
+		verify(noticeService, times(expected)).buildNotice(any(), any(), anyLong(), anyLong(), any(), any(), any(), any());
+
+		// createNotices 恰调用一次，且入参列表 size == N + N×M（批量落库 + 逐条推送在 impl 内保证）
+		org.mockito.ArgumentCaptor<List<Notice>> captor =
+				org.mockito.ArgumentCaptor.forClass(List.class);
+		verify(noticeService, times(1)).createNotices(captor.capture());
+		assertEquals(expected, captor.getValue().size(), "批量落库的通知条数应为 N + N×M");
+
+		// 逐条 createNotice（旧单条落库+推送 API）不应再被调用 —— 已全部改走 build + createNotices
+		verify(noticeService, never()).createNotice(any(), any(), anyLong(), anyLong(), any(), any(), any(), any());
+
+		// 每个被邀请人的未读数推送仍在循环内逐条发生（读 save 前状态）—— 每人恰一次
+		verify(pushService, times(1)).sendPushMsg(any(), eq(human1), eq(INVITER));
+		verify(pushService, times(1)).sendPushMsg(any(), eq(human2), eq(INVITER));
+	}
+
 	// ==================== 新增：delMember 状态转移（含 #170 AOP core） ====================
 
 	@Test
@@ -326,11 +377,12 @@ class GroupMembershipManagerTest {
 		removedMember.setId(555L);
 		removedMember.setGroupId(GROUP_ID);
 		removedMember.setUid(removed);
-		when(groupMemberDao.getMemberByGroupId(GROUP_ID, removed)).thenReturn(removedMember);
+		removedMember.setRoleId(GroupRoleEnum.MEMBER.getType()); // 普通成员
+		// ITEM 1: 被移除成员经 getMemberBatch 一次批量取（角色由 roleId 派生），操作者是否群主经 isLord(uid) 取。
+		when(groupMemberDao.getMemberBatch(eq(GROUP_ID), any())).thenReturn(List.of(removedMember));
 
 		when(cachePlusOps.sCard(any())).thenReturn(5L); // >3
-		when(groupMemberDao.isLord(GROUP_ID, removed)).thenReturn(false);
-		when(groupMemberDao.isManager(GROUP_ID, removed)).thenReturn(false);
+		when(groupMemberDao.isLord(GROUP_ID, OWNER)).thenReturn(true);
 		when(transactionTemplate.execute(any())).thenAnswer(
 				inv -> ((TransactionCallback<?>) inv.getArgument(0)).doInTransaction(null));
 		when(groupMemberCache.getMemberExceptUidList(ROOM_ID)).thenReturn(new java.util.ArrayList<>(List.of(OWNER)));
@@ -348,6 +400,115 @@ class GroupMembershipManagerTest {
 		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(removed));
 		// 未触发小群自动解散
 		verify(groupLifecycleManager, never()).exitGroupInternal(any(), any(), any());
+	}
+
+	// ---- delMember 权限/重复语义（ITEM 1 保守批量后必须与逐条查询版一字不差） ----
+
+	/**
+	 * 公共装配：>3 人群、操作者(self)是群成员（角色可配），被移除成员经 getMemberBatch 返回。
+	 * operatorIsLord 由 isLord(uid) 决定；selfHasPower 由 self.roleId 决定。
+	 */
+	private void stubDelMemberCommon(Integer selfRole, boolean operatorIsLord, List<GroupMember> removedMembers) {
+		Room room = new Room();
+		room.setId(ROOM_ID);
+		when(roomCache.get(ROOM_ID)).thenReturn(room);
+		when(roomGroupCache.get(ROOM_ID)).thenReturn(roomGroup());
+
+		GroupMember self = new GroupMember();
+		self.setGroupId(GROUP_ID);
+		self.setUid(OWNER);
+		self.setRoleId(selfRole);
+		when(groupMemberDao.getMemberByGroupId(GROUP_ID, OWNER)).thenReturn(self);
+
+		when(cachePlusOps.sCard(any())).thenReturn(5L); // >3 → 逐个踢人分支
+		lenient().when(groupMemberDao.isLord(GROUP_ID, OWNER)).thenReturn(operatorIsLord);
+		lenient().when(groupMemberDao.getMemberBatch(eq(GROUP_ID), any())).thenReturn(removedMembers);
+		lenient().when(transactionTemplate.execute(any())).thenAnswer(
+				inv -> ((TransactionCallback<?>) inv.getArgument(0)).doInTransaction(null));
+		lenient().when(groupMemberCache.getMemberExceptUidList(ROOM_ID)).thenReturn(new java.util.ArrayList<>(List.of(OWNER)));
+		lenient().when(uidGenerator.getUid()).thenReturn(1L);
+		lenient().when(groupMemberDao.getGroupUsers(GROUP_ID, true)).thenReturn(List.of());
+	}
+
+	private GroupMember member(Long uid, Integer roleId) {
+		GroupMember m = new GroupMember();
+		m.setId(uid + 1000);
+		m.setGroupId(GROUP_ID);
+		m.setUid(uid);
+		m.setRoleId(roleId);
+		return m;
+	}
+
+	private MemberDelReq delReq(Long... uids) {
+		MemberDelReq req = new MemberDelReq();
+		req.setRoomId(ROOM_ID);
+		req.setUidList(new java.util.ArrayList<>(List.of(uids)));
+		return req;
+	}
+
+	@Test
+	@DisplayName("delMember 移除群主 → 抛 NOT_ALLOWED_FOR_REMOVE（群主不可被移除）")
+	void delMember_removingLeader_throws() {
+		Long leader = 300L;
+		stubDelMemberCommon(GroupRoleEnum.LEADER.getType(), true,
+				List.of(member(leader, GroupRoleEnum.LEADER.getType())));
+
+		assertThrows(RuntimeException.class, () -> membershipManager.delMember(OWNER, delReq(leader)));
+		verify(groupMemberDao, never()).removeById(any());
+	}
+
+	@Test
+	@DisplayName("delMember 非群主移除管理员 → 抛 NOT_ALLOWED_FOR_REMOVE（管理员只能被群主移除）")
+	void delMember_nonLordRemovingManager_throws() {
+		Long manager = 300L;
+		// self 是管理员（有权限过 1.3）但不是群主（operatorIsLord=false）
+		stubDelMemberCommon(GroupRoleEnum.MANAGER.getType(), false,
+				List.of(member(manager, GroupRoleEnum.MANAGER.getType())));
+
+		assertThrows(RuntimeException.class, () -> membershipManager.delMember(OWNER, delReq(manager)));
+		verify(groupMemberDao, never()).removeById(any());
+	}
+
+	@Test
+	@DisplayName("delMember 群主移除管理员 → 成功")
+	void delMember_lordRemovingManager_succeeds() {
+		Long manager = 300L;
+		stubDelMemberCommon(GroupRoleEnum.LEADER.getType(), true,
+				List.of(member(manager, GroupRoleEnum.MANAGER.getType())));
+
+		membershipManager.delMember(OWNER, delReq(manager));
+
+		verify(groupMemberDao).removeById(manager + 1000);
+	}
+
+	@Test
+	@DisplayName("delMember 普通成员操作者(无权限) → 抛 NOT_ALLOWED_FOR_REMOVE")
+	void delMember_normalMemberNoPower_throws() {
+		Long target = 300L;
+		// self 是普通成员 → hasPower(self)=false（且 roleService.hasRole 默认 false）
+		stubDelMemberCommon(GroupRoleEnum.MEMBER.getType(), false,
+				List.of(member(target, GroupRoleEnum.MEMBER.getType())));
+
+		assertThrows(RuntimeException.class, () -> membershipManager.delMember(OWNER, delReq(target)));
+		verify(groupMemberDao, never()).removeById(any());
+	}
+
+	@Test
+	@DisplayName("delMember 同一 uid 出现两次：首次成功移除，第二次抛「用户已经移除」（ITEM 1 重复语义复刻）")
+	void delMember_duplicateUid_secondThrowsAlreadyRemoved() {
+		Long target = 300L;
+		// getMemberBatch 去重后只返回一条（HashSet 入参）；processedRemoved 使二次出现 member=null。
+		stubDelMemberCommon(GroupRoleEnum.LEADER.getType(), true,
+				List.of(member(target, GroupRoleEnum.MEMBER.getType())));
+
+		RuntimeException ex = assertThrows(RuntimeException.class,
+				() -> membershipManager.delMember(OWNER, delReq(target, target)));
+		// 第一次成功移除（removeById 恰调用一次），第二次在校验点抛出
+		verify(groupMemberDao, times(1)).removeById(target + 1000);
+		org.junit.jupiter.api.Assertions.assertTrue(
+				String.valueOf(ex.getMessage()).contains("用户已经移除")
+						|| (ex.getCause() != null && String.valueOf(ex.getCause().getMessage()).contains("用户已经移除")),
+				"第二次出现应抛「用户已经移除」");
 	}
 
 	// ==================== 新增：管理员增/撤状态转移 ====================

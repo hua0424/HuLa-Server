@@ -127,7 +127,7 @@ public class GroupLifecycleManager {
 			GroupMember member = map.get(item.getGroupId());
 
 			item.setOnlineNum(onlineMap.get(item.getRoomId()));
-			item.setRoleId(getGroupRole(uid, item.getGroupId()));
+			item.setRoleId(GroupRoleAPPEnum.of(member.getRoleId()).getType());
 			item.setMemberNum(memberNum);
 			item.setRemark(member.getRemark());
 			item.setMyName(member.getMyName());

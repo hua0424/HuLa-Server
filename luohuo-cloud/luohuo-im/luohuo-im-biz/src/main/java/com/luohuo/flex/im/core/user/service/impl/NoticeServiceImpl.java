@@ -54,6 +54,15 @@ public class NoticeServiceImpl implements NoticeService {
 
 	@Override
 	public void createNotice(RoomTypeEnum applyType, NoticeTypeEnum type, Long senderId, Long receiverId, Long applyId, Long operate, Long roomId, String content) {
+		Notice notice = buildNotice(applyType, type, senderId, receiverId, applyId, operate, roomId, content);
+		noticeDao.save(notice);
+
+		// 实时推送
+		pushNoticeToUser(receiverId, notice);
+	}
+
+	@Override
+	public Notice buildNotice(RoomTypeEnum applyType, NoticeTypeEnum type, Long senderId, Long receiverId, Long applyId, Long operate, Long roomId, String content) {
 		Notice notice = new Notice();
 		notice.setType(applyType.getType());
 		notice.setEventType(type.getType());
@@ -65,10 +74,14 @@ public class NoticeServiceImpl implements NoticeService {
 		notice.setContent(content);
 		notice.setIsRead(UNREAD.getCode());
 		notice.setStatus(NoticeStatusEnum.UNTREATED.getStatus());
-		noticeDao.save(notice);
+		return notice;
+	}
 
-		// 实时推送
-		pushNoticeToUser(receiverId, notice);
+	@Override
+	public void createNotices(List<Notice> notices) {
+		// 一次批量 INSERT（回填每条 id），再逐条实时推送 —— 推送条数/内容/接收人与逐条 createNotice 一致。
+		noticeDao.saveBatch(notices);
+		notices.forEach(n -> pushNoticeToUser(n.getReceiverId(), n));
 	}
 
 	@Override
