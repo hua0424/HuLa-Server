@@ -73,20 +73,4 @@ public class AiclawGroupConfig extends Entity<Long> {
 	@Schema(description = "工作目录（可空；NULL=plugins 自行派生默认目录）")
 	@TableField("workspace_dir")
 	private String workspaceDir;
-
-	/**
-	 * 短回复字符阈值
-	 * @deprecated aichatoverview#3 已下线，保留 DB 字段兼容历史数据
-	 */
-	@Deprecated
-	@TableField("short_reply_threshold")
-	private Integer shortReplyThreshold;
-
-	/**
-	 * 短回复检查最近 N 条
-	 * @deprecated aichatoverview#3 已下线，保留 DB 字段兼容历史数据
-	 */
-	@Deprecated
-	@TableField("short_reply_lookback")
-	private Integer shortReplyLookback;
 }

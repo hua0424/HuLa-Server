@@ -97,8 +97,6 @@ class AiclawGroupConfigServiceImplTest {
 				.mentionRequired(1)
 				.dailyLimit(500)
 				.respondToAi(0)
-				.shortReplyThreshold(10)
-				.shortReplyLookback(3)
 				.build();
 		when(aiclawGroupConfigMapper.selectOne(any())).thenReturn(config);
 
