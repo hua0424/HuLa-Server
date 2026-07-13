@@ -316,17 +316,31 @@ public class GroupMembershipManager {
 		}
 
 		// 1. 判断被移除的人是否是群主或者管理员  （群主不可以被移除，管理员只能被群主移除）
+		// ITEM 1（保守批量）：仅把「每人 3 次校验查询」合并为一次 getMemberBatch；
+		// 操作者是否群主(operatorIsLord)、自己是否有权(selfHasPower)在整个循环内恒定 → 提到循环外一次。
+		// 推送对象再取 getMemberExceptUidList(~346) 与管理员集 getGroupUsers(~370) 依旧留在循环内逐次取（顺序相关：
+		// 成员逐个删除、各自独立事务，后续广播/通知合理反映收缩后的集合）。
+		// 重复 uid 语义复刻：processedRemoved 使已删过的 uid 二次出现时 member=null（role 两项皆 false）→ 在同一点抛「用户已经移除」。
+		boolean operatorIsLord = groupMemberDao.isLord(roomGroup.getId(), uid);
+		boolean selfHasPower = hasPower(self);
+		Map<Long, GroupMember> removedMemberMap = groupMemberDao.getMemberBatch(roomGroup.getId(), new HashSet<>(request.getUidList()))
+				.stream().collect(Collectors.toMap(GroupMember::getUid, java.util.function.Function.identity(), (a, b) -> a));
+		Set<Long> processedRemoved = new HashSet<>();
 		request.getUidList().forEach(removedUid -> {
+			boolean alreadyRemoved = processedRemoved.contains(removedUid);
+			GroupMember member = alreadyRemoved ? null : removedMemberMap.get(removedUid);
+			Integer roleId = member == null ? null : member.getRoleId();
+			boolean removedIsLord = roleId != null && Objects.equals(roleId, GroupRoleEnum.LEADER.getType());
+			boolean removedIsManager = roleId != null && Objects.equals(roleId, GroupRoleEnum.MANAGER.getType());
+
 			// 1.1 群主 非法操作
-			AssertUtil.isFalse(groupMemberDao.isLord(roomGroup.getId(), removedUid), GroupErrorEnum.NOT_ALLOWED_FOR_REMOVE, "");
+			AssertUtil.isFalse(removedIsLord, GroupErrorEnum.NOT_ALLOWED_FOR_REMOVE, "");
 			// 1.2 管理员 判断是否是群主操作
-			if (groupMemberDao.isManager(roomGroup.getId(), removedUid)) {
-				Boolean isLord = groupMemberDao.isLord(roomGroup.getId(), uid);
-				AssertUtil.isTrue(isLord, GroupErrorEnum.NOT_ALLOWED_FOR_REMOVE);
+			if (removedIsManager) {
+				AssertUtil.isTrue(operatorIsLord, GroupErrorEnum.NOT_ALLOWED_FOR_REMOVE);
 			}
 			// 1.3 普通成员 判断是否有权限操作
-			AssertUtil.isTrue(hasPower(self), GroupErrorEnum.NOT_ALLOWED_FOR_REMOVE);
-			GroupMember member = groupMemberDao.getMemberByGroupId(roomGroup.getId(), removedUid);
+			AssertUtil.isTrue(selfHasPower, GroupErrorEnum.NOT_ALLOWED_FOR_REMOVE);
 			AssertUtil.isNotEmpty(member, "用户已经移除");
 
 			// 发送移除事件告知群成员
@@ -382,6 +396,8 @@ public class GroupMembershipManager {
 				// #153 P1-1: 被踢者若是 aiclaw → 清入群待批准去重标记（接缝内按 aiclaw 判定）。
 				// 踢出 = 明确不想要这个 aiclaw，若之后再被拉回应重新给主人发待批准通知，不能被旧标记压制 24h。
 				aiclawParticipant.onMembersRemoved(roomGroup.getRoomId(), Collections.singletonList(removedUid));
+				// ITEM 1: 标记该 uid 已成功移除 → 同一 uid 二次出现时按「行已删」处理（member=null）复刻旧「删后再查为空」语义。
+				processedRemoved.add(removedUid);
 			}
 		});
 	}
@@ -430,11 +446,15 @@ public class GroupMembershipManager {
 		}
 
 		// 2. 创建邀请记录
-		List<UserApply> invites = validUids.stream().map(inviteeUid -> new UserApply(uid, RoomTypeEnum.GROUP.getType(), roomGroup.getRoomId(), inviteeUid, StrUtil.format("{}邀请你加入{}", userSummaryCache.get(uid).getName(), roomGroup.getName()), NoticeStatusEnum.UNTREATED.getStatus(), UNREAD.getCode(), 0, false, 1)).collect(Collectors.toList());
+		// ITEM 3: uid（邀请者）在整个流内恒定 → 名字查询提到流外做一次（行为等价，去掉 N 次缓存查询）。
+		String inviterName = userSummaryCache.get(uid).getName();
+		List<UserApply> invites = validUids.stream().map(inviteeUid -> new UserApply(uid, RoomTypeEnum.GROUP.getType(), roomGroup.getRoomId(), inviteeUid, StrUtil.format("{}邀请你加入{}", inviterName, roomGroup.getName()), NoticeStatusEnum.UNTREATED.getStatus(), UNREAD.getCode(), 0, false, 1)).collect(Collectors.toList());
 		transactionTemplate.execute(e -> userApplyDao.saveBatch(invites));
 
 		// 3. 通知被邀请的人进群, 通知时绑定通知id
+		// ITEM 4: 收集 N + N×M 条邀请通知一次批量落库；被邀请人未读数推送（读 save 前状态）仍留在循环内、逐条推送不变。
 		List<Long> managerIds = groupMemberDao.getGroupUsers(roomGroup.getId(), true);
+		List<Notice> inviteNotices = new ArrayList<>();
 		invites.forEach(invite -> {
 			SummeryInfoDTO user = userSummaryCache.get(invite.getTargetId());
 			if (ObjectUtil.isNotNull(user)) {
@@ -442,7 +462,7 @@ public class GroupMembershipManager {
 			}
 
 			// 每个被邀请的人都要收到邀请进群的消息
-			noticeService.createNotice(
+			inviteNotices.add(noticeService.buildNotice(
 					RoomTypeEnum.GROUP,
 					NoticeTypeEnum.GROUP_INVITE_ME,
 					uid,
@@ -451,10 +471,10 @@ public class GroupMembershipManager {
 					invite.getTargetId(),
 					roomGroup.getRoomId(),
 					roomGroup.getName()
-			);
+			));
 
 			// 每个管理员都要收到邀请进群的消息
-			managerIds.forEach(managerId -> noticeService.createNotice(
+			managerIds.forEach(managerId -> inviteNotices.add(noticeService.buildNotice(
 					RoomTypeEnum.GROUP,
 					NoticeTypeEnum.GROUP_INVITE,
 					uid,
@@ -463,8 +483,9 @@ public class GroupMembershipManager {
 					invite.getTargetId(),
 					roomGroup.getRoomId(),
 					roomGroup.getName()
-			));
+			)));
 		});
+		noticeService.createNotices(inviteNotices);
 	}
 
 	private boolean hasPower(GroupMember self) {

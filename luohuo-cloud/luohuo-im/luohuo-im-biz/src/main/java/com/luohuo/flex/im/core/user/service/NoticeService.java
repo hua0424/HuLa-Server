@@ -30,6 +30,20 @@ public interface NoticeService {
 	void createNotice(RoomTypeEnum applyType, NoticeTypeEnum type, Long senderId, Long receiverId, Long applyId, Long operate, Long roomId, String content);
 
 	/**
+	 * 构建一条通知实体（不落库、不推送）。
+	 * <p>字段装配与 {@link #createNotice(RoomTypeEnum, NoticeTypeEnum, Long, Long, Long, Long, Long, String)}
+	 * 完全一致，供批量保存路径复用（先 build 收集、再 {@link #createNotices(java.util.List)} 一次落库 + 逐条推送）。</p>
+	 */
+	Notice buildNotice(RoomTypeEnum applyType, NoticeTypeEnum type, Long senderId, Long receiverId, Long applyId, Long operate, Long roomId, String content);
+
+	/**
+	 * 批量保存通知并逐条实时推送。
+	 * <p>= 一次 {@code saveBatch}（回填每条 id）+ 对每条 {@code pushNoticeToUser}。
+	 * 推送条数与逐条 {@code createNotice} 完全一致，只是把 N 次 INSERT 合并成 1 次批量 INSERT。</p>
+	 */
+	void createNotices(java.util.List<Notice> notices);
+
+	/**
 	 * 更新通知状态
 	 * @param notice
 	 */
