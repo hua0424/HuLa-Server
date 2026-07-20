@@ -8,9 +8,13 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.domain.entity.AiclawThinking;
 import com.luohuo.flex.im.domain.entity.Room;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
-import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawThinkingByTriggerReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import jakarta.validation.ValidatorFactory;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -24,6 +28,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -374,11 +381,11 @@ class ThinkingServiceTest {
 		}
 	}
 
-	// ==================== REQ-XXX #138：按房间查询 thinking 归档列表（元数据 only，游标翻页） ====================
+	// ==================== issue #180：按触发消息批量反查 thinking 元数据（metadata only） ====================
 
 	@Nested
-	@DisplayName("listThinkingByRoom 房间归档列表（成员闸门 + 游标翻页 + 元数据 only）")
-	class ListThinkingByRoom {
+	@DisplayName("listThinkingByTriggerMsgIds 批量反查（成员闸门 + 元数据 only + id 升序）")
+	class ListThinkingByTriggerMsgIds {
 
 		private static final Long ROOM_ID = 10L;
 		private static final Long CALLER_UID = 300L;
@@ -396,11 +403,11 @@ class ThinkingServiceTest {
 		}
 
 		/** 构造一行 thinking（元数据）；mapper 实际不 select content，这里 content 留空即可。 */
-		private AiclawThinking row(long id) {
+		private AiclawThinking row(long id, long aiclawUid, long triggerMsgId) {
 			AiclawThinking t = AiclawThinking.builder()
-					.aiclawUid(100L)
+					.aiclawUid(aiclawUid)
 					.roomId(ROOM_ID)
-					.triggerMsgId(7000L + id)
+					.triggerMsgId(triggerMsgId)
 					.status(1)
 					.durationMs(1234)
 					.hasResponse(1)
@@ -410,87 +417,133 @@ class ThinkingServiceTest {
 			return t;
 		}
 
-		/** ids 降序生成 [start, start-count+1]。 */
-		private List<AiclawThinking> rowsDesc(long start, int count) {
-			List<AiclawThinking> list = new ArrayList<>();
-			for (int i = 0; i < count; i++) {
-				list.add(row(start - i));
-			}
-			return list;
-		}
-
 		@Test
-		@DisplayName("首页：mapper 多返回 1 行 → 截到 size，isLast=false，cursor=第 size 行 id，limit=size+1")
-		void firstPage_notLast() {
+		@DisplayName("成员：mapper 返回行 → 映射为元数据（含全部字段，且不查/不设 content）")
+		void member_returnsMappedRows() {
 			stubMember();
-			// ids 100..80 = 21 行（size 20 → 请求 21）
-			when(thinkingMapper.selectThinkingListByRoom(ROOM_ID, null, 21)).thenReturn(rowsDesc(100L, 21));
+			List<Long> triggerIds = List.of(7001L, 7002L);
+			when(thinkingMapper.selectThinkingListByTriggerMsgIds(ROOM_ID, triggerIds))
+					.thenReturn(List.of(row(1L, 100L, 7001L), row(2L, 100L, 7002L)));
 
-			CursorPageBaseResp<AiclawThinkingListItemResp> resp =
-					thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null);
+			List<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByTriggerMsgIds(ROOM_ID, CALLER_UID, triggerIds);
 
-			assertEquals(20, resp.getList().size(), "多取的第 21 行应被裁掉");
-			assertFalse(resp.getIsLast(), "还有下一页");
-			assertEquals("81", resp.getCursor(), "游标 = 第 20 行 id（100-19=81）");
-			assertNull(resp.getTotal(), "total 不计算");
-			// 元数据映射正确、且不含 content
-			AiclawThinkingListItemResp first = resp.getList().get(0);
-			assertEquals(100L, first.getId());
+			assertEquals(2, resp.size());
+			AiclawThinkingListItemResp first = resp.get(0);
+			assertEquals(1L, first.getId());
 			assertEquals(100L, first.getAiclawUid());
+			assertEquals(7001L, first.getTriggerMsgId());
 			assertEquals(1, first.getStatus());
-			verify(thinkingMapper).selectThinkingListByRoom(ROOM_ID, null, 21);
+			assertEquals(1234, first.getDurationMs());
+			assertEquals(1, first.getHasResponse());
+			assertNotNull(first.getCreateTime());
+			// 元数据 only：resp 项没有 content 字段（AiclawThinkingListItemResp 本身不含 content）——
+			// mapper 也刻意不 select content，此处以 mapper 契约 + resp 类型双重保证。
+			verify(thinkingMapper).selectThinkingListByTriggerMsgIds(ROOM_ID, triggerIds);
 		}
 
 		@Test
-		@DisplayName("末页：mapper 返回不足 size → isLast=true，cursor=最后一行 id")
-		void lastPage() {
-			stubMember();
-			when(thinkingMapper.selectThinkingListByRoom(ROOM_ID, null, 21)).thenReturn(rowsDesc(50L, 5));
-
-			CursorPageBaseResp<AiclawThinkingListItemResp> resp =
-					thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null);
-
-			assertEquals(5, resp.getList().size());
-			assertTrue(resp.getIsLast(), "不足一页即最后一页");
-			assertEquals("46", resp.getCursor(), "游标 = 最后一行 id（50-4=46）");
-		}
-
-		@Test
-		@DisplayName("游标透传 + pageSize 硬上限：cursor=500 → cursorId=500L，pageSize=999 → limit=51")
-		void cursorForwarded_pageSizeClamped() {
-			stubMember();
-			when(thinkingMapper.selectThinkingListByRoom(eq(ROOM_ID), eq(500L), eq(51)))
-					.thenReturn(rowsDesc(400L, 10));
-
-			thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, "500", 999);
-
-			verify(thinkingMapper).selectThinkingListByRoom(ROOM_ID, 500L, 51);
-		}
-
-		@Test
-		@DisplayName("非成员：群成员列表不含 caller → BizException，且 mapper 从不被调用（授权先于查询）")
+		@DisplayName("非成员：群成员列表不含 caller → BizException（统一文案），且 mapper 从不被调用（授权先于查询）")
 		void nonMember_rejected_mapperNeverCalled() {
 			when(roomCache.get(ROOM_ID)).thenReturn(groupRoom());
 			when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(100L, 999L));
 
-			assertThrows(BizException.class,
-					() -> thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null));
+			BizException ex = assertThrows(BizException.class,
+					() -> thinkingService.listThinkingByTriggerMsgIds(ROOM_ID, CALLER_UID, List.of(7001L)));
+			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案");
 
-			verify(thinkingMapper, never()).selectThinkingListByRoom(anyLong(), any(), anyInt());
+			verify(thinkingMapper, never()).selectThinkingListByTriggerMsgIds(anyLong(), anyList());
 		}
 
 		@Test
-		@DisplayName("空房间：mapper 返回空 → 列表空，isLast=true，cursor=null")
-		void emptyRoom() {
+		@DisplayName("空结果：mapper 返回空 → service 返回空列表")
+		void emptyResult() {
 			stubMember();
-			when(thinkingMapper.selectThinkingListByRoom(ROOM_ID, null, 21)).thenReturn(new ArrayList<>());
+			List<Long> triggerIds = List.of(7001L, 7002L);
+			when(thinkingMapper.selectThinkingListByTriggerMsgIds(ROOM_ID, triggerIds))
+					.thenReturn(new ArrayList<>());
 
-			CursorPageBaseResp<AiclawThinkingListItemResp> resp =
-					thinkingService.listThinkingByRoom(ROOM_ID, CALLER_UID, null, null);
+			List<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByTriggerMsgIds(ROOM_ID, CALLER_UID, triggerIds);
 
-			assertTrue(resp.getList().isEmpty());
-			assertTrue(resp.getIsLast());
-			assertNull(resp.getCursor());
+			assertTrue(resp.isEmpty());
+		}
+
+		@Test
+		@DisplayName("同一 triggerMsgId 多 aiclaw → 多行按 id 升序全部返回")
+		void multiAiclaw_sameTrigger_returnsAllInIdAsc() {
+			stubMember();
+			List<Long> triggerIds = List.of(7001L);
+			// 两行相同 triggerMsgId、不同 aiclawUid、id 升序（mapper 契约为 ORDER BY id ASC）
+			when(thinkingMapper.selectThinkingListByTriggerMsgIds(ROOM_ID, triggerIds))
+					.thenReturn(List.of(row(1L, 100L, 7001L), row(2L, 200L, 7001L)));
+
+			List<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByTriggerMsgIds(ROOM_ID, CALLER_UID, triggerIds);
+
+			assertEquals(2, resp.size());
+			assertEquals(1L, resp.get(0).getId());
+			assertEquals(100L, resp.get(0).getAiclawUid());
+			assertEquals(2L, resp.get(1).getId());
+			assertEquals(200L, resp.get(1).getAiclawUid());
+			// 两行共享 triggerMsgId
+			assertEquals(7001L, resp.get(0).getTriggerMsgId());
+			assertEquals(7001L, resp.get(1).getTriggerMsgId());
+		}
+	}
+
+	// ==================== issue #180：AiclawThinkingByTriggerReq 校验（jakarta bean validation） ====================
+
+	@Nested
+	@DisplayName("AiclawThinkingByTriggerReq 校验（roomId 非空 / triggerMsgIds 非空 + 上限 100）")
+	class ByTriggerReqValidation {
+
+		private final Validator validator;
+
+		ByTriggerReqValidation() {
+			try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
+				this.validator = factory.getValidator();
+			}
+		}
+
+		private Set<String> violatedProps(AiclawThinkingByTriggerReq req) {
+			Set<ConstraintViolation<AiclawThinkingByTriggerReq>> violations = validator.validate(req);
+			return violations.stream()
+					.map(v -> v.getPropertyPath().toString())
+					.collect(Collectors.toSet());
+		}
+
+		@Test
+		@DisplayName("101 个 id → triggerMsgIds 违约")
+		void overCap_violatesTriggerMsgIds() {
+			List<Long> ids = LongStream.rangeClosed(1, 101).boxed().collect(Collectors.toList());
+			AiclawThinkingByTriggerReq req = AiclawThinkingByTriggerReq.builder()
+					.roomId(10L).triggerMsgIds(ids).build();
+			assertTrue(violatedProps(req).contains("triggerMsgIds"), "101 个 id 应触发 triggerMsgIds 上限违约");
+		}
+
+		@Test
+		@DisplayName("空列表 → triggerMsgIds 违约")
+		void emptyList_violatesTriggerMsgIds() {
+			AiclawThinkingByTriggerReq req = AiclawThinkingByTriggerReq.builder()
+					.roomId(10L).triggerMsgIds(new ArrayList<>()).build();
+			assertTrue(violatedProps(req).contains("triggerMsgIds"), "空列表应触发 @NotEmpty");
+		}
+
+		@Test
+		@DisplayName("roomId 为 null → roomId 违约")
+		void nullRoomId_violatesRoomId() {
+			AiclawThinkingByTriggerReq req = AiclawThinkingByTriggerReq.builder()
+					.roomId(null).triggerMsgIds(List.of(1L, 2L, 3L)).build();
+			assertTrue(violatedProps(req).contains("roomId"), "roomId 为 null 应触发 @NotNull");
+		}
+
+		@Test
+		@DisplayName("合法 {roomId, [1,2,3]} → 零违约")
+		void valid_noViolations() {
+			AiclawThinkingByTriggerReq req = AiclawThinkingByTriggerReq.builder()
+					.roomId(10L).triggerMsgIds(List.of(1L, 2L, 3L)).build();
+			assertTrue(violatedProps(req).isEmpty(), "合法请求不应有任何违约");
 		}
 	}
 }
