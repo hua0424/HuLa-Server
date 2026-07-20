@@ -10,6 +10,7 @@ import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawPersonaReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawRelationReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportTypeReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawThinkingByTriggerReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
@@ -51,13 +52,12 @@ public class AiclawController {
 		return R.success(thinkingService.reviewThinking(thinkingId, ContextUtil.getUid()));
 	}
 
-	@GetMapping("/thinking/list")
-	@Operation(summary = "按房间查询 thinking 归档列表（仅房间成员，倒序最近 N 条，元数据 only）")
-	public R<CursorPageBaseResp<AiclawThinkingListItemResp>> listThinkingByRoom(
-			@RequestParam Long roomId,
-			@RequestParam(required = false) String cursor,
-			@RequestParam(required = false) Integer pageSize) {
-		return R.success(thinkingService.listThinkingByRoom(roomId, ContextUtil.getUid(), cursor, pageSize));
+	@PostMapping("/thinking/by-trigger")
+	@Operation(summary = "按触发消息批量反查 thinking 元数据（仅房间成员，metadata only）")
+	public R<List<AiclawThinkingListItemResp>> listThinkingByTrigger(
+			@Valid @RequestBody AiclawThinkingByTriggerReq req) {
+		return R.success(thinkingService.listThinkingByTriggerMsgIds(
+				req.getRoomId(), ContextUtil.getUid(), req.getTriggerMsgIds()));
 	}
 
 	@PostMapping("/create")
