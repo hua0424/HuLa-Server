@@ -15,6 +15,8 @@ import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -498,12 +500,18 @@ class ThinkingServiceTest {
 	@DisplayName("AiclawThinkingByTriggerReq 校验（roomId 非空 / triggerMsgIds 非空 + 上限 100）")
 	class ByTriggerReqValidation {
 
-		private final Validator validator;
+		private static ValidatorFactory factory;
+		private static Validator validator;
 
-		ByTriggerReqValidation() {
-			try (ValidatorFactory factory = Validation.buildDefaultValidatorFactory()) {
-				this.validator = factory.getValidator();
-			}
+		@BeforeAll
+		static void setUpValidator() {
+			factory = Validation.buildDefaultValidatorFactory();
+			validator = factory.getValidator();
+		}
+
+		@AfterAll
+		static void tearDownValidator() {
+			factory.close();
 		}
 
 		private Set<String> violatedProps(AiclawThinkingByTriggerReq req) {
