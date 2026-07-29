@@ -1,7 +1,9 @@
 package com.luohuo.flex.im.domain.entity;
 
 import com.baomidou.mybatisplus.annotation.TableField;
+import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.luohuo.basic.base.entity.Entity;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
@@ -21,6 +23,15 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @Schema(description = "aiclaw 群聊配置表")
 public class AiclawGroupConfig extends Entity<Long> {
+
+	/**
+	 * 逻辑删除
+	 */
+	@Schema(description = "逻辑删除")
+	@TableField("is_del")
+	@TableLogic(value = "false", delval = "true")
+	@JsonIgnore
+	private Boolean isDel;
 
 	private static final long serialVersionUID = 1L;
 

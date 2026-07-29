@@ -508,7 +508,12 @@ public class GroupLifecycleManager {
 			presenceSyncHelper.syncOnline(memberUidList, room.getId(), false);
 			pushService.sendPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid);
 			// #182/#153: 解散群时同样清 aiclaw 入群待批准去重标记，避免旧标记压制后续再次邀请通知。
-			aiclawParticipant.onMembersRemoved(roomId, memberUidList);
+			// 该调用在事务外，且只操作 Redis，失败不得阻断已发出的解散广播。
+			try {
+				aiclawParticipant.onMembersRemoved(roomId, memberUidList);
+			} catch (Exception e) {
+				log.warn("解散群后清理 aiclaw 待批准标记失败，吞异常继续: roomId={}, memberUids={}", roomId, memberUidList, e);
+			}
 		} else {
 			// 如果房间人员小于3人 那么直接解散群聊
 			if (cachePlusOps.sCard(gKey) <= 3) {

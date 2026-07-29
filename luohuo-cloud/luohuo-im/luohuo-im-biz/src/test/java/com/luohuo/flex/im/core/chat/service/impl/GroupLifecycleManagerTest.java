@@ -38,9 +38,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.Collections;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -161,6 +163,35 @@ class GroupLifecycleManagerTest {
 		verify(aiclawThinkingMsgRelMapper).deleteByRoomId(ROOM_ID);
 		verify(aiclawThinkingMapper).logicDeleteByRoomId(ROOM_ID);
 		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(OWNER, MEMBER));
+		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+	}
+
+	@Test
+	@DisplayName("exitGroup 解散分支：onMembersRemoved 抛异常时吞掉，不阻断解散广播")
+	void exitGroup_ownerDisbands_onMembersRemovedException_swallowed() {
+		when(roomGroupCache.getByRoomIdFromDb(ROOM_ID)).thenReturn(roomGroup());
+		when(roomService.getById(ROOM_ID)).thenReturn(room());
+		when(groupMemberDao.isGroupShip(eq(ROOM_ID), any())).thenReturn(true);
+		when(groupMemberDao.isLord(GROUP_ID, OWNER)).thenReturn(true);
+		when(groupMemberDao.getMemberUidList(eq(GROUP_ID), any())).thenReturn(List.of(OWNER, MEMBER));
+		User owner = new User();
+		owner.setId(OWNER);
+		owner.setName("群主");
+		when(userCache.get(OWNER)).thenReturn(owner);
+		runTxInline();
+		when(roomService.removeById(ROOM_ID)).thenReturn(true);
+		when(contactDao.removeByRoomId(eq(ROOM_ID), any())).thenReturn(true);
+		when(groupMemberDao.removeByGroupId(eq(GROUP_ID), any())).thenReturn(true);
+		when(messageDao.removeByRoomId(eq(ROOM_ID), any())).thenReturn(true);
+		// #182 P2: onMembersRemoved 在事务外，抛异常不得阻断解散广播
+		doThrow(new RuntimeException("redis down")).when(aiclawParticipant).onMembersRemoved(any(), any());
+
+		MemberExitReq req = new MemberExitReq();
+		req.setRoomId(ROOM_ID);
+		req.setAccount("acc");
+
+		assertDoesNotThrow(() -> lifecycleManager.exitGroup(true, OWNER, req));
+
 		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
 	}
 
