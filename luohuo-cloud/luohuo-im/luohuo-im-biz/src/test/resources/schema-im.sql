@@ -118,3 +118,53 @@ CREATE TABLE `im_room_group`  (
   INDEX `idx_create_time`(`create_time` ASC) USING BTREE,
   INDEX `idx_update_time`(`update_time` ASC) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 110767026340355 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '群聊房间表' ROW_FORMAT = Dynamic;
+
+-- #182: aiclaw 扩展表（解散清理回归测试需要）
+CREATE TABLE `im_aiclaw_group_config` (
+  `id`                    BIGINT NOT NULL COMMENT '主键（雪花ID）',
+  `tenant_id`             BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID',
+  `aiclaw_uid`            BIGINT NOT NULL COMMENT 'aiclaw 的 uid',
+  `room_id`               BIGINT NOT NULL COMMENT '群聊 room_id',
+  `rate_limit_per_minute` INT UNSIGNED DEFAULT 10 COMMENT '频率限制（条/分钟）',
+  `mention_required`      TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '是否需要 @ 触发',
+  `daily_limit`           INT UNSIGNED DEFAULT 1000 COMMENT '每日发言上限',
+  `respond_to_ai`         TINYINT UNSIGNED DEFAULT 1 COMMENT '是否响应其他 aiclaw',
+  `approved`              TINYINT NOT NULL DEFAULT 0 COMMENT '是否已批准在该群响应',
+  `workspace_dir`         VARCHAR(512) NULL DEFAULT NULL COMMENT '工作目录',
+  `is_del`                TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+  `create_time`           DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `create_by`             BIGINT DEFAULT NULL COMMENT '创建人',
+  `update_time`           DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  `update_by`             BIGINT DEFAULT NULL COMMENT '更新人',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uk_aiclaw_room` (`aiclaw_uid`, `room_id`) USING BTREE,
+  INDEX `idx_room_id` (`room_id`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'aiclaw 群聊配置表' ROW_FORMAT = Dynamic;
+
+CREATE TABLE `im_aiclaw_thinking` (
+  `id`             BIGINT NOT NULL COMMENT '主键（雪花ID）',
+  `tenant_id`      BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID',
+  `aiclaw_uid`     BIGINT NOT NULL COMMENT '产生 thinking 的 aiclaw uid',
+  `room_id`        BIGINT NOT NULL COMMENT '所属群聊 room_id',
+  `trigger_msg_id` BIGINT DEFAULT NULL COMMENT '触发本次 thinking 的消息 ID',
+  `content`        MEDIUMTEXT NOT NULL COMMENT '完整思考文本',
+  `duration_ms`    INT DEFAULT NULL COMMENT '处理耗时（毫秒）',
+  `has_response`   TINYINT UNSIGNED DEFAULT 0 COMMENT '是否产生了回复消息',
+  `status`         TINYINT DEFAULT 0 COMMENT '状态：0=进行中 1=成功 2=错误 3=超时 4=超长截断',
+  `error_code`     VARCHAR(64) DEFAULT NULL COMMENT '错误码',
+  `is_del`         TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+  `create_time`    DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `create_by`      BIGINT DEFAULT NULL COMMENT '创建人',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_aiclaw_room` (`aiclaw_uid`, `room_id`) USING BTREE,
+  INDEX `idx_trigger_msg` (`trigger_msg_id`) USING BTREE,
+  INDEX `idx_create_time` (`create_time`) USING BTREE,
+  INDEX `idx_has_response_create` (`has_response`, `create_time`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'aiclaw thinking 记录表' ROW_FORMAT = Dynamic;
+
+CREATE TABLE `im_aiclaw_thinking_msg_rel` (
+  `thinking_id` BIGINT NOT NULL COMMENT 'thinking 记录 ID',
+  `msg_id`      BIGINT NOT NULL COMMENT '关联的 im_message.id',
+  `create_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '关联建立时间',
+  PRIMARY KEY (`thinking_id`, `msg_id`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'thinking 与回复消息关联表' ROW_FORMAT = Dynamic;

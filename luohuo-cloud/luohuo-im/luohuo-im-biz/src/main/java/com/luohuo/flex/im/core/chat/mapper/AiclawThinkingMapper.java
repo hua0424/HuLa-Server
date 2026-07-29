@@ -30,6 +30,15 @@ public interface AiclawThinkingMapper extends BaseMapper<AiclawThinking> {
 	int updateHasResponse(@Param("thinkingId") Long thinkingId, @Param("hasResponse") Integer hasResponse);
 
 	/**
+	 * #182: 解散群聊时逻辑删除该房间的全部 thinking 记录（保留审计）。
+	 *
+	 * @param roomId 群聊 room_id
+	 * @return 更新行数
+	 */
+	@Update("UPDATE im_aiclaw_thinking SET is_del = 1 WHERE room_id = #{roomId} AND is_del = 0")
+	int logicDeleteByRoomId(@Param("roomId") Long roomId);
+
+	/**
 	 * 反查指定 aiclaw 在指定房间内最近一条进行中（status=0）的 thinking id
 	 *
 	 * @param aiclawUid aiclaw uid
