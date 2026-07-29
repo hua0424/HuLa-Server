@@ -11,6 +11,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
+import lombok.experimental.Accessors;
 
 /**
  * aiclaw 群聊配置表
@@ -21,6 +22,9 @@ import lombok.NoArgsConstructor;
 @Builder
 @AllArgsConstructor
 @NoArgsConstructor
+@Accessors(chain = true)
+// #182 P1: 显式声明 isDel 需要 chain setter 与 SuperEntity(@Accessors(chain=true)) 的返回值协变兼容，
+// 否则 @Data 生成的 void setIsDel 与父类冲突编译失败。
 @Schema(description = "aiclaw 群聊配置表")
 public class AiclawGroupConfig extends Entity<Long> {
 
