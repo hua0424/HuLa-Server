@@ -51,6 +51,9 @@ import com.luohuo.flex.im.domain.vo.response.ReadAnnouncementsResp;
 import com.luohuo.flex.im.core.chat.service.AiclawParticipant;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
+import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
+import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
+import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
 import com.luohuo.flex.im.core.chat.service.adapter.MemberAdapter;
 import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.adapter.RoomAdapter;
@@ -104,6 +107,9 @@ public class GroupLifecycleManager {
 	private TransactionTemplate transactionTemplate;
 	private ContactDao contactDao;
 	private final AiclawParticipant aiclawParticipant;
+	private final AiclawGroupConfigMapper aiclawGroupConfigMapper;
+	private final AiclawThinkingMapper aiclawThinkingMapper;
+	private final AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
 	private final PresenceSyncHelper presenceSyncHelper;
 
 	public List<MemberResp> groupList(Long uid) {
@@ -485,6 +491,10 @@ public class GroupLifecycleManager {
 				// 4.4 删除消息记录 (逻辑删除)
 				Boolean isDelMessage = messageDao.removeByRoomId(roomId, Collections.EMPTY_LIST);
 				AssertUtil.isTrue(isDelMessage, ResponseEnum.SYSTEM_BUSY.getMsg());
+				// 4.5 #182: 解散时清理 aiclaw 扩展表，避免按 aiclaw 维度累积脏数据
+				aiclawGroupConfigMapper.deleteByRoomId(roomId);
+				aiclawThinkingMsgRelMapper.deleteByRoomId(roomId);
+				aiclawThinkingMapper.logicDeleteByRoomId(roomId);
 				return true;
 			});
 			// 4.5 告知所有人群已经被解散, 这里要走groupMemberDao查询，缓存中可能没有屏蔽群的用户
@@ -497,6 +507,8 @@ public class GroupLifecycleManager {
 			cachePlusOps.del(uKey, gKey);
 			presenceSyncHelper.syncOnline(memberUidList, room.getId(), false);
 			pushService.sendPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid);
+			// #182/#153: 解散群时同样清 aiclaw 入群待批准去重标记，避免旧标记压制后续再次邀请通知。
+			aiclawParticipant.onMembersRemoved(roomId, memberUidList);
 		} else {
 			// 如果房间人员小于3人 那么直接解散群聊
 			if (cachePlusOps.sCard(gKey) <= 3) {

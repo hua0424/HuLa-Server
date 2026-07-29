@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.mapper;
 
 import com.luohuo.flex.im.domain.entity.AiclawThinkingMsgRel;
+import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -30,4 +31,17 @@ public interface AiclawThinkingMsgRelMapper {
 	 */
 	@Select("SELECT msg_id FROM im_aiclaw_thinking_msg_rel WHERE thinking_id = #{thinkingId} ORDER BY create_time")
 	List<Long> selectMsgIdsByThinkingId(@Param("thinkingId") Long thinkingId);
+
+	/**
+	 * #182: 解散群聊时物理删除该房间 thinking 关联的 msg_rel 记录。
+	 *
+	 * <p>通过 JOIN im_aiclaw_thinking 按 room_id 定位，避免该表无 room_id 字段。</p>
+	 *
+	 * @param roomId 群聊 room_id
+	 * @return 删除行数
+	 */
+	@Delete("DELETE r FROM im_aiclaw_thinking_msg_rel r " +
+			"INNER JOIN im_aiclaw_thinking t ON r.thinking_id = t.id " +
+			"WHERE t.room_id = #{roomId}")
+	int deleteByRoomId(@Param("roomId") Long roomId);
 }

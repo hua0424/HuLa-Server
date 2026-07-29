@@ -9,6 +9,9 @@ import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.service.AiclawParticipant;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
+import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
+import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
+import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
@@ -67,6 +70,9 @@ class GroupLifecycleManagerTest {
 	@Mock private TransactionTemplate transactionTemplate;
 	@Mock private ContactDao contactDao;
 	@Mock private AiclawParticipant aiclawParticipant;
+	@Mock private AiclawGroupConfigMapper aiclawGroupConfigMapper;
+	@Mock private AiclawThinkingMapper aiclawThinkingMapper;
+	@Mock private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
 	@Mock private PresenceSyncHelper presenceSyncHelper;
 
 	@InjectMocks
@@ -150,6 +156,11 @@ class GroupLifecycleManagerTest {
 
 		verify(roomService).removeById(ROOM_ID);
 		verify(messageDao).removeByRoomId(ROOM_ID, Collections.EMPTY_LIST);
+		// #182: 解散分支清理 aiclaw 扩展表
+		verify(aiclawGroupConfigMapper).deleteByRoomId(ROOM_ID);
+		verify(aiclawThinkingMsgRelMapper).deleteByRoomId(ROOM_ID);
+		verify(aiclawThinkingMapper).logicDeleteByRoomId(ROOM_ID);
+		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(OWNER, MEMBER));
 		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
 	}
 
@@ -192,5 +203,9 @@ class GroupLifecycleManagerTest {
 		// 端到端到达解散 core（isGroup=true 分支）
 		verify(roomService).removeById(ROOM_ID);
 		verify(messageDao).removeByRoomId(ROOM_ID, Collections.EMPTY_LIST);
+		verify(aiclawGroupConfigMapper).deleteByRoomId(ROOM_ID);
+		verify(aiclawThinkingMsgRelMapper).deleteByRoomId(ROOM_ID);
+		verify(aiclawThinkingMapper).logicDeleteByRoomId(ROOM_ID);
+		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(OWNER, MEMBER));
 	}
 }
