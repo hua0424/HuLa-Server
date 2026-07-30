@@ -56,7 +56,7 @@ public class Room extends TenantEntity<Long> {
     private String extJson;
 
     @JsonIgnore
-    public boolean isHotRoom() {
+    public boolean isHotRoomV2() {
         return HotFlagEnum.of(this.hotFlag) == HotFlagEnum.YES;
     }
 
