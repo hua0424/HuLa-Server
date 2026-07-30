@@ -1,0 +1,32 @@
+name: compile-gate
+
+# 最小编译闸门：双 reactor 全量构建，防止"本地 m2 旧产物掩盖跨模块编译破坏"（#182 事故）。
+# 只做编译：不跑单测、不接 Nacos、不部署。
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 必须根 reactor 全量构建，禁止 -pl 单模块（单模块会复用旧 m2 产物，正是漏检路径）。
+      # 必须 -Dmaven.test.skip=true 而非 -DskipTests：
+      # luohuo-im-biz pom 硬编码 surefire <skip>false</skip>（Testcontainers 集成测试），
+      # CLI -DskipTests 压不住 pom 显式配置，CI 无 docker 会跑挂。
+      - name: Build luohuo-util (full reactor)
+        run: mvn -B -f luohuo-util/pom.xml clean install -Dmaven.test.skip=true
+
+      - name: Build luohuo-cloud (full reactor)
+        run: mvn -B -f luohuo-cloud/pom.xml clean install -Dmaven.test.skip=true
