@@ -37,6 +37,7 @@ import reactor.test.StepVerifier;
 import java.net.ConnectException;
 import java.net.URI;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.luohuo.basic.context.ContextConstants.JWT_KEY_SYSTEM_TYPE;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -334,5 +335,57 @@ class TokenContextFilterImFallbackTest {
 					 && e.getFormattedMessage().contains("upstream unavailable")
 					 && e.getFormattedMessage().contains("prefix=" + PREFIX));
 		assertTrue(hasWarnLog, "应打 WARN 含 'upstream unavailable' 与 prefix");
+	}
+
+	/**
+	 * #184(b) Bug2: handleAiclawTokenFromIm 的 WebClient Mono chain 须 subscribeOn(boundedElastic)。
+	 *
+	 * <p>线上复现：@LoadBalanced WebClient 做 LB resolve 时，HuLa 框架
+	 * {@code GrayscaleVersionRoundRobinLoadBalancer.getInstanceResponse} 调了 {@code Mono.block()}，
+	 * 在 reactor-http-epoll 线程 → {@code IllegalStateException: block() not supported} →
+	 * 被 WebFluxGlobalExceptionHandler 包成 {@code {code:-1,"系统繁忙"}}。
+	 *
+	 * <p>单测里 ExchangeFunction 被 mock，无真实 LB，block() 不会真实触发；但 subscribeOn 是否生效
+	 * 可由下游 chain.filter 的执行线程反映。RED 暴露：若缺 {@code subscribeOn(boundedElastic)}，
+	 * chain.filter 跑在 test/StepVerifier 线程（非 boundedElastic）→ 断言失败。真实 LB block() 的
+	 * 端到端验证在部署 task 10 自愈实测。
+	 */
+	@Test
+	@DisplayName("#184(b) Bug2: handleAiclawTokenFromIm 在 boundedElastic 线程执行（隔离 LB Mono.block）")
+	void handleAiclawTokenFromIm_runsOnBoundedElasticThread() {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
+		stubValueOps(redis);
+
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+				Mono.just(ClientResponse.create(HttpStatus.OK)
+						.header("Content-Type", "application/json")
+						.body("{\"code\":200,\"data\":{\"uid\":123,\"ownerUid\":1,\"tenantId\":1,"
+								+ "\"authStatus\":1,\"machineCode\":\"m1\"}}")
+						.build()));
+
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+		WebFilterChain chain = mock(WebFilterChain.class);
+		AtomicReference<String> chainThread = new AtomicReference<>();
+		when(chain.filter(any())).thenAnswer(inv -> {
+			chainThread.set(Thread.currentThread().getName());
+			return Mono.empty();
+		});
+		ServerWebExchange exchange = newExchange();
+
+		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			StepVerifier.create(filter.filter(exchange, chain))
+					.verifyComplete();
+		}
+
+		String tname = chainThread.get();
+		assertTrue(tname != null && tname.contains("boundedElastic"),
+				"chain.filter 应在 boundedElastic 线程执行（subscribeOn 隔离 LB block），实际线程: " + tname);
 	}
 }
