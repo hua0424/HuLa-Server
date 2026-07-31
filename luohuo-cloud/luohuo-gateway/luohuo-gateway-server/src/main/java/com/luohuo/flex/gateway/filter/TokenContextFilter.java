@@ -11,23 +11,28 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.luohuo.basic.exception.code.ResponseEnum;
 import com.luohuo.flex.common.utils.IPUtils;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+import java.time.Duration;
+import java.util.Map;
 import com.luohuo.basic.base.R;
 import com.luohuo.basic.context.ContextConstants;
 import com.luohuo.basic.context.ContextUtil;
@@ -46,16 +51,37 @@ import static com.luohuo.basic.context.ContextConstants.*;
  */
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class TokenContextFilter implements WebFilter, Ordered {
     private final IgnoreProperties ignoreProperties;
     protected final SaTokenConfig saTokenConfig;
     private final StringRedisTemplate stringRedisTemplate;
+    private final WebClient webClient;
 
     private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
 
     @Value("${spring.profiles.active:dev}")
     protected String profiles;
+
+    /**
+     * #184(a) 方案 B: gateway 缓存缺失时回源 im 的 verify-token 端点。
+     * 走 service discovery (lb://)，不经 gateway 自己的反向代理路由表。
+     */
+    @Value("${luohuo.aiclaw.verify-token-url:lb://luohuo-im-server/aiclaw/anyTenant/verify-token}")
+    private String verifyTokenUrl;
+
+    /**
+     * 显式构造器：disambiguate the {@code @LoadBalanced} {@link WebClient.Builder} bean
+     * (与 Spring Boot 默认 WebClientAutoConfiguration 注册的 builder 区分)。
+     */
+    public TokenContextFilter(IgnoreProperties ignoreProperties,
+                              SaTokenConfig saTokenConfig,
+                              StringRedisTemplate stringRedisTemplate,
+                              @Qualifier("aiclawLbWebClientBuilder") WebClient.Builder webClientBuilder) {
+        this.ignoreProperties = ignoreProperties;
+        this.saTokenConfig = saTokenConfig;
+        this.stringRedisTemplate = stringRedisTemplate;
+        this.webClient = webClientBuilder.build();
+    }
 
     protected boolean isDev(String token) {
         return !StrPool.PROD.equalsIgnoreCase(profiles) && (StrPool.TEST_TOKEN.equalsIgnoreCase(token) || StrPool.TEST.equalsIgnoreCase(token));
@@ -153,33 +179,59 @@ public class TokenContextFilter implements WebFilter, Ordered {
             token = request.getQueryParams().getFirst("token");
         }
 
-        // --- aiclaw token 分支：先查 Redis 前缀，命中则走 aiclaw 校验，否则 fallback SaToken ---
-        if (isAiclawToken(token) && hasAiclawCache(token)) {
-            return handleAiclawToken(token, request, mutate, exchange, chain);
+        // --- aiclaw token 分支：先查 Redis 前缀，命中则走 aiclaw 校验；缺失则 SaToken-first 判别 ---
+        if (isAiclawToken(token)) {
+            if (hasAiclawCache(token)) {
+                return handleAiclawToken(token, request, mutate, exchange, chain);
+            }
+            // #184a P0：isAiclawToken 只是 UUID 格式判别，而 sa-token token-style:uuid 也是 UUID。
+            // 缓存缺失时不能直接落 im（会把正常用户误判为 aiclaw → im 404 → 406 全锁死）。
+            // SaToken-first：先查 SaToken 会话；非空 → 正常用户路径（与原逻辑完全一致）；
+            // sa-token 1.42 对非已注册 token 抛 SaTokenException(11074) → 视作 aiclaw，落 im 回源。
+            SaSession tokenSession;
+            try {
+                tokenSession = StpUtil.getTokenSessionByToken(token);
+            } catch (SaTokenException e) {
+                // sa-token 1.42: tokenSessionCheckLogin=true（默认）下，未注册 token 取 Token-Session 抛 11074
+                tokenSession = null;
+            }
+            if (tokenSession != null) {
+                fillSaTokenUserHeaders(tokenSession, mutate);
+                return null;  // 继续原有 chain（正常用户路径，完全不变）
+            }
+            // 缓存缺失 → 经 WebClient 回源 im internal verify-token（reactive，不阻塞 netty 事件循环）
+            return handleAiclawTokenFromIm(token, request, mutate, exchange, chain);
         }
 
-        // --- 原有 SaToken 逻辑 ---
+        // --- 原有 SaToken 逻辑（非 UUID token）---
         SaSession tokenSession = StpUtil.getTokenSessionByToken(token);
         log.info("{}", tokenSession);
 
         if (tokenSession != null) {
-            Long userId = (Long) tokenSession.getLoginId();
-            long topCompanyId = tokenSession.getLong(JWT_KEY_TOP_COMPANY_ID);
-            long companyId = tokenSession.getLong(JWT_KEY_COMPANY_ID);
-            long deptId = tokenSession.getLong(JWT_KEY_DEPT_ID);
-            long uid = tokenSession.getLong(JWT_KEY_U_ID);
-            long tenantId = tokenSession.getLong(HEADER_TENANT_ID);
-
-			mutate.header(JWT_KEY_SYSTEM_TYPE, tokenSession.getString(JWT_KEY_SYSTEM_TYPE));
-			mutate.header(USER_ID_HEADER, String.valueOf(userId));
-            mutate.header(U_ID_HEADER, String.valueOf(uid));
-            mutate.header(CURRENT_TOP_COMPANY_ID_HEADER, String.valueOf(topCompanyId));
-            mutate.header(CURRENT_COMPANY_ID_HEADER, String.valueOf(companyId));
-            mutate.header(CURRENT_DEPT_ID_HEADER, String.valueOf(deptId));
-            mutate.header(HEADER_TENANT_ID, String.valueOf(tenantId));
+            fillSaTokenUserHeaders(tokenSession, mutate);
         }
 
         return null;
+    }
+
+    /**
+     * 把 SaSession 用户上下文写进下游请求头（原 parseToken 内联块抽出，供 UUID/非 UUID 两条 SaToken 路径复用）。
+     */
+    private void fillSaTokenUserHeaders(SaSession tokenSession, ServerHttpRequest.Builder mutate) {
+        Long userId = (Long) tokenSession.getLoginId();
+        long topCompanyId = tokenSession.getLong(JWT_KEY_TOP_COMPANY_ID);
+        long companyId = tokenSession.getLong(JWT_KEY_COMPANY_ID);
+        long deptId = tokenSession.getLong(JWT_KEY_DEPT_ID);
+        long uid = tokenSession.getLong(JWT_KEY_U_ID);
+        long tenantId = tokenSession.getLong(HEADER_TENANT_ID);
+
+        mutate.header(JWT_KEY_SYSTEM_TYPE, tokenSession.getString(JWT_KEY_SYSTEM_TYPE));
+        mutate.header(USER_ID_HEADER, String.valueOf(userId));
+        mutate.header(U_ID_HEADER, String.valueOf(uid));
+        mutate.header(CURRENT_TOP_COMPANY_ID_HEADER, String.valueOf(topCompanyId));
+        mutate.header(CURRENT_COMPANY_ID_HEADER, String.valueOf(companyId));
+        mutate.header(CURRENT_DEPT_ID_HEADER, String.valueOf(deptId));
+        mutate.header(HEADER_TENANT_ID, String.valueOf(tenantId));
     }
 
     private void parseApplication(ServerHttpRequest request, ServerHttpRequest.Builder mutate) {
@@ -266,6 +318,114 @@ public class TokenContextFilter implements WebFilter, Ordered {
         stringRedisTemplate.expire(cacheKey, java.time.Duration.ofDays(7));
 
         return null; // 继续 filter chain
+    }
+
+    /**
+     * 缓存缺失路径：经 WebClient (lb://) 回源 im internal verify-token 重建缓存。
+     *
+     * <p>全程 reactive 非阻塞，不在 netty 事件循环上 block。im 侧天然鉴权 = BCrypt.checkpw(token, hash)；
+     * 失败路径（record null/bcrypt mismatch/状态异常）im 已 WARN-logged 含 prefix，本侧不再重复打。</p>
+     * <ul>
+     *   <li>im 返回 200 + 身份信息 → 重建 Redis 缓存（setIfAbsent，形态与 im saveTokenCache 一致）→
+     *       写请求头 → 继续 filter chain。</li>
+     *   <li>im 返回 404（token 无效/停用/未激活）→ 永久拒绝，body code = {@link ResponseEnum#JWT_TOKEN_EXCEED} (406)。</li>
+     *   <li>im 返回其他非 2xx → 暂时性失败，body code = 503（plugins 可 transient-retry）。</li>
+     *   <li>im 不可达（ConnectException/Timeout 等 WebClientRequestException）→ 暂时性失败，body code = 503。</li>
+     * </ul>
+     * 失败日志一律只打 token prefix（前 8 位），绝不打完整 token。
+     */
+    private Mono<Void> handleAiclawTokenFromIm(String token, ServerHttpRequest request,
+                                                ServerHttpRequest.Builder mutate,
+                                                ServerWebExchange exchange, WebFilterChain chain) {
+        String prefix = token.substring(0, 8);
+        String cacheKey = AICLAW_TOKEN_CACHE_PREFIX + prefix;
+
+        return webClient.post()
+                .uri(verifyTokenUrl)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("token", token))
+                .retrieve()
+                // 404（token 无效/停用/未激活）→ 永久拒绝，body code = 406；im 已 WARN-logged(prefix)
+                .onStatus(s -> s.value() == 404,
+                        resp -> Mono.error(new UnauthorizedException(
+                                ResponseEnum.JWT_TOKEN_EXCEED.getCode(), "aiclaw token无效")))
+                // 其他 4xx/5xx → 暂时性失败，body code = 503（plugins 可 transient-retry）；retrieve 自动释放 body
+                .onStatus(HttpStatusCode::isError,
+                        resp -> {
+                            log.warn("aiclaw verify-token upstream non-success status={}, prefix={}",
+                                    resp.statusCode().value(), prefix);
+                            return Mono.error(new UnauthorizedException(503, "aiclaw verify-token upstream error"));
+                        })
+                .bodyToMono(String.class)
+                .switchIfEmpty(Mono.error(new UnauthorizedException(503,
+                        "aiclaw verify-token upstream empty body")))
+                .<ServerHttpRequest.Builder>handle((bodyJson, sink) -> {
+                    // P3.2：JSON 解析补 try/catch，im 返回非 JSON → 503 malformed
+                    JSONObject body;
+                    try {
+                        body = JSONUtil.parseObj(bodyJson);
+                    } catch (Exception ex) {
+                        sink.error(new UnauthorizedException(503, "aiclaw verify-token malformed body"));
+                        return;
+                    }
+                    JSONObject data = body.getJSONObject("data");
+                    if (data == null) {
+                        sink.error(new UnauthorizedException(503, "aiclaw verify-token upstream malformed body"));
+                        return;
+                    }
+                    Long uid = data.getLong("uid");
+                    Long ownerUid = data.getLong("ownerUid");
+                    Long tenantId = data.getLong("tenantId") != null ? data.getLong("tenantId") : 1L;
+                    Integer authStatus = data.getInt("authStatus");
+                    String machineCode = data.getStr("machineCode");
+
+                    // P2 tech-debt（reviewer 裁决本轮记债）：setIfAbsent 是阻塞 Redis 调用，与存量 filter 用 blocking
+                    // StringRedisTemplate 一致；未来整体迁 reactive Redis 时一并改。见 PR body。
+                    JSONObject cache = new JSONObject();
+                    cache.set("uid", uid);
+                    cache.set("ownerUid", ownerUid);
+                    cache.set("tenantId", tenantId);
+                    cache.set("authStatus", authStatus);
+                    cache.set("tokenSha256", SecureUtil.sha256(token));
+                    if (StrUtil.isNotBlank(machineCode)) {
+                        cache.set("machineCode", machineCode);
+                    }
+                    stringRedisTemplate.opsForValue().setIfAbsent(
+                            cacheKey, cache.toString(), Duration.ofDays(7));
+                    log.info("aiclaw token cache rebuilt from im, uid={}", uid);
+
+                    // 写下游请求头
+                    mutate.header(U_ID_HEADER, String.valueOf(uid));
+                    mutate.header(USER_ID_HEADER, String.valueOf(uid));
+                    mutate.header(HEADER_TENANT_ID, String.valueOf(tenantId));
+
+                    // 机器码变更检测（与 cache-hit 路径一致）
+                    String clientId = request.getQueryParams().getFirst("clientId");
+                    if (StrUtil.isNotBlank(machineCode) && StrUtil.isNotBlank(clientId)
+                            && !machineCode.equals(clientId)) {
+                        mutate.header("X-Aiclaw-Machine-Changed", "true");
+                        mutate.header("X-Aiclaw-Owner-Uid", String.valueOf(ownerUid));
+                    }
+
+                    // 把 builder 往下传 → chain.filter 移到 onErrorResume 之后运行，
+                    // 下游 chain 抛的 UnauthorizedException 不会被 im-phase 的 resume 误吞为 406（P3.1 核心）
+                    sink.next(mutate);
+                })
+                // im-phase 错误（onStatus/switchIfEmpty/handle 抛的 UnauthorizedException 406/503）落这里：
+                .onErrorResume(UnauthorizedException.class, e ->
+                        errorResponse(exchange.getResponse(), e.getMessage(), e.getCode())
+                                .then(Mono.empty()))
+                .onErrorResume(WebClientRequestException.class, e -> {
+                    log.warn("aiclaw verify-token upstream unavailable, prefix={}", prefix);
+                    return errorResponse(exchange.getResponse(), "aiclaw verify-token 不可达", 503)
+                            .then(Mono.empty());
+                })
+                // chain.filter 只在 im 成功（builder 被 emit）时运行；im 错误已写响应 + empty，不进 flatMap
+                .flatMap(builder -> chain.filter(exchange.mutate().request(builder.build()).build()))
+                .doFinally(s -> {
+                    ContextUtil.remove();
+                    ContextUtil.clearTenantContext();
+                });
     }
 
     protected Mono<Void> errorResponse(ServerHttpResponse response, String errMsg, int errCode) {

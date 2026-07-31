@@ -12,6 +12,7 @@ import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawRelationReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportTypeReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawThinkingByTriggerReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawVerifyTokenReq;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
@@ -19,6 +20,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
@@ -27,6 +29,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -70,6 +74,16 @@ public class AiclawController {
 	@Operation(summary = "激活AI助理（plugins 调用，无需登录态）")
 	public R<AiclawActivateResp> activate(@Valid @RequestBody AiclawActivateReq req) {
 		return R.success(aiclawService.activate(req));
+	}
+
+	@PostMapping("/anyTenant/verify-token")
+	@Operation(summary = "校验 aiclaw connectionToken 并回源重建缓存（gateway 缓存缺失时调用，无需登录态）")
+	public ResponseEntity<R<AiclawTokenInfo>> verifyToken(@Valid @RequestBody AiclawVerifyTokenReq req) {
+		AiclawTokenInfo info = aiclawService.verifyAndCacheToken(req.getToken());
+		if (info != null) {
+			return ResponseEntity.ok(R.success(info));
+		}
+		return ResponseEntity.status(HttpStatus.NOT_FOUND).body(R.fail("aiclaw token无效"));
 	}
 
 	@GetMapping("/list")
