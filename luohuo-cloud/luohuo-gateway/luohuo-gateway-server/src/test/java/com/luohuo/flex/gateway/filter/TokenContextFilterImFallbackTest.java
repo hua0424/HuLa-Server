@@ -4,11 +4,15 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import cn.dev33.satoken.config.SaTokenConfig;
+import cn.dev33.satoken.exception.SaTokenException;
+import cn.dev33.satoken.session.SaSession;
+import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.crypto.SecureUtil;
 import com.luohuo.flex.common.properties.IgnoreProperties;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -34,6 +38,7 @@ import java.net.ConnectException;
 import java.net.URI;
 import java.time.Duration;
 
+import static com.luohuo.basic.context.ContextConstants.JWT_KEY_SYSTEM_TYPE;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -45,13 +50,20 @@ import static org.mockito.Mockito.*;
  *
  * <p>不启动 Spring 上下文；filter 直接用显式构造器实例化，WebClient 注入带 mock
  * {@link ExchangeFunction} 的 builder（{@code WebClient.builder().exchangeFunction(xf).build()}）。
- * 用 {@link StepVerifier} 验证 reactive 链。固化四条契约：
+ * 用 {@link StepVerifier} 验证 reactive 链。固化六条契约：
  * <ol>
- *   <li>缓存缺失 + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain</li>
- *   <li>缓存命中 → 不调 im（WebClient 不 exchange），继续 chain（防回归 cache-hit 路径）</li>
- *   <li>im 返回 404 → body code=406（永久拒绝），chain 不继续</li>
- *   <li>im 不可达（WebClientRequestException）→ body code=503（暂时性），WARN 含 prefix</li>
+ *   <li><b>P0 回归闸</b>：UUID token + SaToken 有效会话 → 走 SaToken 用户路径，im 不被调用（防
+ *       "正常用户 UUID SaToken 被误判 aiclaw → 406 全锁死"）。</li>
+ *   <li>缓存缺失 + SaToken miss + im 返回 404 → body code=406（永久拒绝），chain 不继续。</li>
+ *   <li>缓存缺失 + SaToken miss + im 返回 500 → body code=503（暂时性），WARN 含 status=500。</li>
+ *   <li>缓存缺失 + SaToken miss + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain。</li>
+ *   <li>缓存命中 → 不调 im（也不查 SaToken），继续 chain（cache-hit 路径防回归）。</li>
+ *   <li>缓存缺失 + SaToken miss + im 不可达（WebClientRequestException）→ body code=503（暂时性），WARN 含 prefix。</li>
  * </ol>
+ *
+ * <p>sa-token 1.42：对未注册 token 调 {@code StpUtil.getTokenSessionByToken(token)} 抛
+ * {@link SaTokenException}（code 11074）—— 这正是 aiclaw connectionToken 的真实行为。
+ * 故凡走 im 回源分支的用例，都用 {@code mockStatic(StpUtil.class)} 桩成抛 11074。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -60,6 +72,8 @@ class TokenContextFilterImFallbackTest {
 	private static final String TOKEN = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 	private static final String PREFIX = "aaaaaaaa";
 	private static final String CACHE_KEY = "aiclaw:token:" + PREFIX;
+	private static final int SA_TOKEN_NOT_REGISTERED_CODE = 11074;
+	private static final String SA_TOKEN_NOT_REGISTERED_MSG = "Token-Session 获取失败，token 无效";
 
 	/** 公共桩：tokenName=Authorization；IgnoreProperties 不忽略；opsForValue 返回 mock。 */
 	private TokenContextFilter newFilter(IgnoreProperties ignoreProps, SaTokenConfig saConfig,
@@ -85,8 +99,48 @@ class TokenContextFilterImFallbackTest {
 		return MockServerWebExchange.from(request);
 	}
 
+	// ===== P0 回归闸：UUID token + SaToken 有效会话 → 走用户路径，im 不被调用 =====
 	@Test
-	@DisplayName("缓存缺失 + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain，INFO 含 uid")
+	@DisplayName("P0 闸：UUID token + SaToken 有效会话 → 走 SaToken 用户路径，im 不被调用，chain 继续，body 无 406")
+	void uuidToken_validSaTokenSession_goesSaTokenPath_imNotCalled() {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false); // aiclaw 缓存缺失 → 进 SaToken-first 分支
+		stubValueOps(redis);
+
+		// SaToken 有效会话：getLoginId + getLong(覆盖 5 个字段) + getString(systemType)
+		SaSession session = mock(SaSession.class);
+		lenient().when(session.getLoginId()).thenReturn(456L);
+		lenient().when(session.getLong(anyString())).thenReturn(1L);
+		lenient().when(session.getString(JWT_KEY_SYSTEM_TYPE)).thenReturn("im");
+
+		// xf 应当永不被调（im 路径不触达）
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+				Mono.just(ClientResponse.create(HttpStatus.OK).build()));
+
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+		WebFilterChain chain = mock(WebFilterChain.class);
+		when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		// SaToken-first：返回非空会话 → 走用户路径
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN)).thenReturn(session);
+			StepVerifier.create(filter.filter(exchange, chain))
+					.verifyComplete();
+		}
+
+		verify(xf, never()).exchange(any(ClientRequest.class)); // im 完全没被调
+		verify(chain).filter(any()); // 正常用户路径继续 chain
+		// P0 闸：正常用户路径不应写任何错误响应（response 未 commit = 没有 406/503 body）
+		assertTrue(!((MockServerWebExchange) exchange).getResponse().isCommitted(),
+				"P0 回归：SaToken 有效会话的正常用户绝不能被写 406/错误响应");
+	}
+
+	@Test
+	@DisplayName("缓存缺失 + SaToken miss + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain，INFO 含 uid")
 	void cacheMiss_imReturnsInfo_rebuildsCacheAndContinuesChain() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
@@ -112,8 +166,13 @@ class TokenContextFilterImFallbackTest {
 		log.addAppender(appender);
 		appender.start();
 
-		StepVerifier.create(filter.filter(exchange, chain))
-				.verifyComplete();
+		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			StepVerifier.create(filter.filter(exchange, chain))
+					.verifyComplete();
+		}
 
 		appender.stop();
 		verify(valueOps).setIfAbsent(eq(CACHE_KEY), anyString(), any(Duration.class));
@@ -137,6 +196,7 @@ class TokenContextFilterImFallbackTest {
 				+ "\"tokenSha256\":\"" + SecureUtil.sha256(TOKEN) + "\",\"machineCode\":\"m1\"}";
 		when(valueOps.get(CACHE_KEY)).thenReturn(cachedJson);
 
+		// cache-hit 路径在 StpUtil 之前 return（handleAiclawToken），无需 mockStatic
 		ExchangeFunction xf = mock(ExchangeFunction.class);
 		when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.just(ClientResponse.create(HttpStatus.OK).build()));
@@ -154,8 +214,8 @@ class TokenContextFilterImFallbackTest {
 	}
 
 	@Test
-	@DisplayName("缓存缺失 + im 返回 404 → body code=406（永久拒绝），chain 不继续")
-	void cacheMiss_imReturns404_returns406Permanent() {
+	@DisplayName("SaToken miss + im 返回 404 → body code=406（永久拒绝），chain 不继续")
+	void aiclawToken_saTokenMiss_imReturns404_returns406Permanent() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
@@ -173,17 +233,66 @@ class TokenContextFilterImFallbackTest {
 		when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
-		StepVerifier.create(filter.filter(exchange, chain)
-				.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
-				.assertNext(body -> assertTrue(body.contains("\"code\":406"),
-						"404 应映射为永久拒绝 body code=406"))
-				.verifyComplete();
+		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源 → 404 → 406
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			StepVerifier.create(filter.filter(exchange, chain)
+					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+					.assertNext(body -> assertTrue(body.contains("\"code\":406"),
+							"404 应映射为永久拒绝 body code=406"))
+					.verifyComplete();
+		}
 
 		verify(chain, never()).filter(any());
 	}
 
 	@Test
-	@DisplayName("缓存缺失 + im 不可达(WebClientRequestException) → body code=503（暂时性），WARN 含 prefix")
+	@DisplayName("缓存缺失 + SaToken miss + im 返回 500 → body code=503（暂时性），WARN 含 status=500 与 prefix")
+	void cacheMiss_saTokenMiss_imReturns500_returns503Transient() {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
+
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+				Mono.just(ClientResponse.create(HttpStatus.INTERNAL_SERVER_ERROR)
+						.body("")
+						.build()));
+
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+		WebFilterChain chain = mock(WebFilterChain.class);
+		when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		ListAppender<ILoggingEvent> appender = new ListAppender<>();
+		Logger log = (Logger) LoggerFactory.getLogger(TokenContextFilter.class);
+		log.addAppender(appender);
+		appender.start();
+
+		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源 → 500 → 503
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			StepVerifier.create(filter.filter(exchange, chain)
+					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+					.assertNext(body -> assertTrue(body.contains("\"code\":503"),
+							"500 应映射为暂时性 body code=503"))
+					.verifyComplete();
+		}
+
+		appender.stop();
+		verify(chain, never()).filter(any());
+		boolean hasWarnLog = appender.list.stream()
+				.anyMatch(e -> e.getLevel().toString().equals("WARN")
+					 && e.getFormattedMessage().contains("non-success status=500")
+					 && e.getFormattedMessage().contains("prefix=" + PREFIX));
+		assertTrue(hasWarnLog, "应打 WARN 含 'non-success status=500' 与 prefix");
+	}
+
+	@Test
+	@DisplayName("缓存缺失 + SaToken miss + im 不可达(WebClientRequestException) → body code=503（暂时性），WARN 含 prefix")
 	void cacheMiss_imUnavailable_returns503Transient() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
@@ -207,11 +316,16 @@ class TokenContextFilterImFallbackTest {
 		log.addAppender(appender);
 		appender.start();
 
-		StepVerifier.create(filter.filter(exchange, chain)
-				.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
-				.assertNext(body -> assertTrue(body.contains("\"code\":503"),
-						"不可达应映射为暂时性 body code=503"))
-				.verifyComplete();
+		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源 → 不可达 → 503
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			StepVerifier.create(filter.filter(exchange, chain)
+					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+					.assertNext(body -> assertTrue(body.contains("\"code\":503"),
+							"不可达应映射为暂时性 body code=503"))
+					.verifyComplete();
+		}
 
 		appender.stop();
 		verify(chain, never()).filter(any());
