@@ -183,6 +183,12 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- #184(a): reactor-test 用于 StepVerifier 验证 WebClient reactive 回源链 -->
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -190,6 +196,15 @@
             <filter>../../src/main/filters/config-${profile.active}.properties</filter>
         </filters>
         <plugins>
+            <!-- #184(a): 覆盖父 BOM 的 surefire skip=true，启用本模块测试执行 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <skip>false</skip>
+                    <skipTests>false</skipTests>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

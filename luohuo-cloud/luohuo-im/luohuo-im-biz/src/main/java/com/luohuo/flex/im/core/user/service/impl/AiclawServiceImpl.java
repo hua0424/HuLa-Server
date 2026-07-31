@@ -39,6 +39,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import com.luohuo.flex.model.enums.ChatActiveStatusEnum;
@@ -616,6 +617,50 @@ public class AiclawServiceImpl implements AiclawService {
 		if (!expired.isEmpty()) {
 			log.info("purged {} expired aiclaw(s)", expired.size());
 		}
+	}
+
+	// ==================== Token 回源校验（gateway 缓存缺失时调用） ====================
+
+	@Override
+	public AiclawTokenInfo verifyAndCacheToken(String connectionToken) {
+		if (StrUtil.isBlank(connectionToken) || connectionToken.length() < 8) {
+			log.warn("verify-token rejected: blank/short token");
+			return null;
+		}
+		String prefix = connectionToken.substring(0, 8);
+		Aiclaw record = aiclawDao.getByTokenPrefix(prefix);
+		if (record == null) {
+			// 包含 is_del=1 的已删除行 —— getByTokenPrefix 用 lambdaQuery，@TableLogic 自动过滤
+			log.warn("verify-token rejected: record not found, prefix={}", prefix);
+			return null;
+		}
+		// 天然鉴权：bcrypt 校验明文 token。prefix 索引定位 + bcrypt 抵御暴力破解
+		if (!BCrypt.checkpw(connectionToken, record.getTokenHash())) {
+			log.warn("verify-token rejected: bcrypt mismatch, prefix={}", prefix);
+			return null;
+		}
+		if (record.getAuthStatus() == null || record.getAuthStatus() != 1) {
+			log.warn("verify-token rejected: authStatus={}, prefix={}", record.getAuthStatus(), prefix);
+			return null;
+		}
+		if (record.getDeactivatedAt() != null) {
+			log.warn("verify-token rejected: deactivated, prefix={}", prefix);
+			return null;
+		}
+		// 通过 → 重建缓存（形态与 saveTokenCache 完全一致）
+		Long uid = record.getUid();
+		Long ownerUid = record.getOwnerUid();
+		Long tenantId = record.getTenantId() != null ? record.getTenantId() : 1L;
+		saveTokenCache(prefix, uid, ownerUid, SecureUtil.sha256(connectionToken),
+				record.getMachineCode(), record.getAuthStatus());
+		log.info("verify-token cache rebuilt, uid={}, prefix={}", uid, prefix);
+		return AiclawTokenInfo.builder()
+				.uid(uid)
+				.ownerUid(ownerUid)
+				.authStatus(record.getAuthStatus())
+				.tenantId(tenantId)
+				.machineCode(record.getMachineCode())
+				.build();
 	}
 
 	// ==================== 内部方法 ====================

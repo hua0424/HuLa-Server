@@ -11,6 +11,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 
@@ -108,4 +109,16 @@ public interface AiclawService {
 	 * 彻底注销已超过 24h 的停用 aiclaw（定时任务调用）
 	 */
 	void purgeExpiredDeactivated();
+
+	/**
+	 * 校验 aiclaw connectionToken 并回源重建 Redis 缓存（gateway 缓存缺失时调用，无需登录态）。
+	 *
+	 * <p>天然鉴权 = {@code BCrypt.checkpw(connectionToken, tokenHash)}：只有持有效 connectionToken
+	 * 的请求才能通过。prefix 索引快速定位记录，bcrypt 抵御暴力破解。
+	 *
+	 * @param connectionToken 明文连接 token
+	 * @return 身份信息；记录不存在 / bcrypt 不匹配 / 已停用 / 已删除(is_del 被 @TableLogic 自动过滤) /
+	 *         authStatus≠1 时返回 null（并打 WARN 含 token prefix，绝不打完整 token）
+	 */
+	AiclawTokenInfo verifyAndCacheToken(String connectionToken);
 }
