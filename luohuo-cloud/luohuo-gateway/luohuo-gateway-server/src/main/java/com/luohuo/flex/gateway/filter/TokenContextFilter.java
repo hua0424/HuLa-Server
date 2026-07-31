@@ -31,6 +31,7 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import java.time.Duration;
 import java.util.Map;
 import com.luohuo.basic.base.R;
@@ -422,6 +423,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
                 })
                 // chain.filter 只在 im 成功（builder 被 emit）时运行；im 错误已写响应 + empty，不进 flatMap
                 .flatMap(builder -> chain.filter(exchange.mutate().request(builder.build()).build()))
+                // #184(b) Bug2: @LoadBalanced WebClient LB resolve 时框架 GrayscaleVersionRoundRobinLoadBalancer
+                // 调了 Mono.block()，须隔离到 boundedElastic（允许 block），否则在 reactor-http-epoll 线程
+                // → IllegalStateException: block() not supported → 被全局异常处理包成 "系统繁忙"。
+                // subscribeOn 订阅时生效，netty IO 回调仍走 netty 线程，不受影响。
+                .subscribeOn(Schedulers.boundedElastic())
                 .doFinally(s -> {
                     ContextUtil.remove();
                     ContextUtil.clearTenantContext();

@@ -200,4 +200,41 @@ class AiclawVerifyTokenServiceImplTest {
 		verify(aiclawDao, never()).getByTokenPrefix(anyString());
 		verify(stringRedisTemplate, never()).opsForValue();
 	}
+
+	/**
+	 * #184(b) Bug1: verifyAndCacheToken 走 anyTenant 路径，必须在查 mapper 前设置租户上下文。
+	 *
+	 * <p>线上复现：verify-token 接口无登录态、无租户上下文，而 im_aiclaw 的 mapper 租户拦截器
+	 * 在 SQL 执行点检查 {@code ContextUtil.getTenantId()} → 缺则 NPE「ContextUtil 不存在租户编号」。
+	 * 单测里 mapper 被 @Mock，租户拦截器不会真实触发；故本用例在 mapper 桩的 Answer 里镜像拦截器
+	 * 的检查点：在 {@code getByTokenPrefix} 被调瞬间读 {@code ContextUtil.getTenantId()} 并断言=1L。
+	 *
+	 * <p>RED 暴露：若 verifyAndCacheToken 缺 {@code setTenantId(1L)}，本用例 Answer 读到 null →
+	 * assertEquals 失败（单测层即复现 bug 条件，非纯行为验证）。真实 mybatis-plus 拦截器抛 NPE 的
+	 * 端到端验证在部署 task 10 自愈实测。
+	 */
+	@Test
+	@DisplayName("#184(b) Bug1: verifyAndCacheToken 在查 mapper 前设置租户上下文（镜像拦截器检查点）")
+	void verifyAndCacheToken_setsTenantContextBeforeMapperCall() {
+		// 模拟 prod anyTenant 入口：调用前线程无租户上下文（防其他用例 ThreadLocal 泄漏干扰）
+		com.luohuo.basic.context.ContextUtil.clearTenantContext();
+		assertNull(com.luohuo.basic.context.ContextUtil.getTenantId(),
+				"前置：调用前应无租户上下文");
+
+		Aiclaw record = validRecord();
+		// Answer 在 mapper 调用瞬间读 ContextUtil —— 镜像 prod 租户拦截器的检查时机
+		when(aiclawDao.getByTokenPrefix(PREFIX)).thenAnswer(inv -> {
+			Long tenantAtCall = com.luohuo.basic.context.ContextUtil.getTenantId();
+			assertEquals(1L, tenantAtCall,
+					"mapper 调用时必须已有租户上下文（缺 setTenantId → 租户拦截器 NPE：不存在租户编号）");
+			return record;
+		});
+		stubValueOps();
+
+		AiclawTokenInfo info = aiclawService.verifyAndCacheToken(TOKEN);
+
+		assertNotNull(info);
+		// 清理：避免本用例 setTenantId 残留 ThreadLocal 影响后续用例（im 侧 verifyAndCacheToken 无清理逻辑）
+		com.luohuo.basic.context.ContextUtil.clearTenantContext();
+	}
 }

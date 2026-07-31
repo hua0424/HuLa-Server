@@ -623,6 +623,9 @@ public class AiclawServiceImpl implements AiclawService {
 
 	@Override
 	public AiclawTokenInfo verifyAndCacheToken(String connectionToken) {
+		// anyTenant 路径无 tenant context，手动设置默认租户（与 activate 一致；
+		// 缺则 im_aiclaw mapper 的租户拦截器取不到租户 → NPE: ContextUtil 不存在租户编号）
+		com.luohuo.basic.context.ContextUtil.setTenantId(1L);
 		if (StrUtil.isBlank(connectionToken) || connectionToken.length() < 8) {
 			log.warn("verify-token rejected: blank/short token");
 			return null;
