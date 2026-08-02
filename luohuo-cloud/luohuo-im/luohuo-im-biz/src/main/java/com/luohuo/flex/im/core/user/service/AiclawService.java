@@ -11,6 +11,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawPersonaResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
@@ -79,6 +80,15 @@ public interface AiclawService {
 	 * 设置 aiclaw 对外人设（系统 prompt）
 	 */
 	void setPersona(Long aiclawUid, String publicPersona, Long ownerUid);
+
+	/**
+	 * 获取本人设（aiclaw 自作用域，#188 F2：连接/重连时拉取，是人设正确性的基础路径）
+	 *
+	 * @param uid caller 自身 uid（来自 aiclaw connectionToken 认证身份）
+	 * @return 人设（publicPersona 为 null 时透传 null，表示未设置/已清空）
+	 * @throws com.luohuo.basic.exception.BizException aiclaw 不存在时抛出
+	 */
+	AiclawPersonaResp getSelfPersona(Long uid);
 
 	/**
 	 * 获取 aiclaw 的对话列表（按好友分组，含最后一条消息）

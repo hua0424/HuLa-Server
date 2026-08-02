@@ -121,4 +121,14 @@ public class WsAdapter {
 		wsBaseResp.setData(change);
 		return wsBaseResp;
 	}
+
+	/**
+	 * #188 F2: aiclaw 人设变更 WS 推送（失效通知；plugins 收到后应重拉 self/persona）
+	 */
+	public static WsBaseResp<WSAiclawPersonaChanged> buildAiclawPersonaChanged(WSAiclawPersonaChanged change) {
+		WsBaseResp<WSAiclawPersonaChanged> wsBaseResp = new WsBaseResp<>();
+		wsBaseResp.setType(WSRespTypeEnum.AICLAW_PERSONA_CHANGED.getType());
+		wsBaseResp.setData(change);
+		return wsBaseResp;
+	}
 }

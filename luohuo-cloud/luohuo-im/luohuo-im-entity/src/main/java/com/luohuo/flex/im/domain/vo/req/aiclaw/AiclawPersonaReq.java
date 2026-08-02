@@ -10,7 +10,7 @@ import lombok.NoArgsConstructor;
 import java.io.Serializable;
 
 /**
- * 设置 aiclaw 对外人设请求
+ * 设置 aiclaw 人设请求
  */
 @Data
 @AllArgsConstructor
@@ -18,7 +18,7 @@ import java.io.Serializable;
 public class AiclawPersonaReq implements Serializable {
 
 	@NotNull(message = "publicPersona 不能为 null")
-	@Size(max = 500, message = "对外人设不能超过 500 字符")
-	@Schema(description = "对外人设文本，空串表示清除")
+	@Size(max = 500, message = "人设不能超过 500 字符")
+	@Schema(description = "人设文本，空串表示清除")
 	private String publicPersona;
 }
