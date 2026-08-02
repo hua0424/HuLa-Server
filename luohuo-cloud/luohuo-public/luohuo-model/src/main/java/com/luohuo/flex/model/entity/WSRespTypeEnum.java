@@ -75,6 +75,7 @@ public enum WSRespTypeEnum {
 	GROUP_CONFIG_CHANGE("groupConfigChange", "群配置变更", WSGroupConfigChange.class),
 
 	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class),
+	AICLAW_PERSONA_CHANGED("aiclawPersonaChanged", "AI助理人设变更", WSAiclawPersonaChanged.class),
     ;
 
     private final String type;

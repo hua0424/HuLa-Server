@@ -20,6 +20,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawPersonaResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
@@ -100,6 +101,13 @@ public class AiclawController {
 		return R.success();
 	}
 
+	@GetMapping("/self/persona")
+	@Operation(summary = "获取本人设（aiclaw 自作用域）")
+	public R<AiclawPersonaResp> getSelfPersona() {
+		// 自作用域：uid 来自 aiclaw connectionToken 认证身份，只能拉取自己的人设
+		return R.success(aiclawService.getSelfPersona(ContextUtil.getUid()));
+	}
+
 	@GetMapping("/{uid}/activation-token")
 	@Operation(summary = "获取激活 token（未激活时可查看）")
 	public R<AiclawTokenResp> getActivationToken(@PathVariable Long uid) {
@@ -134,7 +142,7 @@ public class AiclawController {
 	}
 
 	@PutMapping("/{uid}/persona")
-	@Operation(summary = "设置AI助理对外人设")
+	@Operation(summary = "设置AI助理人设")
 	public R<Void> setPersona(@PathVariable Long uid, @Valid @RequestBody AiclawPersonaReq req) {
 		aiclawService.setPersona(uid, req.getPublicPersona(), ContextUtil.getUid());
 		return R.success();

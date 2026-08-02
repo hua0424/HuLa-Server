@@ -62,6 +62,7 @@ class AiclawServiceImplTest {
 	@Mock private AiclawCryptoService cryptoService;
 	@Mock private AiclawOwnerCache aiclawOwnerCache;
 	@Mock private StringRedisTemplate stringRedisTemplate;
+	@Mock private PushService pushService;
 
 	@InjectMocks
 	private AiclawServiceImpl aiclawService;
@@ -203,6 +204,114 @@ class AiclawServiceImplTest {
 		// 失败要 LOUD：不得写库、不得刷缓存
 		verify(aiclawDao, never()).updateById(any());
 		verify(aiclawOwnerCache, never()).refresh(any());
+	}
+
+	// ==================== #188 T1: updateProfile 缓存失效 ====================
+
+	private static final Long OWNER_UID = 200L;
+
+	private Aiclaw ownedAiclaw() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setId(1L);
+		when(aiclawDao.getByOwnerAndUid(OWNER_UID, AICLAW_UID)).thenReturn(aiclaw);
+		return aiclaw;
+	}
+
+	@Test
+	@DisplayName("updateProfile: 落库后必须删除 userSummaryCache（否则好友列表/消息读到陈旧名称/头像/简介）")
+	void updateProfile_invalidatesUserSummaryCache() {
+		ownedAiclaw();
+		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
+				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
+						.uid(AICLAW_UID)
+						.name("新名字")
+						.build();
+
+		aiclawService.updateProfile(req, OWNER_UID);
+
+		verify(userDao).updateById(any());
+		verify(userSummaryCache, times(1)).delete(AICLAW_UID);
+	}
+
+	// ==================== #188 T2: 自作用域拉取 getSelfPersona ====================
+
+	@Test
+	@DisplayName("getSelfPersona: aiclaw 存在且有人设 → 返回其人设")
+	void getSelfPersona_existingWithPersona_returnsPersona() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setPublicPersona("你是一个严谨的助手");
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(aiclaw);
+
+		com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawPersonaResp resp =
+				aiclawService.getSelfPersona(AICLAW_UID);
+
+		assertNotNull(resp);
+		assertEquals("你是一个严谨的助手", resp.getPublicPersona());
+	}
+
+	@Test
+	@DisplayName("getSelfPersona: 人设为 null（未设置/已清空）→ null 透传，不报错")
+	void getSelfPersona_nullPersona_passesThroughNull() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setPublicPersona(null);
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(aiclaw);
+
+		com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawPersonaResp resp =
+				aiclawService.getSelfPersona(AICLAW_UID);
+
+		assertNotNull(resp);
+		assertNull(resp.getPublicPersona());
+	}
+
+	@Test
+	@DisplayName("getSelfPersona: aiclaw 不存在 → 抛 BizException(\"AI助理不存在\")")
+	void getSelfPersona_notFound_throwsBizException() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(null);
+
+		BizException ex = assertThrows(BizException.class,
+				() -> aiclawService.getSelfPersona(AICLAW_UID));
+		assertTrue(ex.getMessage().contains("AI助理不存在"));
+	}
+
+	// ==================== #188 T3: setPersona WS 失效推送 ====================
+
+	@Test
+	@DisplayName("setPersona: 落库后向该 aiclaw 推送 aiclawPersonaChanged 帧（低延迟失效优化）")
+	@SuppressWarnings("unchecked")
+	void setPersona_pushesInvalidationFrame() {
+		ownedAiclaw();
+
+		aiclawService.setPersona(AICLAW_UID, "新人设", OWNER_UID);
+
+		ArgumentCaptor<com.luohuo.flex.model.entity.WsBaseResp> msgCaptor =
+				ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+		ArgumentCaptor<java.util.List<Long>> listCaptor = ArgumentCaptor.forClass(java.util.List.class);
+		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(OWNER_UID));
+
+		com.luohuo.flex.model.entity.WsBaseResp<?> frame = msgCaptor.getValue();
+		assertEquals("aiclawPersonaChanged", frame.getType(), "帧类型应为 aiclawPersonaChanged");
+		assertTrue(frame.getData() instanceof com.luohuo.flex.model.entity.ws.WSAiclawPersonaChanged,
+				"帧载荷应为 WSAiclawPersonaChanged");
+		com.luohuo.flex.model.entity.ws.WSAiclawPersonaChanged data =
+				(com.luohuo.flex.model.entity.ws.WSAiclawPersonaChanged) frame.getData();
+		assertEquals(String.valueOf(AICLAW_UID), data.getAiclawUid(),
+				"aiclawUid 应以 String 承载（防 JS 精度丢失）");
+		assertTrue(listCaptor.getValue().contains(AICLAW_UID), "推送目标应含该 aiclawUid");
+	}
+
+	@Test
+	@DisplayName("setPersona: 清空人设（空串→存 null）也必须推送失效帧")
+	void setPersona_clearPersona_alsoPushes() {
+		ownedAiclaw();
+
+		aiclawService.setPersona(AICLAW_UID, "", OWNER_UID);
+
+		// 清空语义：落库存 null
+		ArgumentCaptor<Aiclaw> aiclawCaptor = ArgumentCaptor.forClass(Aiclaw.class);
+		verify(aiclawDao).updateById(aiclawCaptor.capture());
+		assertNull(aiclawCaptor.getValue().getPublicPersona(), "空串应落库为 null");
+		// 失效推送不省略——plugins 必须得知人设已清空
+		verify(pushService, times(1)).sendPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
 	}
 
 	@Test

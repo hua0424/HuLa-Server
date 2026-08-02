@@ -81,7 +81,7 @@ public class ChatMessageResp implements Serializable {
 		private String senderName;
 		@Schema(description = "是否为 aiclaw 的 owner")
 		private Boolean isOwner;
-		@Schema(description = "对外人设（系统 prompt）")
+		@Schema(description = "人设（系统 prompt）")
 		private String publicPersona;
 		@Schema(description = "关系说明")
 		private String relationDesc;

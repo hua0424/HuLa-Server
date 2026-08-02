@@ -20,6 +20,7 @@ import com.luohuo.flex.im.core.user.service.AiclawService;
 import com.luohuo.flex.im.core.user.service.FriendService;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.Message;
@@ -39,9 +40,11 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCreateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawPersonaResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
+import com.luohuo.flex.model.entity.ws.WSAiclawPersonaChanged;
 import com.luohuo.flex.model.enums.ChatActiveStatusEnum;
 import com.luohuo.flex.im.enums.UserTypeEnum;
 import lombok.AllArgsConstructor;
@@ -77,6 +80,7 @@ public class AiclawServiceImpl implements AiclawService {
 	private final AiclawCryptoService cryptoService;
 	private final AiclawOwnerCache aiclawOwnerCache;
 	private final StringRedisTemplate stringRedisTemplate;
+	private final PushService pushService;
 
 	private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
 	private static final Duration TOKEN_CACHE_TTL = Duration.ofDays(7);
@@ -347,6 +351,21 @@ public class AiclawServiceImpl implements AiclawService {
 			update.setResume(req.getDescription());
 		}
 		userDao.updateById(update);
+		// #188 F1: name/avatar/description 改了必须失效用户摘要缓存，
+		// 否则好友列表/消息渲染继续读到陈旧资料（对齐 UserServiceImpl.refreshIpInfo 既有模式）
+		userSummaryCache.delete(aiclaw.getUid());
+	}
+
+	@Override
+	public AiclawPersonaResp getSelfPersona(Long uid) {
+		// 自作用域：uid 来自认证身份（connectionToken），只能读自己，无需 owner 校验
+		Aiclaw aiclaw = aiclawDao.getByUid(uid);
+		if (aiclaw == null) {
+			throw new BizException("AI助理不存在");
+		}
+		return AiclawPersonaResp.builder()
+				.publicPersona(aiclaw.getPublicPersona())
+				.build();
 	}
 
 	@Override
@@ -356,6 +375,14 @@ public class AiclawServiceImpl implements AiclawService {
 		update.setId(aiclaw.getId());
 		update.setPublicPersona(publicPersona.isEmpty() ? null : publicPersona);
 		aiclawDao.updateById(update);
+		// #188 F2: WS 失效推送是低延迟优化——通知 plugins 人设已变（含清空），
+		// 正确性基础是连接/重连时拉取 self/persona，推送丢失由重连拉取兜底。
+		// 对齐群配置变更推送模式（AiclawGroupConfigServiceImpl.updateConfig）。
+		pushService.sendPushMsg(
+				WsAdapter.buildAiclawPersonaChanged(WSAiclawPersonaChanged.builder()
+						.aiclawUid(String.valueOf(aiclawUid))
+						.build()),
+				Collections.singletonList(aiclawUid), ownerUid);
 		log.info("aiclaw persona updated: uid={}", aiclawUid);
 	}
 
