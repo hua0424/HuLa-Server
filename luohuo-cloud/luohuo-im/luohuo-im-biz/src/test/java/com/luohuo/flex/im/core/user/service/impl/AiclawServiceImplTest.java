@@ -306,12 +306,65 @@ class AiclawServiceImplTest {
 
 		aiclawService.setPersona(AICLAW_UID, "", OWNER_UID);
 
-		// 清空语义：落库存 null
-		ArgumentCaptor<Aiclaw> aiclawCaptor = ArgumentCaptor.forClass(Aiclaw.class);
-		verify(aiclawDao).updateById(aiclawCaptor.capture());
-		assertNull(aiclawCaptor.getValue().getPublicPersona(), "空串应落库为 null");
+		// 清空语义：走 LambdaUpdateWrapper 显式 set（updateById 的 NOT_NULL 策略会吞掉 null 列）
+		verify(aiclawDao).update(any(LambdaUpdateWrapper.class));
 		// 失效推送不省略——plugins 必须得知人设已清空
 		verify(pushService, times(1)).sendPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
+	}
+
+	// ==================== #188 P1: setPersona 清空人设必须真正落库 ====================
+
+	/**
+	 * 捕获 setPersona 传给 {@code aiclawDao.update(...)} 的 LambdaUpdateWrapper。
+	 */
+	@SuppressWarnings("unchecked")
+	private LambdaUpdateWrapper<Aiclaw> capturePersonaUpdateWrapper() {
+		ArgumentCaptor<LambdaUpdateWrapper<Aiclaw>> captor =
+				ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+		verify(aiclawDao).update(captor.capture());
+		return captor.getValue();
+	}
+
+	@Test
+	@DisplayName("#188 P1 setPersona: 清空人设 → UPDATE 显式含 public_persona=null（NOT_NULL 策略吞 null 列的回归证据）")
+	void setPersona_clearPersona_updateSqlExplicitlySetsNull() {
+		ownedAiclaw();
+
+		aiclawService.setPersona(AICLAW_UID, "", OWNER_UID);
+
+		LambdaUpdateWrapper<Aiclaw> wrapper = capturePersonaUpdateWrapper();
+		// 关键断言：SET 子句必须显式出现 public_persona 列、且其绑定值为 null。
+		// updateById + 全局 NOT_NULL 策略会把 null 列整个排除出 UPDATE（静默无效），
+		// 只有显式 .set(col, null) 才会把 public_persona 保留在 SET 中。
+		String sqlSet = wrapper.getSqlSet();
+		assertTrue(sqlSet.contains("public_persona="),
+				"清空人设必须把 public_persona 显式留在 SET 子句，实际 SET: " + sqlSet);
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(null),
+				"public_persona 的绑定值必须为 null（显式清空），实际参数: "
+						+ wrapper.getParamNameValuePairs());
+		assertTrue(wrapper.getTargetSql().contains("uid"), "更新应按 uid 定位行");
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(AICLAW_UID),
+				"应只更新传入 uid 的行");
+		// 清空也要推送失效帧（plugins 重拉拿到 null）
+		verify(pushService, times(1)).sendPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
+	}
+
+	@Test
+	@DisplayName("#188 P1 setPersona: 非空人设走同一 LambdaUpdateWrapper 且 SET 含设定值")
+	void setPersona_nonEmptyPersona_updateSqlSetsValue() {
+		ownedAiclaw();
+
+		aiclawService.setPersona(AICLAW_UID, "新人设", OWNER_UID);
+
+		LambdaUpdateWrapper<Aiclaw> wrapper = capturePersonaUpdateWrapper();
+		assertTrue(wrapper.getSqlSet().contains("public_persona"),
+				"更新应作用于 public_persona 列，实际 SET: " + wrapper.getSqlSet());
+		assertTrue(wrapper.getParamNameValuePairs().containsValue("新人设"),
+				"应把 public_persona 设为传入值");
+		// 物化 WHERE 子句，确保 eq 条件绑定参数落进 paramNameValuePairs
+		assertTrue(wrapper.getTargetSql().contains("uid"), "更新应按 uid 定位行");
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(AICLAW_UID),
+				"应只更新传入 uid 的行");
 	}
 
 	@Test
