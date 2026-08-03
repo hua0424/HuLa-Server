@@ -371,10 +371,12 @@ public class AiclawServiceImpl implements AiclawService {
 	@Override
 	public void setPersona(Long aiclawUid, String publicPersona, Long ownerUid) {
 		Aiclaw aiclaw = getOwnedAiclaw(aiclawUid, ownerUid);
-		Aiclaw update = new Aiclaw();
-		update.setId(aiclaw.getId());
-		update.setPublicPersona(publicPersona.isEmpty() ? null : publicPersona);
-		aiclawDao.updateById(update);
+		// #188 P1: 清空人设（null）必须显式 set——updateById 的全局 NOT_NULL 策略会把 null 列
+		// 排除出 UPDATE，导致清空静默不落库。对齐 reportAgentType 的 LambdaUpdateWrapper 模式。
+		LambdaUpdateWrapper<Aiclaw> update = new LambdaUpdateWrapper<Aiclaw>()
+				.eq(Aiclaw::getUid, aiclawUid)
+				.set(Aiclaw::getPublicPersona, publicPersona.isEmpty() ? null : publicPersona);
+		aiclawDao.update(update);
 		// #188 F2: WS 失效推送是低延迟优化——通知 plugins 人设已变（含清空），
 		// 正确性基础是连接/重连时拉取 self/persona，推送丢失由重连拉取兜底。
 		// 对齐群配置变更推送模式（AiclawGroupConfigServiceImpl.updateConfig）。
