@@ -37,4 +37,7 @@ public class AiclawFriendResp implements Serializable {
 
 	@Schema(description = "关系说明，null 表示未设置")
 	private String relationDesc;
+
+	@Schema(description = "与该好友单聊的 workspace 目录（#193，server 由 workspaceBase 推导：workspaceBase/aiclawUid/dm/friendUid；null=该 aiclaw 未上报 workspaceBase）")
+	private String dmWorkspaceDir;
 }

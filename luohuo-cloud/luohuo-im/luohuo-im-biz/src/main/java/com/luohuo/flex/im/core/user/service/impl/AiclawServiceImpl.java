@@ -30,6 +30,7 @@ import com.luohuo.flex.im.domain.entity.UserFriend;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportHostInfoReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
@@ -297,6 +298,10 @@ public class AiclawServiceImpl implements AiclawService {
 
 		return aiclaws.stream().map(a -> {
 			User u = userMap.get(a.getUid());
+			// #193: 从 adapter_config 解析上报的主机信息；workspaceBase 缺失时目录字段为 null。
+			// 目录用简单字符串拼接 "/"，不归一分隔符（对齐 plugins deriveWorkspaceDir 钉死的注记）。
+			JSONObject config = parseAdapterConfig(a.getAdapterConfig());
+			String workspaceBase = config.getStr("workspaceBase");
 			return AiclawListResp.builder()
 					.uid(a.getUid())
 					.name(u != null ? u.getName() : null)
@@ -308,6 +313,10 @@ public class AiclawServiceImpl implements AiclawService {
 							: ChatActiveStatusEnum.OFFLINE.getStatus())
 					.adapterType(a.getAdapterType())
 					.publicPersona(a.getPublicPersona())
+					.hostname(config.getStr("hostname"))
+					.ip(config.getStr("ip"))
+					.ownerWorkspaceDir(StrUtil.isNotBlank(workspaceBase)
+							? workspaceBase + "/" + a.getUid() + "/owner" : null)
 					.createTime(a.getCreateTime())
 					.build();
 		}).collect(Collectors.toList());
@@ -333,6 +342,54 @@ public class AiclawServiceImpl implements AiclawService {
 		// 刷新主人关系缓存（保持缓存与 DB 一致；该缓存未直接承载 adapter_type，但 refresh 安全无副作用）
 		aiclawOwnerCache.refresh(uid);
 		log.info("reportAgentType: uid={}, adapterType {} -> {}", uid, aiclaw.getAdapterType(), agentType);
+	}
+
+	@Override
+	@Transactional(rollbackFor = Exception.class)
+	public void reportHostInfo(Long uid, AiclawReportHostInfoReq req) {
+		// 按字段合并：blank 字段保留旧值、非 blank 覆写。全 blank 无任何可合并内容，no-op。
+		if (req == null || (StrUtil.isBlank(req.getHostname())
+				&& StrUtil.isBlank(req.getIp()) && StrUtil.isBlank(req.getWorkspaceBase()))) {
+			return;
+		}
+		Aiclaw aiclaw = aiclawDao.getByUid(uid);
+		if (aiclaw == null) {
+			// 未知 aiclaw：记录后优雅返回，绝不新建（对齐 reportAgentType）
+			log.warn("reportHostInfo: aiclaw not found, uid={}", uid);
+			return;
+		}
+		JSONObject config = parseAdapterConfig(aiclaw.getAdapterConfig());
+		if (StrUtil.isNotBlank(req.getHostname())) {
+			config.set("hostname", req.getHostname());
+		}
+		if (StrUtil.isNotBlank(req.getIp())) {
+			config.set("ip", req.getIp());
+		}
+		if (StrUtil.isNotBlank(req.getWorkspaceBase())) {
+			config.set("workspaceBase", req.getWorkspaceBase());
+		}
+		// LambdaUpdateWrapper 显式 set（对齐 reportAgentType / #188 P1 模式）
+		LambdaUpdateWrapper<Aiclaw> update = new LambdaUpdateWrapper<Aiclaw>()
+				.eq(Aiclaw::getUid, uid)
+				.set(Aiclaw::getAdapterConfig, config.toString());
+		aiclawDao.update(update);
+		log.info("reportHostInfo: uid={}, hostname={}, ip={}, workspaceBase={}",
+				uid, req.getHostname(), req.getIp(), req.getWorkspaceBase());
+	}
+
+	/**
+	 * 解析 im_aiclaw.adapter_config JSON；null/blank/非法 JSON 一律按空对象处理（#193 容错）。
+	 */
+	private JSONObject parseAdapterConfig(String adapterConfig) {
+		if (StrUtil.isBlank(adapterConfig)) {
+			return new JSONObject();
+		}
+		try {
+			return JSONUtil.parseObj(adapterConfig);
+		} catch (Exception e) {
+			log.warn("parseAdapterConfig: invalid adapter_config JSON, treat as empty: {}", adapterConfig);
+			return new JSONObject();
+		}
 	}
 
 	@Override
@@ -468,7 +525,9 @@ public class AiclawServiceImpl implements AiclawService {
 
 	@Override
 	public List<AiclawFriendResp> getFriends(Long aiclawUid, Long ownerUid) {
-		getOwnedAiclaw(aiclawUid, ownerUid);
+		Aiclaw aiclaw = getOwnedAiclaw(aiclawUid, ownerUid);
+		// #193: 本 aiclaw 的 workspaceBase 决定 dmWorkspaceDir；缺失（openclaw/未上报）→ null
+		String workspaceBase = parseAdapterConfig(aiclaw.getAdapterConfig()).getStr("workspaceBase");
 
 		// 查 aiclaw 作为 uid 的所有好友记录（不含 owner）
 		List<UserFriend> friends = userFriendDao.list(
@@ -500,6 +559,8 @@ public class AiclawServiceImpl implements AiclawService {
 					.userType(info != null ? info.getUserType() : null)
 					.relationDesc(relDescMap.containsKey(friendUid) && !relDescMap.get(friendUid).isEmpty()
 							? relDescMap.get(friendUid) : null)
+					.dmWorkspaceDir(StrUtil.isNotBlank(workspaceBase)
+							? workspaceBase + "/" + aiclawUid + "/dm/" + friendUid : null)
 					.build();
 		}).collect(Collectors.toList());
 	}

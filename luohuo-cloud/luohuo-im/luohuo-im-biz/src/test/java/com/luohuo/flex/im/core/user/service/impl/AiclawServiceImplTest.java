@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.user.service.impl;
 
 import cn.hutool.crypto.digest.BCrypt;
 import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.luohuo.basic.exception.BizException;
@@ -19,6 +20,11 @@ import com.luohuo.flex.im.core.user.service.FriendService;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
+import com.luohuo.flex.im.domain.entity.User;
+import com.luohuo.flex.im.domain.entity.UserFriend;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportHostInfoReq;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawFriendResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawListResp;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.ibatis.session.Configuration;
 import org.junit.jupiter.api.BeforeAll;
@@ -31,6 +37,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+
+import java.util.List;
+import java.util.Set;
 
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawActivateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
@@ -385,5 +394,181 @@ class AiclawServiceImplTest {
 		verify(aiclawDao).getOtherHolderByMachineCode("free-machine", AICLAW_UID);
 		verify(aiclawDao).updateById(any());
 		verify(aiclawOwnerCache).refresh(AICLAW_UID);
+	}
+
+	// ==================== #193: reportHostInfo 写 adapter_config（按字段合并） ====================
+
+	private AiclawReportHostInfoReq hostInfoReq(String hostname, String ip, String workspaceBase) {
+		return AiclawReportHostInfoReq.builder()
+				.hostname(hostname).ip(ip).workspaceBase(workspaceBase).build();
+	}
+
+	/** 捕获 update wrapper 并取出 SET 的 adapter_config 绑定值（JSON 串）解析为 JSONObject。 */
+	@SuppressWarnings("unchecked")
+	private JSONObject captureWrittenAdapterConfig() {
+		ArgumentCaptor<LambdaUpdateWrapper<Aiclaw>> captor =
+				ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+		verify(aiclawDao).update(captor.capture());
+		LambdaUpdateWrapper<Aiclaw> wrapper = captor.getValue();
+		assertTrue(wrapper.getSqlSet().contains("adapter_config"),
+				"更新必须走 LambdaUpdateWrapper 显式 set adapter_config 列，实际 SET: " + wrapper.getSqlSet());
+		assertTrue(wrapper.getTargetSql().contains("uid"), "更新应按 uid 定位行");
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(AICLAW_UID), "应只更新传入 uid 的行");
+		String json = wrapper.getParamNameValuePairs().values().stream()
+				.filter(v -> v instanceof String && ((String) v).startsWith("{"))
+				.map(v -> (String) v).findFirst()
+				.orElseThrow(() -> new AssertionError("SET 绑定参数中应含 adapter_config JSON 串: "
+						+ wrapper.getParamNameValuePairs()));
+		return JSONUtil.parseObj(json);
+	}
+
+	@Test
+	@DisplayName("reportHostInfo: 空 adapter_config + 全字段上报 → 三个字段全部写入")
+	void reportHostInfo_emptyConfig_allFieldsWritten() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(existingAiclaw("openclaw")); // adapterConfig=null
+
+		aiclawService.reportHostInfo(AICLAW_UID, hostInfoReq("dev-box", "10.0.0.1", "/data/aichat"));
+
+		JSONObject written = captureWrittenAdapterConfig();
+		assertEquals("dev-box", written.getStr("hostname"));
+		assertEquals("10.0.0.1", written.getStr("ip"));
+		assertEquals("/data/aichat", written.getStr("workspaceBase"));
+	}
+
+	@Test
+	@DisplayName("reportHostInfo: 已有值 + blank 字段 → blank 保留旧值、非 blank 覆写（按字段合并）")
+	void reportHostInfo_blankFieldsKeepOld_nonBlankOverwrite() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setAdapterConfig("{\"hostname\":\"old-host\",\"ip\":\"1.1.1.1\",\"workspaceBase\":\"/old\"}");
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(aiclaw);
+
+		aiclawService.reportHostInfo(AICLAW_UID, hostInfoReq("new-host", null, "  "));
+
+		JSONObject written = captureWrittenAdapterConfig();
+		assertEquals("new-host", written.getStr("hostname"), "非 blank 字段应覆写");
+		assertEquals("1.1.1.1", written.getStr("ip"), "null 字段应保留旧值");
+		assertEquals("/old", written.getStr("workspaceBase"), "空白字段应保留旧值");
+	}
+
+	@Test
+	@DisplayName("reportHostInfo: 未知 uid → 不更新、不抛错（warn 优雅返回，对齐 reportAgentType）")
+	void reportHostInfo_unknownUid_graceful() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(null);
+
+		assertDoesNotThrow(() -> aiclawService.reportHostInfo(AICLAW_UID,
+				hostInfoReq("dev-box", "10.0.0.1", "/data/aichat")));
+
+		verify(aiclawDao, never()).update(any());
+	}
+
+	@Test
+	@DisplayName("reportHostInfo: adapter_config 为非法 JSON → 按空对象合并不炸，上报字段正常写入")
+	void reportHostInfo_invalidJson_treatedAsEmpty() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setAdapterConfig("not-json{{{");
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(aiclaw);
+
+		assertDoesNotThrow(() -> aiclawService.reportHostInfo(AICLAW_UID,
+				hostInfoReq("dev-box", null, "/data/aichat")));
+
+		JSONObject written = captureWrittenAdapterConfig();
+		assertEquals("dev-box", written.getStr("hostname"));
+		assertEquals("/data/aichat", written.getStr("workspaceBase"));
+	}
+
+	@Test
+	@DisplayName("reportHostInfo: 三个字段全 blank → no-op 不查库不落库（无任何可合并内容）")
+	void reportHostInfo_allBlank_noOp() {
+		aiclawService.reportHostInfo(AICLAW_UID, hostInfoReq(null, "", "  "));
+
+		verify(aiclawDao, never()).getByUid(any());
+		verify(aiclawDao, never()).update(any());
+	}
+
+	// ==================== #193: list 返回 hostname/ip/ownerWorkspaceDir ====================
+
+	private void stubListPath(Aiclaw aiclaw) {
+		when(aiclawDao.listByOwner(OWNER_UID)).thenReturn(List.of(aiclaw));
+		User user = User.builder().name("bot").build();
+		user.setId(AICLAW_UID);
+		when(userDao.listByIds(any())).thenReturn(List.of(user));
+		when(onlineService.getOnlineUsersList(any())).thenReturn(Set.of());
+	}
+
+	@Test
+	@DisplayName("list: 已上报主机信息 → hostname/ip 透传，ownerWorkspaceDir=workspaceBase/uid/owner")
+	void list_withHostInfo_returnsHostFieldsAndOwnerDir() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setAdapterConfig("{\"hostname\":\"dev-box\",\"ip\":\"10.0.0.1\",\"workspaceBase\":\"/data/aichat\"}");
+		stubListPath(aiclaw);
+
+		List<AiclawListResp> resps = aiclawService.list(OWNER_UID);
+
+		assertEquals(1, resps.size());
+		AiclawListResp resp = resps.get(0);
+		assertEquals("dev-box", resp.getHostname());
+		assertEquals("10.0.0.1", resp.getIp());
+		assertEquals("/data/aichat/" + AICLAW_UID + "/owner", resp.getOwnerWorkspaceDir());
+	}
+
+	@Test
+	@DisplayName("list: 未上报（adapter_config 为 null）→ hostname/ip/ownerWorkspaceDir 全 null")
+	void list_withoutHostInfo_nullFields() {
+		stubListPath(existingAiclaw("openclaw")); // adapterConfig=null
+
+		List<AiclawListResp> resps = aiclawService.list(OWNER_UID);
+
+		AiclawListResp resp = resps.get(0);
+		assertNull(resp.getHostname());
+		assertNull(resp.getIp());
+		assertNull(resp.getOwnerWorkspaceDir(), "无 workspaceBase 时目录字段必须为 null");
+	}
+
+	@Test
+	@DisplayName("list: 有 hostname/ip 但无 workspaceBase → hostname/ip 有值、ownerWorkspaceDir 为 null")
+	void list_hostInfoWithoutWorkspaceBase_dirNull() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setAdapterConfig("{\"hostname\":\"dev-box\",\"ip\":\"10.0.0.1\"}");
+		stubListPath(aiclaw);
+
+		AiclawListResp resp = aiclawService.list(OWNER_UID).get(0);
+		assertEquals("dev-box", resp.getHostname());
+		assertNull(resp.getOwnerWorkspaceDir());
+	}
+
+	// ==================== #193: getFriends 返回 dmWorkspaceDir ====================
+
+	private void stubFriendsPath(Aiclaw aiclaw, Long friendUid) {
+		when(aiclawDao.getByOwnerAndUid(OWNER_UID, AICLAW_UID)).thenReturn(aiclaw);
+		UserFriend uf = new UserFriend();
+		uf.setUid(AICLAW_UID);
+		uf.setFriendUid(friendUid);
+		when(userFriendDao.list(org.mockito.ArgumentMatchers
+				.<com.baomidou.mybatisplus.core.conditions.Wrapper<UserFriend>>any())).thenReturn(List.of(uf));
+		when(onlineService.getOnlineUsersList(any())).thenReturn(Set.of());
+		when(aiclawFriendExtDao.listByAiclaw(AICLAW_UID)).thenReturn(List.of());
+	}
+
+	@Test
+	@DisplayName("getFriends: 有 workspaceBase → dmWorkspaceDir=workspaceBase/aiclawUid/dm/friendUid")
+	void getFriends_withWorkspaceBase_returnsDmDir() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setAdapterConfig("{\"workspaceBase\":\"/data/aichat\"}");
+		stubFriendsPath(aiclaw, 300L);
+
+		List<AiclawFriendResp> resps = aiclawService.getFriends(AICLAW_UID, OWNER_UID);
+
+		assertEquals(1, resps.size());
+		assertEquals("/data/aichat/" + AICLAW_UID + "/dm/300", resps.get(0).getDmWorkspaceDir());
+	}
+
+	@Test
+	@DisplayName("getFriends: 无 workspaceBase → dmWorkspaceDir 为 null")
+	void getFriends_withoutWorkspaceBase_dmDirNull() {
+		stubFriendsPath(existingAiclaw("openclaw"), 300L); // adapterConfig=null
+
+		List<AiclawFriendResp> resps = aiclawService.getFriends(AICLAW_UID, OWNER_UID);
+
+		assertNull(resps.get(0).getDmWorkspaceDir());
 	}
 }

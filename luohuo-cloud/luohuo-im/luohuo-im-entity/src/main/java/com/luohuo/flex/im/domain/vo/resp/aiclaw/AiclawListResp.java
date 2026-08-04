@@ -42,6 +42,15 @@ public class AiclawListResp implements Serializable {
 	@Schema(description = "对外人设（系统 prompt），可为空")
 	private String publicPersona;
 
+	@Schema(description = "主机名（#193，来自 aiclaw 上报；null=未上报）")
+	private String hostname;
+
+	@Schema(description = "主机 IP（#193，来自 aiclaw 上报；null=未上报）")
+	private String ip;
+
+	@Schema(description = "owner 私聊 workspace 目录（#193，server 由 workspaceBase 推导：workspaceBase/uid/owner；null=未上报 workspaceBase）")
+	private String ownerWorkspaceDir;
+
 	@Schema(description = "创建时间")
 	private LocalDateTime createTime;
 }
