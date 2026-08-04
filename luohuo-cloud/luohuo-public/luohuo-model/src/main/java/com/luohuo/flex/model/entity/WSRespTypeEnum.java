@@ -76,6 +76,7 @@ public enum WSRespTypeEnum {
 
 	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class),
 	AICLAW_PERSONA_CHANGED("aiclawPersonaChanged", "AI助理人设变更", WSAiclawPersonaChanged.class),
+	USER_INFO_CHANGE("userInfoChange", "用户资料变更", WSUserInfoChange.class),
     ;
 
     private final String type;

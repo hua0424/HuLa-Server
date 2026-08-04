@@ -10,6 +10,7 @@ import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.basic.utils.TimeUtils;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
+import com.luohuo.flex.common.cache.FriendCacheKeyBuilder;
 import com.luohuo.flex.common.constant.DefValConstants;
 import com.luohuo.flex.im.api.vo.UserRegisterVo;
 import com.luohuo.flex.im.common.event.UserRegisterEvent;
@@ -55,13 +56,16 @@ import com.luohuo.flex.im.domain.vo.resp.user.UserInfoResp;
 import com.luohuo.flex.im.core.user.service.UserService;
 import com.luohuo.flex.im.core.user.service.FeedService;
 import com.luohuo.flex.im.core.user.service.adapter.UserAdapter;
+import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -86,6 +90,7 @@ public class UserServiceImpl implements UserService {
     private final SensitiveWordBs sensitiveWordBs;
     private final FeedService feedService;
     private final AiclawDao aiclawDao;
+	private final PushService pushService;
 
 	@Override
 	public Boolean refreshIpInfo(Long uid, IpInfo ipInfo) {
@@ -170,6 +175,17 @@ public class UserServiceImpl implements UserService {
 		userCache.delete(uid);
 		userSummaryCache.delete(uid);
 		userSummaryCache.evictFriend(userSummaryCache.get(uid).getAccount());
+		// #192: WS 资料变更推送是低延迟优化——通知反向好友 + 本人刷新显示资料，
+		// 推送丢失由前端常规拉取兜底。目标解析对齐 SessionManager 反向好友样板。
+		Set<Long> targets = cachePlusOps.sMembers(FriendCacheKeyBuilder.reverseFriendsKey(uid)).stream()
+				.map(obj -> Long.parseLong(obj.toString())).collect(Collectors.toSet());
+		targets.add(uid);
+		pushService.sendPushMsg(
+				WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
+						.uid(String.valueOf(uid))
+						.changeType(WSUserInfoChange.PROFILE)
+						.build()),
+				new ArrayList<>(targets), uid);
     }
 
     @Transactional(rollbackFor = Exception.class)

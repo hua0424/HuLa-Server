@@ -16,6 +16,8 @@ import com.luohuo.flex.im.domain.enums.ApplyReadStatusEnum;
 import com.luohuo.flex.im.domain.enums.NoticeStatusEnum;
 import com.luohuo.flex.model.entity.WSRespTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
+import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
+import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import jakarta.annotation.PostConstruct;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -154,7 +156,18 @@ public class FriendServiceImpl implements FriendService, InitializingBean {
 		}
 
 		userFriend.setRemark(request.getRemark());
-		return userFriendDao.updateById(userFriend);
+		Boolean updated = userFriendDao.updateById(userFriend);
+		// #192: 备注变更仅设置人可见——推送目标仅本人；帧 uid 是被改备注的人，
+		// 前端据此刷新该好友的显示名。remark 读面（好友分页直查 DB + FriendAdapter）无缓存，无需失效。
+		if (Boolean.TRUE.equals(updated)) {
+			pushService.sendPushMsg(
+					WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
+							.uid(String.valueOf(request.getTargetUid()))
+							.changeType(WSUserInfoChange.REMARK)
+							.build()),
+					Collections.singletonList(employeeId), employeeId);
+		}
+		return updated;
 	}
 
 	@Override

@@ -72,6 +72,8 @@ class AiclawServiceImplTest {
 	@Mock private AiclawOwnerCache aiclawOwnerCache;
 	@Mock private StringRedisTemplate stringRedisTemplate;
 	@Mock private PushService pushService;
+	@Mock private com.luohuo.flex.im.core.user.service.cache.UserCache userCache;
+	@Mock private com.luohuo.basic.cache.repository.CachePlusOps cachePlusOps;
 
 	@InjectMocks
 	private AiclawServiceImpl aiclawService;
@@ -240,6 +242,60 @@ class AiclawServiceImplTest {
 
 		verify(userDao).updateById(any());
 		verify(userSummaryCache, times(1)).delete(AICLAW_UID);
+	}
+
+	// ==================== #192: updateProfile 资料变更 WS 推送 ====================
+
+	@Test
+	@DisplayName("#192 updateProfile: 必须同时删除 userCache（合并消息预览读面，对齐 UserServiceImpl.modifyInfo 双删）")
+	void updateProfile_invalidatesUserCache() {
+		ownedAiclaw();
+		when(cachePlusOps.sMembers(any())).thenReturn(java.util.Collections.emptySet());
+		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
+				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
+						.uid(AICLAW_UID)
+						.name("新名字")
+						.build();
+
+		aiclawService.updateProfile(req, OWNER_UID);
+
+		verify(userCache, times(1)).delete(AICLAW_UID);
+	}
+
+	@Test
+	@DisplayName("#192 updateProfile: 推送 userInfoChange(profile) 帧，目标 = 反向好友 ∪ {本人}，uid 以 String 承载")
+	@SuppressWarnings("unchecked")
+	void updateProfile_pushesUserInfoChangeToFriendsAndSelf() {
+		ownedAiclaw();
+		java.util.Set<Object> reverseFriends = new java.util.HashSet<>(java.util.Arrays.asList("300", "301"));
+		when(cachePlusOps.sMembers(any())).thenReturn(reverseFriends);
+		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
+				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
+						.uid(AICLAW_UID)
+						.name("新名字")
+						.build();
+
+		aiclawService.updateProfile(req, OWNER_UID);
+
+		ArgumentCaptor<com.luohuo.flex.model.entity.WsBaseResp> msgCaptor =
+				ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+		ArgumentCaptor<java.util.List<Long>> listCaptor = ArgumentCaptor.forClass(java.util.List.class);
+		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(OWNER_UID));
+
+		com.luohuo.flex.model.entity.WsBaseResp<?> frame = msgCaptor.getValue();
+		assertEquals("userInfoChange", frame.getType(), "帧类型应为 userInfoChange");
+		assertTrue(frame.getData() instanceof com.luohuo.flex.model.entity.ws.WSUserInfoChange,
+				"帧载荷应为 WSUserInfoChange");
+		com.luohuo.flex.model.entity.ws.WSUserInfoChange data =
+				(com.luohuo.flex.model.entity.ws.WSUserInfoChange) frame.getData();
+		assertEquals(String.valueOf(AICLAW_UID), data.getUid(),
+				"uid 应以 String 承载（防 JS 精度丢失）");
+		assertEquals(com.luohuo.flex.model.entity.ws.WSUserInfoChange.PROFILE, data.getChangeType(),
+				"changeType 应为 profile");
+		java.util.List<Long> targets = listCaptor.getValue();
+		assertTrue(targets.contains(AICLAW_UID), "推送目标应含本人 uid");
+		assertTrue(targets.contains(300L) && targets.contains(301L), "推送目标应含全部反向好友");
+		assertEquals(3, targets.size(), "推送目标 = 反向好友 ∪ {本人}，不多不少");
 	}
 
 	// ==================== #188 T2: 自作用域拉取 getSelfPersona ====================
