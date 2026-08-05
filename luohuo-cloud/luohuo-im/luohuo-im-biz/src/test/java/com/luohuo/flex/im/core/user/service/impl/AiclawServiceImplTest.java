@@ -263,7 +263,7 @@ class AiclawServiceImplTest {
 	}
 
 	@Test
-	@DisplayName("#192 updateProfile: 推送 userInfoChange(profile) 帧，目标 = 反向好友 ∪ {本人}，uid 以 String 承载")
+	@DisplayName("#192 updateProfile: 推送 userInfoChange(profile) 帧，目标 = 反向好友 ∪ {本人} ∪ {owner}（P2-1 显式含 ownerUid），uid 以 String 承载")
 	@SuppressWarnings("unchecked")
 	void updateProfile_pushesUserInfoChangeToFriendsAndSelf() {
 		ownedAiclaw();
@@ -295,7 +295,75 @@ class AiclawServiceImplTest {
 		java.util.List<Long> targets = listCaptor.getValue();
 		assertTrue(targets.contains(AICLAW_UID), "推送目标应含本人 uid");
 		assertTrue(targets.contains(300L) && targets.contains(301L), "推送目标应含全部反向好友");
-		assertEquals(3, targets.size(), "推送目标 = 反向好友 ∪ {本人}，不多不少");
+		assertTrue(targets.contains(OWNER_UID), "P2-1: 推送目标应显式含 ownerUid（防御 owner 已解除好友关系边界）");
+		assertEquals(4, targets.size(), "推送目标 = 反向好友 ∪ {本人} ∪ {owner}，不多不少");
+	}
+
+	// ==================== #192 P2-1: updateProfile 推送目标显式含 ownerUid ====================
+
+	@Test
+	@DisplayName("#192 P2-1 updateProfile: owner 不在反向好友集（已解除好友关系）也必须收到自己 aiclaw 的资料变更推送")
+	@SuppressWarnings("unchecked")
+	void updateProfile_pushesToOwnerEvenIfNotReverseFriend() {
+		ownedAiclaw();
+		// 防御边界：owner 已删除与 aiclaw 的好友关系 → 反向好友集不含 owner(200)
+		java.util.Set<Object> reverseFriends = new java.util.HashSet<>(java.util.Arrays.asList("300", "301"));
+		when(cachePlusOps.sMembers(any())).thenReturn(reverseFriends);
+		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
+				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
+						.uid(AICLAW_UID)
+						.name("新名字")
+						.build();
+
+		aiclawService.updateProfile(req, OWNER_UID);
+
+		ArgumentCaptor<java.util.List<Long>> listCaptor = ArgumentCaptor.forClass(java.util.List.class);
+		verify(pushService, times(1)).sendPushMsg(any(), listCaptor.capture(), eq(OWNER_UID));
+		java.util.List<Long> targets = listCaptor.getValue();
+		assertTrue(targets.contains(OWNER_UID),
+				"推送目标必须显式含 ownerUid——owner 必须收到自己 aiclaw 的资料变更，即使已解除好友关系");
+		assertTrue(targets.contains(AICLAW_UID) && targets.contains(300L) && targets.contains(301L),
+				"推送目标仍应含本人 + 全部反向好友");
+		assertEquals(4, targets.size(), "推送目标 = 反向好友 ∪ {本人} ∪ {owner}，Set 去重");
+	}
+
+	// ==================== #192 P2-3: 推送计算异常降级（Redis 故障只丢推送，不回滚写路径） ====================
+
+	@Test
+	@DisplayName("#192 P2-3 updateProfile: 推送计算异常（sMembers 抛）只丢推送，写路径照常（updateById + 双缓存删除）")
+	void updateProfile_pushComputationFails_writePathStillSucceeds() {
+		ownedAiclaw();
+		when(cachePlusOps.sMembers(any())).thenThrow(new RuntimeException("redis down"));
+		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
+				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
+						.uid(AICLAW_UID)
+						.name("新名字")
+						.build();
+
+		// 推送=低延迟优化非正确性依赖：Redis 故障绝不回滚写路径事务（catch 后不得重抛）
+		assertDoesNotThrow(() -> aiclawService.updateProfile(req, OWNER_UID));
+
+		verify(userDao).updateById(any());
+		verify(userSummaryCache).delete(AICLAW_UID);
+		verify(userCache).delete(AICLAW_UID);
+	}
+
+	@Test
+	@DisplayName("#192 P2-3 updateProfile: sendPushMsg 抛异常同样降级，方法正常返回")
+	void updateProfile_sendPushMsgFails_writePathStillSucceeds() {
+		ownedAiclaw();
+		when(cachePlusOps.sMembers(any())).thenReturn(java.util.Collections.emptySet());
+		doThrow(new RuntimeException("push down")).when(pushService)
+				.sendPushMsg(any(), any(java.util.List.class), any());
+		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
+				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
+						.uid(AICLAW_UID)
+						.name("新名字")
+						.build();
+
+		assertDoesNotThrow(() -> aiclawService.updateProfile(req, OWNER_UID));
+
+		verify(userDao).updateById(any());
 	}
 
 	// ==================== #188 T2: 自作用域拉取 getSelfPersona ====================

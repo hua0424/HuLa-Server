@@ -98,4 +98,26 @@ class FriendServiceImplTest {
 
 		verify(pushService, never()).sendPushMsg(any(), anyList(), any());
 	}
+
+	// ==================== #192 P2-3: 推送异常降级（只丢推送，不回滚写路径） ====================
+
+	@Test
+	@DisplayName("#192 P2-3 updateRemark: sendPushMsg 抛异常只丢推送，写路径照常（updateById 被调、方法正常返回 true）")
+	void updateRemark_pushFails_writePathStillSucceeds() {
+		UserFriend userFriend = new UserFriend();
+		userFriend.setUid(SETTER_UID);
+		userFriend.setFriendUid(TARGET_UID);
+		when(userFriendDao.getByFriends(eq(SETTER_UID), anyList()))
+				.thenReturn(Collections.singletonList(userFriend));
+		when(userFriendDao.updateById(any())).thenReturn(true);
+		doThrow(new RuntimeException("push down")).when(pushService)
+				.sendPushMsg(any(), anyList(), any());
+
+		// 推送=低延迟优化非正确性依赖：异常绝不回滚/中断写路径（catch 后不得重抛）
+		Boolean updated = assertDoesNotThrow(
+				() -> friendService.updateRemark(SETTER_UID, new FriendRemarkReq(TARGET_UID, "老王")));
+
+		assertTrue(updated, "落库成功应照常返回 true");
+		verify(userFriendDao).updateById(any());
+	}
 }

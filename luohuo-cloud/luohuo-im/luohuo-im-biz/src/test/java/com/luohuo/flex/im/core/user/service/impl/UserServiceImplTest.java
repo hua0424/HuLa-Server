@@ -15,6 +15,7 @@ import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.common.utils.sensitiveword.SensitiveWordBs;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.User;
+import com.luohuo.flex.im.domain.vo.req.user.ModifyAvatarReq;
 import com.luohuo.flex.im.domain.vo.req.user.ModifyNameReq;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
@@ -98,5 +99,79 @@ class UserServiceImplTest {
 		assertTrue(targets.contains(UID), "推送目标应含本人 uid");
 		assertTrue(targets.contains(300L) && targets.contains(301L), "推送目标应含全部反向好友");
 		assertEquals(3, targets.size(), "推送目标 = 反向好友 ∪ {本人}，不多不少");
+	}
+
+	// ==================== #192 P2-2: modifyAvatar 补推 profile 帧 ====================
+
+	@Test
+	@DisplayName("#192 P2-2 modifyAvatar: 推送 userInfoChange(profile) 帧，目标 = 反向好友 ∪ {本人}，cuid = 本人（与 modifyInfo 一致）")
+	@SuppressWarnings("unchecked")
+	void modifyAvatar_pushesUserInfoChangeToFriendsAndSelf() {
+		User existing = new User();
+		existing.setId(UID);
+		existing.setAccount("acc-100");
+		when(userDao.getById(UID)).thenReturn(existing);
+
+		Set<Object> reverseFriends = new HashSet<>(Arrays.asList("300", "301"));
+		when(cachePlusOps.sMembers(any())).thenReturn(reverseFriends);
+
+		userService.modifyAvatar(UID, ModifyAvatarReq.builder().avatar("new-avatar").build());
+
+		ArgumentCaptor<WsBaseResp> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
+		ArgumentCaptor<List<Long>> listCaptor = ArgumentCaptor.forClass(List.class);
+		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(UID));
+
+		WsBaseResp<?> frame = msgCaptor.getValue();
+		assertEquals("userInfoChange", frame.getType(), "帧类型应为 userInfoChange");
+		assertTrue(frame.getData() instanceof WSUserInfoChange, "帧载荷应为 WSUserInfoChange");
+		WSUserInfoChange data = (WSUserInfoChange) frame.getData();
+		assertEquals(String.valueOf(UID), data.getUid(), "uid 应以 String 承载（防 JS 精度丢失）");
+		assertEquals(WSUserInfoChange.PROFILE, data.getChangeType(), "changeType 应为 profile");
+		List<Long> targets = listCaptor.getValue();
+		assertTrue(targets.contains(UID), "推送目标应含本人 uid");
+		assertTrue(targets.contains(300L) && targets.contains(301L), "推送目标应含全部反向好友");
+		assertEquals(3, targets.size(), "推送目标 = 反向好友 ∪ {本人}，不多不少");
+	}
+
+	// ==================== #192 P2-3: 推送计算异常降级（Redis 故障只丢推送，不回滚写路径） ====================
+
+	@Test
+	@DisplayName("#192 P2-3 modifyInfo: 推送计算异常（sMembers 抛）只丢推送，写路径照常（updateById + 缓存双删）")
+	void modifyInfo_pushComputationFails_writePathStillSucceeds() {
+		ModifyNameReq req = new ModifyNameReq();
+		req.setName("新名字");
+		req.setSex(1);
+
+		User existing = new User();
+		existing.setId(UID);
+		existing.setAvatar("old-avatar");
+		when(userDao.getById(UID)).thenReturn(existing);
+		SummeryInfoDTO summary = new SummeryInfoDTO();
+		summary.setAccount("acc-100");
+		when(userSummaryCache.get(UID)).thenReturn(summary);
+		when(cachePlusOps.sMembers(any())).thenThrow(new RuntimeException("redis down"));
+
+		assertDoesNotThrow(() -> userService.modifyInfo(UID, req));
+
+		verify(userDao).updateById(any());
+		verify(userCache).delete(UID);
+		verify(userSummaryCache).delete(UID);
+	}
+
+	@Test
+	@DisplayName("#192 P2-3 modifyAvatar: 推送计算异常（sMembers 抛）只丢推送，写路径照常")
+	void modifyAvatar_pushComputationFails_writePathStillSucceeds() {
+		User existing = new User();
+		existing.setId(UID);
+		existing.setAccount("acc-100");
+		when(userDao.getById(UID)).thenReturn(existing);
+		when(cachePlusOps.sMembers(any())).thenThrow(new RuntimeException("redis down"));
+
+		assertDoesNotThrow(() ->
+				userService.modifyAvatar(UID, ModifyAvatarReq.builder().avatar("new-avatar").build()));
+
+		verify(userDao).updateById(any());
+		verify(userCache).delete(UID);
+		verify(userSummaryCache).delete(UID);
 	}
 }
