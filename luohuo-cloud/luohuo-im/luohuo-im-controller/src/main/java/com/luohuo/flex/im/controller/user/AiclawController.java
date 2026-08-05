@@ -9,6 +9,7 @@ import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawAuthConfirmReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCreateReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawPersonaReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawRelationReq;
+import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportHostInfoReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportTypeReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawThinkingByTriggerReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
@@ -98,6 +99,14 @@ public class AiclawController {
 	public R<Void> reportAgentType(@RequestBody AiclawReportTypeReq req) {
 		// 防伪造：caller 的 uid（来自 aiclaw connectionToken）即被上报方，只能上报自己的类型
 		aiclawService.reportAgentType(ContextUtil.getUid(), req.getAgentType());
+		return R.success();
+	}
+
+	@PostMapping("/report-host-info")
+	@Operation(summary = "aiclaw 上报主机信息（aichatoverview#193：hostname/ip/workspaceBase 按字段合并入 adapter_config，仅可上报自身）")
+	public R<Void> reportHostInfo(@RequestBody AiclawReportHostInfoReq req) {
+		// 防伪造：caller 的 uid（来自 aiclaw connectionToken）即被上报方，只能上报自己的主机信息
+		aiclawService.reportHostInfo(ContextUtil.getUid(), req);
 		return R.success();
 	}
 
