@@ -89,6 +89,18 @@ class AiclawGroupConfigServiceImplTest {
 	}
 
 	@Test
+	@DisplayName("#192 F5 getConfig: 非群成员异常文案带 roomId（便于排查是哪个群）")
+	void getConfig_nonMember_messageContainsRoomId() {
+		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(999L));
+
+		BizException ex = assertThrows(BizException.class,
+				() -> configService.getConfig(AICLAW_UID, ROOM_ID, UID));
+		assertTrue(ex.getMessage().contains("无法查看配置"), "应保留原始语义");
+		assertTrue(ex.getMessage().contains(String.valueOf(ROOM_ID)),
+				"异常文案应带 roomId，实际: " + ex.getMessage());
+	}
+
+	@Test
 	@DisplayName("getConfig 有 DB 记录时返回正确的保留字段")
 	void getConfig_withDbRecord_returnsExpectedFields() {
 		when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(UID, 201L));

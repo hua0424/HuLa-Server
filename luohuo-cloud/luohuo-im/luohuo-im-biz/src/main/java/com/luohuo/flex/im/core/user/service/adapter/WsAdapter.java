@@ -131,4 +131,14 @@ public class WsAdapter {
 		wsBaseResp.setData(change);
 		return wsBaseResp;
 	}
+
+	/**
+	 * #192: 用户资料变更 WS 推送（失效通知；前端收到后刷新该用户的显示资料）
+	 */
+	public static WsBaseResp<WSUserInfoChange> buildUserInfoChange(WSUserInfoChange change) {
+		WsBaseResp<WSUserInfoChange> wsBaseResp = new WsBaseResp<>();
+		wsBaseResp.setType(WSRespTypeEnum.USER_INFO_CHANGE.getType());
+		wsBaseResp.setData(change);
+		return wsBaseResp;
+	}
 }

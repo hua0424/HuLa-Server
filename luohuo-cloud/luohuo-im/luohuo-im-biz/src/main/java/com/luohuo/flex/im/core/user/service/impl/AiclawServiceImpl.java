@@ -46,6 +46,8 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenInfo;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import com.luohuo.flex.model.entity.ws.WSAiclawPersonaChanged;
+import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
+import com.luohuo.flex.common.cache.FriendCacheKeyBuilder;
 import com.luohuo.flex.model.enums.ChatActiveStatusEnum;
 import com.luohuo.flex.im.enums.UserTypeEnum;
 import lombok.AllArgsConstructor;
@@ -82,6 +84,8 @@ public class AiclawServiceImpl implements AiclawService {
 	private final AiclawOwnerCache aiclawOwnerCache;
 	private final StringRedisTemplate stringRedisTemplate;
 	private final PushService pushService;
+	private final com.luohuo.flex.im.core.user.service.cache.UserCache userCache;
+	private final com.luohuo.basic.cache.repository.CachePlusOps cachePlusOps;
 
 	private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
 	private static final Duration TOKEN_CACHE_TTL = Duration.ofDays(7);
@@ -411,6 +415,30 @@ public class AiclawServiceImpl implements AiclawService {
 		// #188 F1: name/avatar/description 改了必须失效用户摘要缓存，
 		// 否则好友列表/消息渲染继续读到陈旧资料（对齐 UserServiceImpl.refreshIpInfo 既有模式）
 		userSummaryCache.delete(aiclaw.getUid());
+		// #192: 同步失效 userCache（唯一读面是合并消息预览 MergeMsgHandler，不删则改名后新合并消息显旧名直至 TTL；
+		// 对齐 UserServiceImpl.modifyInfo 双删）
+		userCache.delete(aiclaw.getUid());
+		// #192: WS 资料变更推送是低延迟优化——通知反向好友 + 本人刷新该 aiclaw 的显示资料，
+		// 推送丢失由前端常规拉取兜底。对齐 setPersona 的推送风格。
+		// #192 P2-3: 推送计算整体 try/catch 降级——Redis/推送故障只丢推送记 warn，
+		// 绝不回滚写路径事务（推送=低延迟优化非正确性依赖，PRD AC4 重连拉取兜底）。
+		try {
+			Set<Long> targets = cachePlusOps.sMembers(FriendCacheKeyBuilder.reverseFriendsKey(aiclaw.getUid())).stream()
+					.map(obj -> Long.parseLong(obj.toString())).collect(Collectors.toSet());
+			targets.add(aiclaw.getUid());
+			// #192 P2-1: 显式加 ownerUid——owner 可能已解除与 aiclaw 的好友关系
+			// （此时反向好友集不含 owner），但 owner 必须收到自己 aiclaw 的资料变更。Set 去重天然处理重复。
+			targets.add(ownerUid);
+			pushService.sendPushMsg(
+					WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
+							.uid(String.valueOf(aiclaw.getUid()))
+							.changeType(WSUserInfoChange.PROFILE)
+							.build()),
+					new ArrayList<>(targets), ownerUid);
+		} catch (Exception e) {
+			log.warn("updateProfile: userInfoChange 推送失败（仅丢推送，不影响写路径），aiclawUid={}, ownerUid={}",
+					aiclaw.getUid(), ownerUid, e);
+		}
 	}
 
 	@Override

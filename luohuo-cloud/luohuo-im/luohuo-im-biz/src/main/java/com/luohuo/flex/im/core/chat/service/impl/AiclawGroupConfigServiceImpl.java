@@ -57,7 +57,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 		// 校验调用者是群成员
 		List<Long> memberUids = groupMemberCache.getMemberUidList(roomId);
 		if (!memberUids.contains(uid)) {
-			throw new BizException("您不在该群中，无法查看配置");
+			// #192 F5: 文案带 roomId，便于排查是哪个群的 membership 校验失败
+			throw new BizException("您不在该群(roomId=" + roomId + ")中，无法查看配置");
 		}
 
 		// 先查 Redis 缓存

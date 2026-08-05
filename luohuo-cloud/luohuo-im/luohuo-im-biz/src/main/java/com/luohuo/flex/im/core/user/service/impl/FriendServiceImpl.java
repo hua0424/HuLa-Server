@@ -16,6 +16,8 @@ import com.luohuo.flex.im.domain.enums.ApplyReadStatusEnum;
 import com.luohuo.flex.im.domain.enums.NoticeStatusEnum;
 import com.luohuo.flex.model.entity.WSRespTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
+import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
+import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import jakarta.annotation.PostConstruct;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -154,7 +156,25 @@ public class FriendServiceImpl implements FriendService, InitializingBean {
 		}
 
 		userFriend.setRemark(request.getRemark());
-		return userFriendDao.updateById(userFriend);
+		Boolean updated = userFriendDao.updateById(userFriend);
+		// #192: 备注变更仅设置人可见——推送目标仅本人；帧 uid 是被改备注的人，
+		// 前端据此刷新该好友的显示名。remark 读面（好友分页直查 DB + FriendAdapter）无缓存，无需失效。
+		if (Boolean.TRUE.equals(updated)) {
+			// #192 P2-3: 推送计算整体 try/catch 降级——推送故障只丢推送记 warn，
+			// 绝不回滚写路径事务（推送=低延迟优化非正确性依赖，PRD AC4 重连拉取兜底）。
+			try {
+				pushService.sendPushMsg(
+						WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
+								.uid(String.valueOf(request.getTargetUid()))
+								.changeType(WSUserInfoChange.REMARK)
+								.build()),
+						Collections.singletonList(employeeId), employeeId);
+			} catch (Exception e) {
+				log.warn("updateRemark: userInfoChange 推送失败（仅丢推送，不影响写路径），employeeId={}, targetUid={}",
+						employeeId, request.getTargetUid(), e);
+			}
+		}
+		return updated;
 	}
 
 	@Override

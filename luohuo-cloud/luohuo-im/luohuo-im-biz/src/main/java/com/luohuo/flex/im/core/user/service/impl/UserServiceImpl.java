@@ -10,6 +10,7 @@ import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.basic.utils.TimeUtils;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
+import com.luohuo.flex.common.cache.FriendCacheKeyBuilder;
 import com.luohuo.flex.common.constant.DefValConstants;
 import com.luohuo.flex.im.api.vo.UserRegisterVo;
 import com.luohuo.flex.im.common.event.UserRegisterEvent;
@@ -55,13 +56,16 @@ import com.luohuo.flex.im.domain.vo.resp.user.UserInfoResp;
 import com.luohuo.flex.im.core.user.service.UserService;
 import com.luohuo.flex.im.core.user.service.FeedService;
 import com.luohuo.flex.im.core.user.service.adapter.UserAdapter;
+import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -86,6 +90,7 @@ public class UserServiceImpl implements UserService {
     private final SensitiveWordBs sensitiveWordBs;
     private final FeedService feedService;
     private final AiclawDao aiclawDao;
+	private final PushService pushService;
 
 	@Override
 	public Boolean refreshIpInfo(Long uid, IpInfo ipInfo) {
@@ -170,7 +175,31 @@ public class UserServiceImpl implements UserService {
 		userCache.delete(uid);
 		userSummaryCache.delete(uid);
 		userSummaryCache.evictFriend(userSummaryCache.get(uid).getAccount());
+		// #192: 资料变更 WS 推送（modifyInfo 与 modifyAvatar 共用同一逻辑，见 pushProfileChange）
+		pushProfileChange(uid);
     }
+
+	/**
+	 * #192: WS 资料变更推送是低延迟优化——通知反向好友 + 本人刷新显示资料，
+	 * 推送丢失由前端常规拉取兜底。目标解析对齐 SessionManager 反向好友样板。
+	 * #192 P2-3: 推送计算整体 try/catch 降级——Redis/推送故障只丢推送记 warn，
+	 * 绝不回滚写路径事务（推送=低延迟优化非正确性依赖，PRD AC4 重连拉取兜底）。
+	 */
+	private void pushProfileChange(Long uid) {
+		try {
+			Set<Long> targets = cachePlusOps.sMembers(FriendCacheKeyBuilder.reverseFriendsKey(uid)).stream()
+					.map(obj -> Long.parseLong(obj.toString())).collect(Collectors.toSet());
+			targets.add(uid);
+			pushService.sendPushMsg(
+					WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
+							.uid(String.valueOf(uid))
+							.changeType(WSUserInfoChange.PROFILE)
+							.build()),
+					new ArrayList<>(targets), uid);
+		} catch (Exception e) {
+			log.warn("pushProfileChange: userInfoChange 推送失败（仅丢推送，不影响写路径），uid={}", uid, e);
+		}
+	}
 
     @Transactional(rollbackFor = Exception.class)
     @Override
@@ -191,6 +220,8 @@ public class UserServiceImpl implements UserService {
 		userCache.delete(uid);
 		userSummaryCache.delete(uid);
 		userSummaryCache.evictFriend(user.getAccount());
+		// #192 P2-2: InfoEdit 裁剪上传是可达写路径，头像变更同样推 profile 帧（与 modifyInfo 同一推送逻辑）
+		pushProfileChange(uid);
     }
 
     @Override
