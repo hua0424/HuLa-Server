@@ -46,7 +46,9 @@ public class ReactiveWebSocketHandler implements WebSocketHandler {
 		String clientId = extractClientId(session);
 		Long uid = ReactiveContextUtil.getUid();
 		if(uid == null){
-			return session.close(CloseStatus.BAD_DATA);
+			// #206: 鉴权失败（网关未注入 uid 头）使用专属关闭码 4001，
+			// 客户端据此区分 token 失效，走刷新激活而非普通重连
+			return session.close(new CloseStatus(4001, "token invalid or expired"));
 		}
 
 		// 2. 注册会话
