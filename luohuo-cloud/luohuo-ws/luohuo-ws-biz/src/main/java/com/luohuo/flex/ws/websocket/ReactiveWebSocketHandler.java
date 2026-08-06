@@ -24,6 +24,8 @@ public class ReactiveWebSocketHandler implements WebSocketHandler {
 	public static final long HEARTBEAT_TIMEOUT = 30;
 	// 自定义连接超市状态码
 	public static final CloseStatus SESSION_NOT_RELIABLE = new CloseStatus(4000, "会话关闭");
+	// #206: WS 鉴权失败（网关未注入 uid 头）专属关闭码，客户端据此区分 token 失效，走刷新激活而非普通重连
+	public static final CloseStatus TOKEN_INVALID_CLOSE_STATUS = new CloseStatus(4001, "token invalid or expired");
 
 	@Resource
 	private WebSocketMessageService messageService;
@@ -46,7 +48,7 @@ public class ReactiveWebSocketHandler implements WebSocketHandler {
 		String clientId = extractClientId(session);
 		Long uid = ReactiveContextUtil.getUid();
 		if(uid == null){
-			return session.close(CloseStatus.BAD_DATA);
+			return session.close(TOKEN_INVALID_CLOSE_STATUS);
 		}
 
 		// 2. 注册会话
