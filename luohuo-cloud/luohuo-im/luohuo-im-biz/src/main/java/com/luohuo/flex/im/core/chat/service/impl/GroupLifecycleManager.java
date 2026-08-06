@@ -498,22 +498,23 @@ public class GroupLifecycleManager {
 				return true;
 			});
 			// 4.5 告知所有人群已经被解散, 这里要走groupMemberDao查询，缓存中可能没有屏蔽群的用户
-			roomCache.delete(roomId);
-			groupMemberCache.evictMemberList(room.getId());
-			groupMemberCache.evictExceptMemberList(room.getId());
-			groupMemberCache.evictAllMemberDetails();
-			// 新版解散群聊
-			CacheKey uKey = PresenceCacheKeyBuilder.userGroupsKey(uid);
-			cachePlusOps.del(uKey, gKey);
-			presenceSyncHelper.syncOnline(memberUidList, room.getId(), false);
-			pushService.sendPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid);
+			// #202: post-commit 清理串行无隔离曾导致任一步（Redis/infra 抖动）抛错中断后续所有
+			// eviction、留下 TTL ~1 天的幽灵 key（解散群 getConfig 仍 200）。现每步独立 runQuietly，
+			// 单步失败只记 warn，不得阻断后续步骤。
+			runQuietly("deleteRoomCache", roomId, () -> roomCache.delete(roomId));
+			runQuietly("evictMemberList", roomId, () -> groupMemberCache.evictMemberList(room.getId()));
+			runQuietly("evictExceptMemberList", roomId, () -> groupMemberCache.evictExceptMemberList(room.getId()));
+			runQuietly("evictAllMemberDetails", roomId, groupMemberCache::evictAllMemberDetails);
+			// 新版解散群聊：群成员集合 key 整体删除；各成员的 userGroupsKey 只 sRem 本房间——
+			// 成员（含群主）可能还有大群 DEF_ROOM 等其它成员资格，整 key del 会误清（#202）
+			runQuietly("deleteGroupMembersKey", roomId, () -> cachePlusOps.del(gKey));
+			runQuietly("clearMemberUserGroupsKeys", roomId, () -> memberUidList.forEach(memberUid ->
+					cachePlusOps.sRem(PresenceCacheKeyBuilder.userGroupsKey(memberUid), room.getId())));
+			runQuietly("syncOnline", roomId, () -> presenceSyncHelper.syncOnline(memberUidList, room.getId(), false));
+			runQuietly("pushDissolution", roomId, () -> pushService.sendPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid));
 			// #182/#153: 解散群时同样清 aiclaw 入群待批准去重标记，避免旧标记压制后续再次邀请通知。
 			// 该调用在事务外，且只操作 Redis，失败不得阻断已发出的解散广播。
-			try {
-				aiclawParticipant.onMembersRemoved(roomId, memberUidList);
-			} catch (Exception e) {
-				log.warn("解散群后清理 aiclaw 待批准标记失败，吞异常继续: roomId={}, memberUids={}", roomId, memberUidList, e);
-			}
+			runQuietly("onMembersRemoved", roomId, () -> aiclawParticipant.onMembersRemoved(roomId, memberUidList));
 		} else {
 			// 如果房间人员小于3人 那么直接解散群聊
 			if (cachePlusOps.sCard(gKey) <= 3) {
@@ -596,6 +597,18 @@ public class GroupLifecycleManager {
 			SpringUtils.publishEvent(new GroupMemberAddEvent(this, roomIdAtomic.get(), Math.toIntExact(cachePlusOps.sCard(gKey)), Math.toIntExact(cachePlusOps.sCard(onlineGroupMembersKey)), request.getUidList(), uid));
 		}
 		return roomIdAtomic.get();
+	}
+
+	/**
+	 * #202: post-commit 缓存清理步骤隔离执行——任一步（Redis/infra 抖动）抛错只记 warn，
+	 * 不得中断后续 eviction 步骤，避免留下 TTL ~1 天的幽灵 key。
+	 */
+	private void runQuietly(String step, Long roomId, Runnable r) {
+		try {
+			r.run();
+		} catch (Exception e) {
+			log.warn("解散群 post-commit 清理步骤失败，吞异常继续: roomId={}, step={}", roomId, step, e);
+		}
 	}
 
 	/**
