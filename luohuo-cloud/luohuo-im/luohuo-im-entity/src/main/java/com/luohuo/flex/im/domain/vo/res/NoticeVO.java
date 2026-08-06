@@ -62,4 +62,10 @@ public class NoticeVO {
 
     @Schema(description = "接收人用户类型 1系统 2机器人 3普通 4AI助理")
     private Integer receiverUserType;
+
+    @Schema(description = "群名称（仅群通知有值；群已解散时为 null）")
+    private String groupName;
+
+    @Schema(description = "群头像（仅群通知有值；群已解散时为 null）")
+    private String groupAvatar;
 }
