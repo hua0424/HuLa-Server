@@ -154,7 +154,7 @@ class FriendServiceImplTest {
 	}
 
 	@Nested
-	@DisplayName("#197 FriendRemarkReq 校验（remark 允许空串/null = 清空，保留 max=10 上限）")
+	@DisplayName("#197 FriendRemarkReq 校验（空串 remark = 清空，null = 400 拒绝，保留 max=10 上限）")
 	class FriendRemarkReqValidation {
 
 		private static ValidatorFactory factory;
@@ -186,10 +186,11 @@ class FriendServiceImplTest {
 		}
 
 		@Test
-		@DisplayName("null remark（清空备注）→ 零违约")
-		void nullRemark_noViolations() {
+		@DisplayName("null remark → remark 违约（PR#70 P2: @NotNull 消除 null 静默 no-op 歧义，null→400）")
+		void nullRemark_violatesRemark() {
 			FriendRemarkReq req = new FriendRemarkReq(TARGET_UID, null);
-			assertTrue(violatedProps(req).isEmpty(), "null 备注应通过校验（业务层同样按清空处理）");
+			assertTrue(violatedProps(req).contains("remark"),
+					"null 备注应触发 @NotNull 违约（null=拒绝，空串才是清空语义）");
 		}
 
 		@Test

@@ -23,7 +23,8 @@ public class FriendRemarkReq {
     @Schema(description = "好友uid")
     private Long targetUid;
 
+	@NotNull(message = "好友备注不能为null（传空串表示清空备注）")
 	@Size(min = 0, max = 10, message = "好友备注长度必须在0到10个字符之间")
-	@Schema(description = "好友备注（空串/null = 清空备注，恢复显昵称）")
+	@Schema(description = "好友备注（null=400 拒绝；空串=清空备注，恢复显昵称）")
 	private String remark;
 }
