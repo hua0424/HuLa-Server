@@ -16,8 +16,9 @@ public class RoomInfoReq {
 	@NotNull(message = "请选择群聊")
 	private Long id;
 
-	@NotEmpty(message = "群名称不能为空")
-	@Size(min = 1, max = 10, message = "群名称长度必须在1到10个字符之间")
+	// #202: 改名路径上限与建群拉齐为 32（原 max=10）；@NotNull+@Size(min=1) 语义覆盖原 @NotEmpty（null/空串均拒）
+	@NotNull(message = "群名称不可为null")
+	@Size(min = 1, max = 32, message = "群名称长度必须在1到32个字符之间")
 	@Schema(description ="群名称")
 	private String name;
 

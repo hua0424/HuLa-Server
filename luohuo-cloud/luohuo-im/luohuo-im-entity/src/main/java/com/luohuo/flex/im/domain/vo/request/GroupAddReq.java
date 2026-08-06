@@ -24,6 +24,9 @@ public class GroupAddReq {
     @Schema(description ="邀请的uid")
     private List<Long> uidList;
 
+    // #202: 群名上限统一 32（im_room_group.name 历史 varchar(16) 无校验 → INSERT 触发 SQL_EX(-4)）；
+    // 不加 min/NotNull——null/空串走默认群名生成路径
+    @Size(max = 32, message = "群名称最长32个字符")
     @Schema(description ="群聊名称")
     private String groupName;
 }

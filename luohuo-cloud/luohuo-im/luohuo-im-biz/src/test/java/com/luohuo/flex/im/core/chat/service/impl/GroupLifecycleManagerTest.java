@@ -3,6 +3,7 @@ package com.luohuo.flex.im.core.chat.service.impl;
 import com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper;
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.flex.common.OnlineService;
+import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.im.core.chat.dao.ContactDao;
 import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
@@ -195,11 +196,67 @@ class GroupLifecycleManagerTest {
 		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
 	}
 
+	/**
+	 * #202 解散分支公共桩：群主解散，成员列表 = [OWNER, MEMBER]，事务模板直接执行回调。
+	 */
+	private void stubDisbandBasics() {
+		when(roomGroupCache.getByRoomIdFromDb(ROOM_ID)).thenReturn(roomGroup());
+		when(roomService.getById(ROOM_ID)).thenReturn(room());
+		when(groupMemberDao.isGroupShip(eq(ROOM_ID), any())).thenReturn(true);
+		when(groupMemberDao.isLord(GROUP_ID, OWNER)).thenReturn(true);
+		when(groupMemberDao.getMemberUidList(eq(GROUP_ID), any())).thenReturn(List.of(OWNER, MEMBER));
+		User owner = new User();
+		owner.setId(OWNER);
+		owner.setName("群主");
+		when(userCache.get(OWNER)).thenReturn(owner);
+		runTxInline();
+		when(roomService.removeById(ROOM_ID)).thenReturn(true);
+		when(contactDao.removeByRoomId(eq(ROOM_ID), any())).thenReturn(true);
+		when(groupMemberDao.removeByGroupId(eq(GROUP_ID), any())).thenReturn(true);
+		when(messageDao.removeByRoomId(eq(ROOM_ID), any())).thenReturn(true);
+	}
+
+	private MemberExitReq disbandReq() {
+		MemberExitReq req = new MemberExitReq();
+		req.setRoomId(ROOM_ID);
+		req.setAccount("acc");
+		return req;
+	}
+
+	@Test
+	@DisplayName("#202 exitGroup 解散分支：post-commit 清理某步抛异常时后续步骤仍全部执行，方法不抛")
+	void exitGroup_ownerDisbands_evictionStepThrows_continuesRemainingSteps() {
+		stubDisbandBasics();
+		// 模拟 Redis/infra 抖动：第二步 evictMemberList 抛错，不得中断后续 eviction
+		doThrow(new RuntimeException("redis down")).when(groupMemberCache).evictMemberList(ROOM_ID);
+
+		assertDoesNotThrow(() -> lifecycleManager.exitGroup(true, OWNER, disbandReq()));
+
+		verify(groupMemberCache).evictExceptMemberList(ROOM_ID);
+		verify(groupMemberCache).evictAllMemberDetails();
+		verify(presenceSyncHelper).syncOnline(List.of(OWNER, MEMBER), ROOM_ID, false);
+		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(OWNER, MEMBER));
+	}
+
+	@Test
+	@DisplayName("#202 exitGroup 解散分支：所有成员(含群主)的 userGroupsKey 均 sRem 本房间，群主不做整 key del")
+	void exitGroup_ownerDisbands_sRemsEveryMemberUserGroupsKey() {
+		stubDisbandBasics();
+
+		lifecycleManager.exitGroup(true, OWNER, disbandReq());
+
+		// 每个成员的 userGroupsKey 只 sRem 本房间（成员可能还有 DEF_ROOM 大群等其它成员资格）
+		verify(cachePlusOps).sRem(PresenceCacheKeyBuilder.userGroupsKey(OWNER), ROOM_ID);
+		verify(cachePlusOps).sRem(PresenceCacheKeyBuilder.userGroupsKey(MEMBER), ROOM_ID);
+		// 群成员 key 整体删除；严格匹配单参数调用 → 旧实现 del(uKey, gKey) 不匹配而失败
+		verify(cachePlusOps).del(PresenceCacheKeyBuilder.groupMembersKey(ROOM_ID));
+	}
+
 	@Test
 	@DisplayName("disbandGroup：解析群主后走无注解 core 解散（删房间/消息），验证解散链路端到端")
 	@SuppressWarnings({"unchecked", "rawtypes"})
-	void disbandGroup_resolvesLord_runsDisbandCore() {
-		when(roomGroupCache.getByRoomIdFromDb(ROOM_ID)).thenReturn(roomGroup());
+	void disbandGroup_resolvesLord_runsDisbandCore() {		when(roomGroupCache.getByRoomIdFromDb(ROOM_ID)).thenReturn(roomGroup());
 
 		// mock MyBatis-Plus lambdaQuery 链：.eq().eq().one() → 群主
 		GroupMember lord = new GroupMember();
