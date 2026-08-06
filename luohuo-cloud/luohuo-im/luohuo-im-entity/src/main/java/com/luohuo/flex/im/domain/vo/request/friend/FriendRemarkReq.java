@@ -1,7 +1,6 @@
 package com.luohuo.flex.im.domain.vo.request.friend;
 
 import io.swagger.v3.oas.annotations.media.Schema;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
@@ -24,8 +23,7 @@ public class FriendRemarkReq {
     @Schema(description = "好友uid")
     private Long targetUid;
 
-	@NotBlank(message = "好友备注不能是空")
 	@Size(min = 0, max = 10, message = "好友备注长度必须在0到10个字符之间")
-	@Schema(description = "好友备注")
+	@Schema(description = "好友备注（空串/null = 清空备注，恢复显昵称）")
 	private String remark;
 }
