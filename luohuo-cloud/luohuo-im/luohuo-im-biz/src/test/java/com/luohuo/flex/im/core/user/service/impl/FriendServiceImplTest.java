@@ -13,7 +13,14 @@ import com.luohuo.flex.im.domain.entity.UserFriend;
 import com.luohuo.flex.im.domain.vo.request.friend.FriendRemarkReq;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import jakarta.validation.ValidatorFactory;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -23,6 +30,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -119,5 +128,90 @@ class FriendServiceImplTest {
 
 		assertTrue(updated, "落库成功应照常返回 true");
 		verify(userFriendDao).updateById(any());
+	}
+
+	// ==================== aichatoverview#197：好友备注允许清空（空串 = 恢复显昵称） ====================
+
+	@Test
+	@DisplayName("#197 updateRemark: 空串备注照常落库（写入空串而非吞列）并推送 remark 帧")
+	@SuppressWarnings("unchecked")
+	void updateRemark_emptyRemark_persistsAndPushes() {
+		UserFriend userFriend = new UserFriend();
+		userFriend.setUid(SETTER_UID);
+		userFriend.setFriendUid(TARGET_UID);
+		when(userFriendDao.getByFriends(eq(SETTER_UID), anyList()))
+				.thenReturn(Collections.singletonList(userFriend));
+		when(userFriendDao.updateById(any())).thenReturn(true);
+
+		Boolean updated = friendService.updateRemark(SETTER_UID, new FriendRemarkReq(TARGET_UID, ""));
+
+		assertTrue(updated, "空串备注落库成功应返回 true");
+		ArgumentCaptor<UserFriend> ufCaptor = ArgumentCaptor.forClass(UserFriend.class);
+		verify(userFriendDao).updateById(ufCaptor.capture());
+		assertEquals("", ufCaptor.getValue().getRemark(),
+				"空串应写入实体字段（空串非 null，不受 MyBatis-Plus NOT_NULL 更新策略吞列影响）");
+		verify(pushService, times(1)).sendPushMsg(any(), anyList(), eq(SETTER_UID));
+	}
+
+	@Nested
+	@DisplayName("#197 FriendRemarkReq 校验（空串 remark = 清空，null = 400 拒绝，保留 max=10 上限）")
+	class FriendRemarkReqValidation {
+
+		private static ValidatorFactory factory;
+		private static Validator validator;
+
+		@BeforeAll
+		static void setUpValidator() {
+			factory = Validation.buildDefaultValidatorFactory();
+			validator = factory.getValidator();
+		}
+
+		@AfterAll
+		static void tearDownValidator() {
+			factory.close();
+		}
+
+		private Set<String> violatedProps(FriendRemarkReq req) {
+			Set<ConstraintViolation<FriendRemarkReq>> violations = validator.validate(req);
+			return violations.stream()
+					.map(v -> v.getPropertyPath().toString())
+					.collect(Collectors.toSet());
+		}
+
+		@Test
+		@DisplayName("空串 remark（清空备注）→ 零违约")
+		void emptyRemark_noViolations() {
+			FriendRemarkReq req = new FriendRemarkReq(TARGET_UID, "");
+			assertTrue(violatedProps(req).isEmpty(), "空串备注应通过校验（@NotBlank 已移除，允许清空）");
+		}
+
+		@Test
+		@DisplayName("null remark → remark 违约（PR#70 P2: @NotNull 消除 null 静默 no-op 歧义，null→400）")
+		void nullRemark_violatesRemark() {
+			FriendRemarkReq req = new FriendRemarkReq(TARGET_UID, null);
+			assertTrue(violatedProps(req).contains("remark"),
+					"null 备注应触发 @NotNull 违约（null=拒绝，空串才是清空语义）");
+		}
+
+		@Test
+		@DisplayName("10 字符 remark → 零违约（边界）")
+		void tenCharRemark_noViolations() {
+			FriendRemarkReq req = new FriendRemarkReq(TARGET_UID, "一二三四五六七八九十");
+			assertTrue(violatedProps(req).isEmpty(), "10 字符处于上限边界，应通过校验");
+		}
+
+		@Test
+		@DisplayName("11 字符 remark → remark 违约（保留 max=10 上限）")
+		void elevenCharRemark_violatesRemark() {
+			FriendRemarkReq req = new FriendRemarkReq(TARGET_UID, "一二三四五六七八九十一");
+			assertTrue(violatedProps(req).contains("remark"), "超过 10 字符应触发 @Size 上限违约");
+		}
+
+		@Test
+		@DisplayName("null targetUid → targetUid 违约（保留 @NotNull）")
+		void nullTargetUid_violatesTargetUid() {
+			FriendRemarkReq req = new FriendRemarkReq(null, "老王");
+			assertTrue(violatedProps(req).contains("targetUid"), "targetUid 为 null 应触发 @NotNull");
+		}
 	}
 }
