@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.OnlineService;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
+import com.luohuo.flex.service.SysConfigService;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.RoomService;
@@ -74,6 +75,7 @@ class AiclawServiceImplTest {
 	@Mock private PushService pushService;
 	@Mock private com.luohuo.flex.im.core.user.service.cache.UserCache userCache;
 	@Mock private com.luohuo.basic.cache.repository.CachePlusOps cachePlusOps;
+	@Mock private SysConfigService sysConfigService;
 
 	@InjectMocks
 	private AiclawServiceImpl aiclawService;
@@ -694,5 +696,88 @@ class AiclawServiceImplTest {
 		List<AiclawFriendResp> resps = aiclawService.getFriends(AICLAW_UID, OWNER_UID);
 
 		assertNull(resps.get(0).getDmWorkspaceDir());
+	}
+
+	// ==================== REQ-018 #217: getSelfPrompts agent prompt 模板下发 ====================
+
+	private static final String PROMPT_REPLY_CONTRACT = "你是 HuLa 聊天会话里的 AI 助理。要把回复发送到当前聊天，你必须在 bash 中实际运行命令：{reply_command}。⚠️ 只有运行这条 bash 命令才会真正发送消息。";
+	private static final String PROMPT_IDENTITY_ANCHOR = "你是本 HuLa 聊天会话的 AI 助理 {displayName}（uid {uid}）。凡系统路由到你这里的消息，都是在对你说话。";
+	private static final String PROMPT_PERSONA_SECTION = "你的人设：\n{persona}";
+
+	/** 3 个 key 全配时的 sysConfigService 桩：每个 key 返回各自模板原文。 */
+	private void stubAllPromptsConfigured() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(existingAiclaw("openclaw"));
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT)).thenReturn(PROMPT_REPLY_CONTRACT);
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_IDENTITY_ANCHOR)).thenReturn(PROMPT_IDENTITY_ANCHOR);
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_PERSONA_SECTION)).thenReturn(PROMPT_PERSONA_SECTION);
+	}
+
+	@Test
+	@DisplayName("getSelfPrompts: 3 个模板 key 全配置 → 返回原文，key 名与顺序正确（占位符原样不渲染）")
+	void getSelfPrompts_allConfigured_returnsOriginalText() {
+		stubAllPromptsConfigured();
+
+		java.util.Map<String, String> prompts = aiclawService.getSelfPrompts(AICLAW_UID);
+
+		assertEquals(3, prompts.size(), "应恰好返回 3 个模板");
+		assertEquals(PROMPT_REPLY_CONTRACT, prompts.get(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT));
+		assertEquals(PROMPT_IDENTITY_ANCHOR, prompts.get(AiclawServiceImpl.PROMPT_KEY_IDENTITY_ANCHOR));
+		assertEquals(PROMPT_PERSONA_SECTION, prompts.get(AiclawServiceImpl.PROMPT_KEY_PERSONA_SECTION));
+		// key 名本身也要原样下发（plugins 侧按固定 key 消费）
+		java.util.List<String> keys = new java.util.ArrayList<>(prompts.keySet());
+		assertEquals(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT, keys.get(0));
+		assertEquals(AiclawServiceImpl.PROMPT_KEY_IDENTITY_ANCHOR, keys.get(1));
+		assertEquals(AiclawServiceImpl.PROMPT_KEY_PERSONA_SECTION, keys.get(2));
+	}
+
+	@Test
+	@DisplayName("getSelfPrompts: 缺 agent.prompt.reply_contract（get 返回空串）→ BizException 指明缺失 key")
+	void getSelfPrompts_missingReplyContract_throwsWithKey() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(existingAiclaw("openclaw"));
+		// 只 stub 首个 key 为空串——实现按序读取，首个缺失即抛错，后面的 key 不会被读到（避免 Mockito 严格校验报多余 stub）
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT)).thenReturn("");
+
+		BizException ex = assertThrows(BizException.class,
+				() -> aiclawService.getSelfPrompts(AICLAW_UID));
+		assertTrue(ex.getMessage().contains(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT),
+				"错误信息必须指明缺哪个 key，实际: " + ex.getMessage());
+	}
+
+	@Test
+	@DisplayName("getSelfPrompts: 缺 agent.prompt.identity_anchor → BizException 指明缺失 key")
+	void getSelfPrompts_missingIdentityAnchor_throwsWithKey() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(existingAiclaw("openclaw"));
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT)).thenReturn(PROMPT_REPLY_CONTRACT);
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_IDENTITY_ANCHOR)).thenReturn("");
+
+		BizException ex = assertThrows(BizException.class,
+				() -> aiclawService.getSelfPrompts(AICLAW_UID));
+		assertTrue(ex.getMessage().contains(AiclawServiceImpl.PROMPT_KEY_IDENTITY_ANCHOR),
+				"错误信息必须指明缺哪个 key，实际: " + ex.getMessage());
+	}
+
+	@Test
+	@DisplayName("getSelfPrompts: 缺 agent.prompt.persona_section → BizException 指明缺失 key")
+	void getSelfPrompts_missingPersonaSection_throwsWithKey() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(existingAiclaw("openclaw"));
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_REPLY_CONTRACT)).thenReturn(PROMPT_REPLY_CONTRACT);
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_IDENTITY_ANCHOR)).thenReturn(PROMPT_IDENTITY_ANCHOR);
+		when(sysConfigService.get(AiclawServiceImpl.PROMPT_KEY_PERSONA_SECTION)).thenReturn("");
+
+		BizException ex = assertThrows(BizException.class,
+				() -> aiclawService.getSelfPrompts(AICLAW_UID));
+		assertTrue(ex.getMessage().contains(AiclawServiceImpl.PROMPT_KEY_PERSONA_SECTION),
+				"错误信息必须指明缺哪个 key，实际: " + ex.getMessage());
+	}
+
+	@Test
+	@DisplayName("getSelfPrompts: aiclaw 不存在 → 抛 BizException(\"AI助理不存在\")（对齐 getSelfPersona 自作用域校验）")
+	void getSelfPrompts_aiclawNotFound_throwsBizException() {
+		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(null);
+
+		BizException ex = assertThrows(BizException.class,
+				() -> aiclawService.getSelfPrompts(AICLAW_UID));
+		assertTrue(ex.getMessage().contains("AI助理不存在"));
+		verify(sysConfigService, never()).get(anyString());
 	}
 }

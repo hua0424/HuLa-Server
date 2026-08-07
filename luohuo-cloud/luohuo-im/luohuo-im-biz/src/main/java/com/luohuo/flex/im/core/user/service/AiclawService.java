@@ -18,6 +18,7 @@ import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawTokenResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * AI助理管理服务
@@ -99,6 +100,21 @@ public interface AiclawService {
 	 * @throws com.luohuo.basic.exception.BizException aiclaw 不存在时抛出
 	 */
 	AiclawPersonaResp getSelfPersona(Long uid);
+
+	/**
+	 * 获取 AI 助理 system prompt 模板（aiclaw 自作用域，REQ-018 #217）。
+	 *
+	 * <p>模板文本配置化存于 base_config（type='agent_prompt'，config_key 形如
+	 * {@code agent.prompt.reply_contract}），plugins 启动时拉取。
+	 * 三个模板 key 全部配置时返回原文（占位符 {@code {reply_command}} / {@code {displayName}} /
+	 * {@code {uid}} / {@code {persona}} 原样下发，不做渲染）；任一 key 缺失/为空时抛
+	 * {@code BizException}，错误信息指明缺失的 key。</p>
+	 *
+	 * @param uid caller 自身 uid（来自 aiclaw connectionToken 认证身份）
+	 * @return LinkedHashMap：config_key → 模板原文，固定 3 个 key
+	 * @throws com.luohuo.basic.exception.BizException aiclaw 不存在 / 任一模板 key 缺失或为空时抛出
+	 */
+	Map<String, String> getSelfPrompts(Long uid);
 
 	/**
 	 * 获取 aiclaw 的对话列表（按好友分组，含最后一条消息）

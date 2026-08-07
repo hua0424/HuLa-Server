@@ -50,6 +50,7 @@ import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
 import com.luohuo.flex.common.cache.FriendCacheKeyBuilder;
 import com.luohuo.flex.model.enums.ChatActiveStatusEnum;
 import com.luohuo.flex.im.enums.UserTypeEnum;
+import com.luohuo.flex.service.SysConfigService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -86,9 +87,19 @@ public class AiclawServiceImpl implements AiclawService {
 	private final PushService pushService;
 	private final com.luohuo.flex.im.core.user.service.cache.UserCache userCache;
 	private final com.luohuo.basic.cache.repository.CachePlusOps cachePlusOps;
+	private final SysConfigService sysConfigService;
 
 	private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
 	private static final Duration TOKEN_CACHE_TTL = Duration.ofDays(7);
+
+	// ==================== REQ-018 #217: agent prompt 模板 key（base_config.type='agent_prompt'） ====================
+
+	/** 回复契约模板（含 {reply_command} 占位符，渲染时 plugins 用代码常量 REPLACE）。 */
+	public static final String PROMPT_KEY_REPLY_CONTRACT = "agent.prompt.reply_contract";
+	/** 身份锚模板（含 {displayName} / {uid} 变量）。 */
+	public static final String PROMPT_KEY_IDENTITY_ANCHOR = "agent.prompt.identity_anchor";
+	/** 人设区块包装模板（含 {persona} 变量）。 */
+	public static final String PROMPT_KEY_PERSONA_SECTION = "agent.prompt.persona_section";
 
 	// ==================== 创建 ====================
 
@@ -451,6 +462,28 @@ public class AiclawServiceImpl implements AiclawService {
 		return AiclawPersonaResp.builder()
 				.publicPersona(aiclaw.getPublicPersona())
 				.build();
+	}
+
+	@Override
+	public Map<String, String> getSelfPrompts(Long uid) {
+		// 自作用域：uid 来自认证身份（connectionToken），只能读自己，无需 owner 校验（对齐 getSelfPersona）
+		Aiclaw aiclaw = aiclawDao.getByUid(uid);
+		if (aiclaw == null) {
+			throw new BizException("AI助理不存在");
+		}
+		// 3 个模板 key 全配才下发；任一 key 缺失/为空（SysConfigService.get 返回 ""）必须指明缺哪个 key，
+		// 绝不笼统报错——plugins 侧据此拒启并给出可操作提示（REQ-018 #217）。
+		List<String> keys = Arrays.asList(
+				PROMPT_KEY_REPLY_CONTRACT, PROMPT_KEY_IDENTITY_ANCHOR, PROMPT_KEY_PERSONA_SECTION);
+		Map<String, String> prompts = new LinkedHashMap<>();
+		for (String key : keys) {
+			String value = sysConfigService.get(key);
+			if (StrUtil.isBlank(value)) {
+				throw new BizException("agent prompt config missing: " + key);
+			}
+			prompts.put(key, value);
+		}
+		return prompts;
 	}
 
 	@Override
