@@ -36,6 +36,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * AI助理管理
@@ -115,6 +116,14 @@ public class AiclawController {
 	public R<AiclawPersonaResp> getSelfPersona() {
 		// 自作用域：uid 来自 aiclaw connectionToken 认证身份，只能拉取自己的人设
 		return R.success(aiclawService.getSelfPersona(ContextUtil.getUid()));
+	}
+
+	@GetMapping("/self/prompts")
+	@Operation(summary = "获取 AI 助理 system prompt 模板（aiclaw 自作用域，REQ-018 #217）")
+	public R<Map<String, String>> getSelfPrompts() {
+		// 自作用域：uid 来自 aiclaw connectionToken 认证身份；模板为全局配置（base_config type='agent_prompt'），
+		// 无需 owner 校验。占位符原样下发，渲染由 plugins 侧完成。
+		return R.success(aiclawService.getSelfPrompts(ContextUtil.getUid()));
 	}
 
 	@GetMapping("/{uid}/activation-token")
