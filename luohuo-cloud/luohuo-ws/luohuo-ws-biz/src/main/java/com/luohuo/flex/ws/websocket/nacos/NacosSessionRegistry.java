@@ -1,5 +1,6 @@
 package com.luohuo.flex.ws.websocket.nacos;
 
+import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import com.alibaba.cloud.nacos.NacosDiscoveryProperties;
 import com.alibaba.cloud.nacos.NacosServiceManager;
@@ -8,6 +9,7 @@ import com.alibaba.nacos.api.naming.NamingService;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.alibaba.nacos.client.naming.utils.CollectionUtils;
 import com.luohuo.basic.cache.repository.CachePlusOps;
+import com.luohuo.basic.cache.redis2.CacheResult;
 import com.luohuo.basic.model.cache.CacheHashKey;
 import com.luohuo.basic.model.cache.CacheKey;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
@@ -215,14 +217,17 @@ public class NacosSessionRegistry {
 
 	public Set<String> getAllActiveNodeIds() {
 		try {
+			// P1-1（PR #76）：实例存在即活跃——不做 isHealthy 过滤，健康检查抖动（Nacos gRPC 9848 超时
+			// 被标 unhealthy）不再把存活节点排除；真死节点由 Nacos ephemeral 实例自动移除兜底
 			List<Instance> instances = namingService.getAllInstances("ws-cluster", "WS_GROUP");
 			return instances.stream()
-					.filter(Instance::isHealthy)
 					.map(instance -> instance.getMetadata().get("nodeId"))
 					.collect(Collectors.toSet());
 		} catch (NacosException e) {
+			// #214 fail-safe：查询失败返回 null 而非空集——调用方（cleanStaleRoutes）据此区分
+			// 「查询失败」与「确实无活跃节点」，两种情形下都禁止清理，避免异常瞬间全量误清
 			log.error("获取活跃节点失败", e);
-			return Collections.emptySet();
+			return null;
 		}
 	}
 
@@ -254,12 +259,24 @@ public class NacosSessionRegistry {
 	@Scheduled(fixedDelay = 30000)
 	public void cleanStaleRoutes() {
 		// 1. 获取所有需要对比的ID集合
+		// 空集 fail-safe（#214）：Nacos 查询失败（null）或无任何活跃节点（空集）时禁止清理，
+		// 避免基础设施抖动瞬间把全部节点路由误清（fail-destructive → 静默丢帧黑洞）
 		Set<String> activeNodes = getAllActiveNodeIds();
+		if (activeNodes == null || activeNodes.isEmpty()) {
+			log.warn("cleanStaleRoutes 跳过：活跃节点集合为空或查询失败（activeNodes={}），不执行任何路由清理", activeNodes);
+			return;
+		}
 		Set<String> redisNodes = getAllRedisNodeIds();
+		if (redisNodes.isEmpty()) {
+			log.warn("cleanStaleRoutes 跳过：Redis 中无任何节点路由（redisNodes 为空），无残留可清理");
+			return;
+		}
 
-		// 2. 计算需要清理的节点ID
+		// 2. 计算需要清理的节点ID —— 本节点豁免（#214）：自身心跳抖动被标 unhealthy 时不清理自己，
+		// 否则在线会话路由被清 → 推送静默黑洞（08-07 实证 26 分钟黑洞窗口）
 		Set<String> staleNodes = redisNodes.stream()
 				.filter(node -> !activeNodes.contains(node))
+				.filter(node -> !node.equals(nodeId))
 				.collect(Collectors.toSet());
 
 		// 3. 批量清理
@@ -272,6 +289,47 @@ public class NacosSessionRegistry {
 				log.error("节点清理失败: {}", node, e);
 			}
 		});
+	}
+
+	/**
+	 * 路由自愈补挂（#214）：定期比对本节点活跃设备与 Redis 路由表，
+	 * 路由缺失或指向其他节点（如误清残留）时重新补挂 addUserRoute，
+	 * 避免误清后已连接会话不补挂导致的长时间推送黑洞（08-07 实证 26 分钟）。
+	 */
+	@Scheduled(fixedDelay = 60000)
+	public void selfHealRoutes() {
+		Map<Long, Set<String>> activeDevices = sessionManager.getActiveDevices();
+		if (CollUtil.isEmpty(activeDevices)) {
+			return;
+		}
+
+		int healed = 0;
+		for (Map.Entry<Long, Set<String>> entry : activeDevices.entrySet()) {
+			Long uid = entry.getKey();
+			for (String clientId : entry.getValue()) {
+				String deviceField = uid + ":" + clientId;
+				String routedNode = null;
+				try {
+					CacheResult<String> cacheResult = cachePlusOps.hGet(RouterCacheKeyBuilder.buildDeviceNodeMap(deviceField));
+					routedNode = cacheResult == null ? null : cacheResult.getValue();
+				} catch (Exception e) {
+					log.warn("路由自愈检查失败: uid={}, clientId={}", uid, clientId, e);
+					continue;
+				}
+				if (routedNode == null) {
+					// 路由缺失（如误清/从未注册）：补挂到本节点
+					addUserRoute(uid, clientId);
+					healed++;
+					log.info("路由自愈补挂: uid={}, clientId={}, 补挂到本节点={}", uid, clientId, nodeId);
+				} else if (!nodeId.equals(routedNode)) {
+					// P2-1（PR #76）：异指他节点不抢路由不补挂——该设备可能已迁移/重连到新节点，仅记录不一致
+					log.info("路由自愈检查: uid={}, clientId={} 路由指向他节点 {}，不抢不补", uid, clientId, routedNode);
+				}
+			}
+		}
+		if (healed > 0) {
+			log.info("路由自愈完成: 补挂设备数={}", healed);
+		}
 	}
 
 	private void cleanNodeCompletely(String nodeId) {

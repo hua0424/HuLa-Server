@@ -109,6 +109,16 @@ public class SessionManager {
 				.collect(Collectors.toList());
 	}
 
+	/**
+	 * 获取本节点全部活跃设备（设备级：uid → clientId 集合，每 clientId 一条），
+	 * 用于路由自愈比对（#214）：路由缺失或指向其他节点时补挂。
+	 */
+	public Map<Long, Set<String>> getActiveDevices() {
+		Map<Long, Set<String>> result = new HashMap<>();
+		USER_DEVICE_SESSION_MAP.forEach((uid, deviceMap) -> result.put(uid, new HashSet<>(deviceMap.keySet())));
+		return result;
+	}
+
 	// 注册会话
 	public void registerSession(WebSocketSession session, String clientId, Long uid) {
 		// 1. 设备级会话注册

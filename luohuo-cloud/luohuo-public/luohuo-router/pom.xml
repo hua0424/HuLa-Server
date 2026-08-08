@@ -61,5 +61,40 @@
             <groupId>com.alibaba.nacos</groupId>
             <artifactId>nacos-client</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <!--
+      父 pom (luohuo-dependencies-parent) 的 pluginManagement 把 surefire 硬编码为
+      skipTests/skip=true（打包统一跳过测试，硬编码值无法被 -DskipTests 覆盖）。
+      仅当显式传入 -DskipTests=false 时，下面的 profile 激活并把 surefire 改回不跳过，
+      用于运行本模块单元测试（NacosRouterServiceTest）。
+    -->
+    <profiles>
+        <profile>
+            <id>run-router-tests</id>
+            <activation>
+                <property>
+                    <name>skipTests</name>
+                    <value>false</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <skipTests>false</skipTests>
+                            <skip>false</skip>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

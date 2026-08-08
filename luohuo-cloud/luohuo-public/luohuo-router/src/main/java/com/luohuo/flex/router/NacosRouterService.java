@@ -75,9 +75,15 @@ public class NacosRouterService {
 			return null;
 		}
 
-		// 3. 检查节点是否活跃
-		Set<String> activeNodes = getAllActiveNodes();
-		return activeNodes.contains(nodeId) ? nodeId : null;
+		// 3. 检查节点是否活跃 —— #214 降级：Nacos 查询失败时跳过活跃性检查直接返回 nodeId（保守投递，不静默丢）
+		try {
+			Set<String> activeNodes = getAllActiveNodes();
+			return activeNodes.contains(nodeId) ? nodeId : null;
+		} catch (BizException e) {
+			log.warn("getDeviceNode Nacos 查询失败，降级跳过活跃性检查: uid={}, clientId={}, nodeId={}, reason={}",
+					uid, clientId, nodeId, e.getMessage());
+			return nodeId;
+		}
 	}
 
 	/**
@@ -128,8 +134,14 @@ public class NacosRouterService {
 		CacheHashKey deviceNodeMap = RouterCacheKeyBuilder.buildDeviceNodeMap("");
 		Map<String, Map<String, Long>> result = new ConcurrentHashMap<>();
 
-		// 3. 过滤活跃节点
-		Set<String> activeNodes = getAllActiveNodes();
+		// 3. 过滤活跃节点 —— #214 降级：Nacos 查询失败时不过滤（保守投递，宁可发到死节点也不静默丢）
+		Set<String> activeNodes;
+		try {
+			activeNodes = getAllActiveNodes();
+		} catch (BizException e) {
+			log.warn("findNodeDeviceUser Nacos 查询失败，降级为不过滤活跃节点（保守投递）: reason={}", e.getMessage());
+			activeNodes = null;
+		}
 
 		// 5. 使用HSCAN游标分批遍历
 		ScanOptions options = ScanOptions.scanOptions().count(500).build();
@@ -140,7 +152,7 @@ public class NacosRouterService {
 				// 5.1 直接使用字符串类型
 				String field = (String) entry.getKey();
 				String nodeId = (String) entry.getValue();
-				if (!activeNodes.contains(nodeId)) continue;
+				if (activeNodes != null && !activeNodes.contains(nodeId)) continue;
 
 				// 5.2 按uid过滤目标用户
 				String[] parts = field.split(":");
@@ -168,12 +180,15 @@ public class NacosRouterService {
 
 	/**
 	 * 获取所有活跃节点
+	 * <p>
+	 * P1-1（PR #76）：实例存在即活跃——不做 isHealthy 过滤，健康检查抖动被标 unhealthy 的
+	 * 存活节点不再被排除（否则路由存在也投递不到，静默丢弃）；真死节点由 Nacos ephemeral
+	 * 实例自动移除兜底。
 	 */
 	public Set<String> getAllActiveNodes() {
 		try {
 			List<Instance> instances = namingService.getAllInstances("ws-cluster", "WS_GROUP");
 			return instances.stream()
-					.filter(Instance::isHealthy)
 					.map(instance -> instance.getMetadata().get("nodeId"))
 					.collect(Collectors.toSet());
 		} catch (NacosException e) {
