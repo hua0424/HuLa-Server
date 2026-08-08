@@ -103,10 +103,25 @@ public class PushService {
 		List<CompletableFuture<Void>> futures = new ArrayList<>();
 		nodeDeviceUser.forEach((nodeId, deviceUserMap) -> futures.add(CompletableFuture.runAsync(
 				() -> {
-					if (retry) {
-						mqProducer.sendMsgWithDelay(MqConstant.PUSH_DELAY_TOPIC, new NodePushDTO(msg, deviceUserMap, hashId, cuid), delaySeconds);
-					} else {
-						mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId, new NodePushDTO(msg, deviceUserMap, hashId, cuid));
+					try {
+						if (retry) {
+							mqProducer.sendMsgWithDelay(MqConstant.PUSH_DELAY_TOPIC, new NodePushDTO(msg, deviceUserMap, hashId, cuid), delaySeconds);
+						} else {
+							mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId, new NodePushDTO(msg, deviceUserMap, hashId, cuid));
+						}
+					} catch (Exception e) {
+						// #220：MQ 发送失败不再静默丢弃——升级 WARN 告警
+						List<Long> targetUids = new ArrayList<>(deviceUserMap.values());
+						log.warn("MQ发送失败: nodeId={}, type={}, uids={}, retry={}, reason={}",
+								nodeId, msg.getType(), targetUids, retry, e.getMessage(), e);
+						if (retry) {
+							// 延迟重试链路本身失败：抛回给 executeRetry 的 whenComplete 按 retryCount+1 继续
+							// （受 scheduleDelayRetry 的 maxRetryCount 上限约束，不会无限递归）
+							throw e instanceof RuntimeException re ? re : new RuntimeException(e);
+						}
+						// P1-2（PR #76）：不走 PUSH_DELAY_TOPIC（persona 类推送 hashId=0 不在 in-flight 集合，
+						// RetryPushConsumer 对它是 no-op，重试空转）——改为有界直发重发 PUSH_TOPIC+nodeId
+						scheduleDirectResend(nodeId, msg, deviceUserMap, hashId, cuid, 1, "MQ发送失败: " + e.getMessage());
 					}
 				}, getExecutorForNode(nodeId)
 		)));
@@ -263,6 +278,35 @@ public class PushService {
 					scheduleDelayRetry(msg, uids, hashId, cuid, 1, "首次推送失败: " + throwable.getMessage());
 					return null;
 				});
+	}
+
+	/**
+	 * P1-2（PR #76）：MQ 直发失败后的有界直发重试——delaySeconds 后直接重发 PUSH_TOPIC+nodeId。
+	 * <p>
+	 * 不走 PUSH_DELAY_TOPIC 延迟重试（persona 类推送 hashId=0 不在 in-flight 集合，RetryPushConsumer
+	 * 对它是 no-op）；重试计数递增、上限复用 maxRetryCount，超限 log.error 停手（防无限循环）。
+	 * 路由 deviceUserMap 沿用本次发送结果（MQ 失败时路由是好的，重发同一 nodeId 合理）。
+	 */
+	private void scheduleDirectResend(String nodeId, WsBaseResp<?> msg, Map<String, Long> deviceUserMap,
+									  Long hashId, Long cuid, int retryCount, String reason) {
+		if (retryCount > maxRetryCount) {
+			log.error("MQ直发重试已达最大次数[{}]，停止重试。nodeId={}, type={}, Reason: {}",
+					maxRetryCount, nodeId, msg.getType(), reason);
+			return;
+		}
+
+		retryScheduler.schedule(() -> {
+			try {
+				mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId, new NodePushDTO(msg, deviceUserMap, hashId, cuid));
+			} catch (Exception e) {
+				log.warn("MQ直发重试失败: nodeId={}, type={}, 第{}次, reason={}",
+						nodeId, msg.getType(), retryCount, e.getMessage(), e);
+				scheduleDirectResend(nodeId, msg, deviceUserMap, hashId, cuid, retryCount + 1,
+						"MQ直发重试失败: " + e.getMessage());
+			}
+		}, delaySeconds, TimeUnit.SECONDS);
+
+		log.info("MQ直发重试已调度。nodeId={}, type={}, 第{}次重试, 延迟: {}秒", nodeId, msg.getType(), retryCount, delaySeconds);
 	}
 
 	/**
