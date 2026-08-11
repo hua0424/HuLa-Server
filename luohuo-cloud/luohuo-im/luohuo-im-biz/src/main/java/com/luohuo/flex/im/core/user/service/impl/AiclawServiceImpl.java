@@ -700,9 +700,10 @@ public class AiclawServiceImpl implements AiclawService {
 		if (aiclaw.getAuthStatus() != 2) {
 			throw new BizException("该AI助理不在停用状态");
 		}
+		long retentionMinutes = getDeactivateRetentionMinutes();
 		if (aiclaw.getDeactivatedAt() != null
-				&& aiclaw.getDeactivatedAt().plusMinutes(getDeactivateRetentionMinutes()).isBefore(LocalDateTime.now())) {
-			throw new BizException("已超过24小时恢复期");
+				&& aiclaw.getDeactivatedAt().plusMinutes(retentionMinutes).isBefore(LocalDateTime.now())) {
+			throw new BizException("已超过停用恢复期（" + retentionMinutes + " 分钟）");
 		}
 
 		Aiclaw update = new Aiclaw();

@@ -818,13 +818,14 @@ class AiclawServiceImplTest {
 	}
 
 	@Test
-	@DisplayName("restore: 配置缺行(默认24h) → deactivatedAt=now-25h 抛 BizException(\"已超过24小时恢复期\")")
+	@DisplayName("restore: 配置缺行(默认24h) → deactivatedAt=now-25h 抛 BizException(\"已超过停用恢复期（1440 分钟）\")")
 	void restore_default24h_expired_throws() {
 		stubRestorePath(LocalDateTime.now().minusHours(25));
 		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
 
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
-		assertTrue(ex.getMessage().contains("已超过24小时恢复期"));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1440"), "缺行回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
 		verify(aiclawDao, never()).updateById(any());
 	}
 
@@ -842,34 +843,37 @@ class AiclawServiceImplTest {
 	}
 
 	@Test
-	@DisplayName("restore: 配置 1 分钟 → deactivatedAt=now-2min 抛 BizException(\"已超过24小时恢复期\")")
+	@DisplayName("restore: 配置 1 分钟 → deactivatedAt=now-2min 抛 BizException(\"已超过停用恢复期（1 分钟）\")")
 	void restore_config1min_expired_throws() {
 		stubRestorePath(LocalDateTime.now().minusMinutes(2));
 		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("1");
 
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
-		assertTrue(ex.getMessage().contains("已超过24小时恢复期"));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1 分钟"), "配置 1 分钟应把分钟数带进文案，实际: " + ex.getMessage());
 		verify(aiclawDao, never()).updateById(any());
 	}
 
 	@Test
-	@DisplayName("restore: 配置非法值 abc → 回退默认24h（deactivatedAt=now-25h 抛错）")
+	@DisplayName("restore: 配置非法值 abc → 回退默认24h（deactivatedAt=now-25h 抛错，文案带 1440）")
 	void restore_invalidValue_fallsBackToDefault24h() {
 		stubRestorePath(LocalDateTime.now().minusHours(25));
 		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("abc");
 
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
-		assertTrue(ex.getMessage().contains("已超过24小时恢复期"));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1440"), "非法值回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
 	}
 
 	@Test
-	@DisplayName("restore: 配置值 0（非正数）→ 回退默认24h（deactivatedAt=now-25h 抛错）")
+	@DisplayName("restore: 配置值 0（非正数）→ 回退默认24h（deactivatedAt=now-25h 抛错，文案带 1440）")
 	void restore_nonPositiveValue_fallsBackToDefault24h() {
 		stubRestorePath(LocalDateTime.now().minusHours(25));
 		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("0");
 
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
-		assertTrue(ex.getMessage().contains("已超过24小时恢复期"));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1440"), "非正数回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
 	}
 
 	@Test
