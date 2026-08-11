@@ -39,6 +39,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
 
@@ -779,5 +781,126 @@ class AiclawServiceImplTest {
 				() -> aiclawService.getSelfPrompts(AICLAW_UID));
 		assertTrue(ex.getMessage().contains("AI助理不存在"));
 		verify(sysConfigService, never()).get(anyString());
+	}
+
+	// ==================== #248: aiclaw 停用保留时长配置化 ====================
+
+	/**
+	 * 停用恢复前置：owned aiclaw（auth_status=2、deactivatedAt、tokenPrefix）。
+	 * 仅桩 aiclaw 查询本身；restore 成功路径额外需要 Redis opsForValue（见 stubRedisTokenCache）。
+	 */
+	private Aiclaw stubRestorePath(LocalDateTime deactivatedAt) {
+		Aiclaw aiclaw = ownedAiclaw();
+		aiclaw.setAuthStatus(2);
+		aiclaw.setDeactivatedAt(deactivatedAt);
+		aiclaw.setTokenPrefix("pref1234");
+		return aiclaw;
+	}
+
+	/** restore 成功路径会走 updateTokenCacheAuthStatus → opsForValue().get/set，桩掉避免 NPE（对齐 activate_machineCodeFree_proceeds）。 */
+	private void stubRedisTokenCache() {
+		@SuppressWarnings("unchecked")
+		ValueOperations<String, String> valueOps = mock(ValueOperations.class);
+		when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+	}
+
+	@Test
+	@DisplayName("restore: 配置缺行(默认24h) → deactivatedAt=now-23h 恢复成功")
+	void restore_default24h_withinWindow_restores() {
+		stubRestorePath(LocalDateTime.now().minusHours(23));
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+		stubRedisTokenCache();
+
+		aiclawService.restore(AICLAW_UID, OWNER_UID);
+
+		verify(aiclawDao).updateById(any());
+		verify(aiclawOwnerCache).refresh(AICLAW_UID);
+	}
+
+	@Test
+	@DisplayName("restore: 配置缺行(默认24h) → deactivatedAt=now-25h 抛 BizException(\"已超过停用恢复期（1440 分钟）\")")
+	void restore_default24h_expired_throws() {
+		stubRestorePath(LocalDateTime.now().minusHours(25));
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+
+		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1440"), "缺行回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
+		verify(aiclawDao, never()).updateById(any());
+	}
+
+	@Test
+	@DisplayName("restore: 配置 1 分钟 → deactivatedAt=now-30s 恢复成功")
+	void restore_config1min_withinWindow_restores() {
+		stubRestorePath(LocalDateTime.now().minusSeconds(30));
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("1");
+		stubRedisTokenCache();
+
+		aiclawService.restore(AICLAW_UID, OWNER_UID);
+
+		verify(aiclawDao).updateById(any());
+		verify(aiclawOwnerCache).refresh(AICLAW_UID);
+	}
+
+	@Test
+	@DisplayName("restore: 配置 1 分钟 → deactivatedAt=now-2min 抛 BizException(\"已超过停用恢复期（1 分钟）\")")
+	void restore_config1min_expired_throws() {
+		stubRestorePath(LocalDateTime.now().minusMinutes(2));
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("1");
+
+		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1 分钟"), "配置 1 分钟应把分钟数带进文案，实际: " + ex.getMessage());
+		verify(aiclawDao, never()).updateById(any());
+	}
+
+	@Test
+	@DisplayName("restore: 配置非法值 abc → 回退默认24h（deactivatedAt=now-25h 抛错，文案带 1440）")
+	void restore_invalidValue_fallsBackToDefault24h() {
+		stubRestorePath(LocalDateTime.now().minusHours(25));
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("abc");
+
+		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1440"), "非法值回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
+	}
+
+	@Test
+	@DisplayName("restore: 配置值 0（非正数）→ 回退默认24h（deactivatedAt=now-25h 抛错，文案带 1440）")
+	void restore_nonPositiveValue_fallsBackToDefault24h() {
+		stubRestorePath(LocalDateTime.now().minusHours(25));
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("0");
+
+		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
+		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
+		assertTrue(ex.getMessage().contains("1440"), "非正数回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
+	}
+
+	@Test
+	@DisplayName("purgeExpiredDeactivated: 配置 1 分钟 → 传给 listExpiredDeactivated 的 cutoff ≈ now-1min")
+	void purgeExpiredDeactivated_config1min_cutoffApproxNowMinus1Min() {
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("1");
+		when(aiclawDao.listExpiredDeactivated(any())).thenReturn(List.of());
+
+		aiclawService.purgeExpiredDeactivated();
+
+		ArgumentCaptor<LocalDateTime> captor = ArgumentCaptor.forClass(LocalDateTime.class);
+		verify(aiclawDao).listExpiredDeactivated(captor.capture());
+		long diffSeconds = Math.abs(Duration.between(captor.getValue(), LocalDateTime.now()).toSeconds());
+		assertTrue(Math.abs(diffSeconds - 60) <= 5, "cutoff 应约为 now-1min，实际偏差秒数: " + diffSeconds);
+	}
+
+	@Test
+	@DisplayName("purgeExpiredDeactivated: 配置缺行(默认24h) → cutoff ≈ now-24h（1440 分钟）")
+	void purgeExpiredDeactivated_default_cutoffApproxNowMinus24h() {
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+		when(aiclawDao.listExpiredDeactivated(any())).thenReturn(List.of());
+
+		aiclawService.purgeExpiredDeactivated();
+
+		ArgumentCaptor<LocalDateTime> captor = ArgumentCaptor.forClass(LocalDateTime.class);
+		verify(aiclawDao).listExpiredDeactivated(captor.capture());
+		long diffMinutes = Duration.between(captor.getValue(), LocalDateTime.now()).toMinutes();
+		assertTrue(Math.abs(diffMinutes - 1440) <= 1, "cutoff 应约为 now-1440min(24h)，实际偏差分钟: " + diffMinutes);
 	}
 }

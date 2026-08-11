@@ -58,12 +58,12 @@ public interface AiclawService {
 	void updateProfile(AiclawUpdateReq req, Long ownerUid);
 
 	/**
-	 * 停用（触发24h延迟注销）
+	 * 停用（触发延迟注销；彻底删除前的保留时长由 base_config aiclaw.deactivate.retention.minutes 配置，缺省 1440 分钟）
 	 */
 	void deactivate(Long aiclawUid, Long ownerUid);
 
 	/**
-	 * 恢复（24h内）
+	 * 恢复（须在停用保留时长内，时长见 base_config aiclaw.deactivate.retention.minutes，缺省 1440 分钟）
 	 */
 	void restore(Long aiclawUid, Long ownerUid);
 
@@ -142,7 +142,7 @@ public interface AiclawService {
 	void setRelation(Long aiclawUid, Long friendUid, String relationDesc, Long ownerUid);
 
 	/**
-	 * 彻底注销已超过 24h 的停用 aiclaw（定时任务调用）
+	 * 彻底注销已超过配置保留时长的停用 aiclaw（定时任务调用）
 	 */
 	void purgeExpiredDeactivated();
 

@@ -7,7 +7,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * aiclaw 定时任务：每小时扫描已停用超过 24h 的 aiclaw 并彻底注销
+ * aiclaw 定时任务：每分钟扫描已停用超过配置保留时长的 aiclaw 并彻底注销
+ * （保留时长由 base_config 的 aiclaw.deactivate.retention.minutes 配置化，见 AiclawServiceImpl#getDeactivateRetentionMinutes）
  */
 @Slf4j
 @Component
@@ -16,7 +17,7 @@ public class AiclawScheduledTask {
 
 	private final AiclawService aiclawService;
 
-	@Scheduled(cron = "0 0 * * * *")
+	@Scheduled(cron = "0 * * * * *")
 	public void purgeExpiredDeactivatedAiclaws() {
 		log.debug("running aiclaw deactivation purge task");
 		try {

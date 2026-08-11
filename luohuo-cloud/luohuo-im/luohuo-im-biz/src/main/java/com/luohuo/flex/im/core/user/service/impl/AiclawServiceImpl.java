@@ -101,6 +101,13 @@ public class AiclawServiceImpl implements AiclawService {
 	/** 人设区块包装模板（含 {persona} 变量）。 */
 	public static final String PROMPT_KEY_PERSONA_SECTION = "agent.prompt.persona_section";
 
+	// ==================== #248: aiclaw 停用保留时长配置化（base_config.type='aiclaw'） ====================
+
+	/** 停用后彻底删除的保留时长 key（单位：分钟），缺行/非法值回退默认。 */
+	public static final String CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES = "aiclaw.deactivate.retention.minutes";
+	/** 默认保留时长（分钟）= 24*60 = 1440，与配置化前的硬编码 24h 完全一致。 */
+	public static final long DEFAULT_DEACTIVATE_RETENTION_MINUTES = 1440L;
+
 	// ==================== 创建 ====================
 
 	@Override
@@ -693,9 +700,10 @@ public class AiclawServiceImpl implements AiclawService {
 		if (aiclaw.getAuthStatus() != 2) {
 			throw new BizException("该AI助理不在停用状态");
 		}
+		long retentionMinutes = getDeactivateRetentionMinutes();
 		if (aiclaw.getDeactivatedAt() != null
-				&& aiclaw.getDeactivatedAt().plusHours(24).isBefore(LocalDateTime.now())) {
-			throw new BizException("已超过24小时恢复期");
+				&& aiclaw.getDeactivatedAt().plusMinutes(retentionMinutes).isBefore(LocalDateTime.now())) {
+			throw new BizException("已超过停用恢复期（" + retentionMinutes + " 分钟）");
 		}
 
 		Aiclaw update = new Aiclaw();
@@ -727,7 +735,7 @@ public class AiclawServiceImpl implements AiclawService {
 	@Override
 	@Transactional(rollbackFor = Exception.class)
 	public void purgeExpiredDeactivated() {
-		List<Aiclaw> expired = aiclawDao.listExpiredDeactivated(LocalDateTime.now().minusHours(24));
+		List<Aiclaw> expired = aiclawDao.listExpiredDeactivated(LocalDateTime.now().minusMinutes(getDeactivateRetentionMinutes()));
 		for (Aiclaw aiclaw : expired) {
 			Long aiclawUid = aiclaw.getUid();
 			log.info("purging expired aiclaw: uid={}", aiclawUid);
@@ -818,6 +826,31 @@ public class AiclawServiceImpl implements AiclawService {
 	}
 
 	// ==================== 内部方法 ====================
+
+	/**
+	 * 读取 aiclaw 停用保留时长（分钟），base_config 配置化（#248）。
+	 * <p>缺行/空白 → 默认 1440（24h，= 现状硬编码）；非数字(NumberFormatException)或 ≤0 → 回退默认并记 warn。
+	 * 注：sysConfigService.get 走 Redis 缓存（ConfigCacheKeyBuilder），改配置后需刷新缓存或重启 im 生效。</p>
+	 */
+	private long getDeactivateRetentionMinutes() {
+		String raw = sysConfigService.get(CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES);
+		if (StrUtil.isBlank(raw)) {
+			return DEFAULT_DEACTIVATE_RETENTION_MINUTES;
+		}
+		try {
+			long minutes = Long.parseLong(raw.trim());
+			if (minutes <= 0) {
+				log.warn("aiclaw.deactivate.retention.minutes 非法（非正数）: [{}]，回退默认 {} 分钟",
+						raw, DEFAULT_DEACTIVATE_RETENTION_MINUTES);
+				return DEFAULT_DEACTIVATE_RETENTION_MINUTES;
+			}
+			return minutes;
+		} catch (NumberFormatException e) {
+			log.warn("aiclaw.deactivate.retention.minutes 非法（非数字）: [{}]，回退默认 {} 分钟",
+					raw, DEFAULT_DEACTIVATE_RETENTION_MINUTES);
+			return DEFAULT_DEACTIVATE_RETENTION_MINUTES;
+		}
+	}
 
 	private Aiclaw getOwnedAiclaw(Long aiclawUid, Long ownerUid) {
 		Aiclaw aiclaw = aiclawDao.getByOwnerAndUid(ownerUid, aiclawUid);
