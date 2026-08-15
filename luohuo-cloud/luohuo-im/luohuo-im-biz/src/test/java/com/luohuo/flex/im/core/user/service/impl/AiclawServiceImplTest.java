@@ -700,6 +700,38 @@ class AiclawServiceImplTest {
 		assertNull(resps.get(0).getDmWorkspaceDir());
 	}
 
+	// ==================== #280: 工作目录按 base 分隔符风格拼接 ====================
+
+	@Test
+	@DisplayName("#280 list: Windows base（含反斜杠）→ ownerWorkspaceDir 全反斜杠（不再混合分隔符）")
+	void list_windowsBase_ownerDirBackslashJoined() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		// node 在 Windows 上用 join() 上报原生反斜杠风格 base（JSON 转义后每段 \\）
+		aiclaw.setAdapterConfig(
+				"{\"hostname\":\"win-box\",\"ip\":\"10.0.0.2\",\"workspaceBase\":\"C:\\\\Users\\\\hua\\\\.aichat\\\\opencode\\\\workspace\"}");
+		stubListPath(aiclaw);
+
+		AiclawListResp resp = aiclawService.list(OWNER_UID).get(0);
+
+		assertEquals("C:\\Users\\hua\\.aichat\\opencode\\workspace\\" + AICLAW_UID + "\\owner",
+				resp.getOwnerWorkspaceDir(),
+				"Windows base 下全部段应统一用反斜杠分隔");
+	}
+
+	@Test
+	@DisplayName("#280 getFriends: Windows base（含反斜杠）→ dmWorkspaceDir 全反斜杠")
+	void getFriends_windowsBase_dmDirBackslashJoined() {
+		Aiclaw aiclaw = existingAiclaw("openclaw");
+		aiclaw.setAdapterConfig("{\"workspaceBase\":\"C:\\\\Users\\\\hua\\\\.aichat\\\\workspace\"}");
+		stubFriendsPath(aiclaw, 300L);
+
+		List<AiclawFriendResp> resps = aiclawService.getFriends(AICLAW_UID, OWNER_UID);
+
+		assertEquals("C:\\Users\\hua\\.aichat\\workspace\\" + AICLAW_UID + "\\dm\\300",
+				resps.get(0).getDmWorkspaceDir(),
+				"Windows base 下 dm 目录应统一用反斜杠分隔");
+	}
+
 	// ==================== REQ-018 #217: getSelfPrompts agent prompt 模板下发 ====================
 
 	private static final String PROMPT_REPLY_CONTRACT = "你是 HuLa 聊天会话里的 AI 助理。要把回复发送到当前聊天，你必须在 bash 中实际运行命令：{reply_command}。⚠️ 只有运行这条 bash 命令才会真正发送消息。";
