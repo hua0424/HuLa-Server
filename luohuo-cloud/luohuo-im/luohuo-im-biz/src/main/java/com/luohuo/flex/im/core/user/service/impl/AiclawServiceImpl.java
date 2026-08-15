@@ -321,7 +321,7 @@ public class AiclawServiceImpl implements AiclawService {
 		return aiclaws.stream().map(a -> {
 			User u = userMap.get(a.getUid());
 			// #193: 从 adapter_config 解析上报的主机信息；workspaceBase 缺失时目录字段为 null。
-			// 目录用简单字符串拼接 "/"，不归一分隔符（对齐 plugins deriveWorkspaceDir 钉死的注记）。
+			// #280: 目录拼接跟随 base 的分隔符风格（Windows 反斜杠 / Linux 正斜杠，不归一）。
 			JSONObject config = parseAdapterConfig(a.getAdapterConfig());
 			String workspaceBase = config.getStr("workspaceBase");
 			return AiclawListResp.builder()
@@ -337,8 +337,7 @@ public class AiclawServiceImpl implements AiclawService {
 					.publicPersona(a.getPublicPersona())
 					.hostname(config.getStr("hostname"))
 					.ip(config.getStr("ip"))
-					.ownerWorkspaceDir(StrUtil.isNotBlank(workspaceBase)
-							? workspaceBase + "/" + a.getUid() + "/owner" : null)
+					.ownerWorkspaceDir(joinWorkspaceDir(workspaceBase, String.valueOf(a.getUid()), "owner"))
 					.createTime(a.getCreateTime())
 					.build();
 		}).collect(Collectors.toList());
@@ -412,6 +411,22 @@ public class AiclawServiceImpl implements AiclawService {
 			log.warn("parseAdapterConfig: invalid adapter_config JSON, treat as empty: {}", adapterConfig);
 			return new JSONObject();
 		}
+	}
+
+	/**
+	 * #280: 按 workspaceBase 的分隔符风格拼接工作目录段：base 含反斜杠（Windows node 上报）则用反斜杠，
+	 * 否则正斜杠（Linux 现状不变）。base 缺失时返回 null（#193 契约）。不归一 base 内部的分隔符。
+	 */
+	private String joinWorkspaceDir(String workspaceBase, String... segments) {
+		if (StrUtil.isBlank(workspaceBase)) {
+			return null;
+		}
+		String sep = workspaceBase.indexOf('\\') >= 0 ? "\\" : "/";
+		StringBuilder sb = new StringBuilder(workspaceBase);
+		for (String segment : segments) {
+			sb.append(sep).append(segment);
+		}
+		return sb.toString();
 	}
 
 	@Override
@@ -627,8 +642,8 @@ public class AiclawServiceImpl implements AiclawService {
 					.userType(info != null ? info.getUserType() : null)
 					.relationDesc(relDescMap.containsKey(friendUid) && !relDescMap.get(friendUid).isEmpty()
 							? relDescMap.get(friendUid) : null)
-					.dmWorkspaceDir(StrUtil.isNotBlank(workspaceBase)
-							? workspaceBase + "/" + aiclawUid + "/dm/" + friendUid : null)
+					.dmWorkspaceDir(joinWorkspaceDir(workspaceBase,
+							String.valueOf(aiclawUid), "dm", String.valueOf(friendUid)))
 					.build();
 		}).collect(Collectors.toList());
 	}
