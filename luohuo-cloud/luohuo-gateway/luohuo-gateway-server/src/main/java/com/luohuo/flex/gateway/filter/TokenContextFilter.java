@@ -221,7 +221,7 @@ public class TokenContextFilter implements WebFilter, Ordered {
             // #231 P1-3：切 boundedElastic 前在当前（订阅/事件循环）线程捕获 TTL 快照
             // （grayVersion/applicationId 等，TransmittableThreadLocal 不会自动传播到调度线程）；
             // MDC 同步快照。null 防御：局部串行 Mono 通常同步订阅在调用线程，但 WebFlux 装配线
-            // 不保证 → 快照可空，doFinally 双侧清理只清实际污染的那一侧。
+            // 不保证 → 快照可空，doFinally 清理加 null 防御。
             final Map<String, String> epollTtlSnapshot = ContextUtil.copyContext();
             final Map<String, String> epollMdcSnapshot = MDC.getCopyOfContextMap();
             // #231：Redis 判别（hasKey）+ aiclaw 缓存读（GET/EXPIRE）均为 Redisson 同步阻塞，
@@ -269,19 +269,16 @@ public class TokenContextFilter implements WebFilter, Ordered {
                     // （语义与 filter() 同步 catch (UnauthorizedException) 一致，只是异步路径）。
                     .onErrorResume(UnauthorizedException.class, e ->
                             errorResponse(exchange.getResponse(), e.getMessage(), e.getCode()))
-                    // P1-3 双侧清理：清 boundedElastic 一侧恢复的 TTL/MDC（防调度线程泄漏到下一任务），
-                    // 并恢复订阅一侧被 ContextUtil.remove() 清掉的快照——remove() 清的是当前 map 实例，
-                    // 而 grayVersion/applicationId 是 filter() 早期 set 进同一实例的，需恢复，
-                    // 否则同线程后续读 grayVersion 的 filter 会读空（语义对齐重构前：return null 时
-                    // map 实例存活到请求结束）。
+                    // P1-3 清理（第三轮返工修正）：doFinally 跑在终态线程（本链路的终态线程是
+                    // boundedElastic 调度线程），只清该线程被 doOnNext 恢复时写入的 TTL/MDC
+                    // （防池化线程把 grayVersion/applicationId 泄漏到下一任务）。不做 restore：
+                    // 终态线程是 boundedElastic 而非 epoll，restore 等于把 epoll 快照写进池化线程
+                    // （新增跨任务污染）；epoll 订阅线程自身的 TTL map 由后续请求覆盖（重构前残留语义，
+                    // 保持不动）。
                     .doFinally(s -> {
                         ContextUtil.remove();
                         ContextUtil.clearTenantContext();
                         MDC.clear();
-                        ContextUtil.restoreContext(epollTtlSnapshot);
-                        if (epollMdcSnapshot != null) {
-                            MDC.setContextMap(epollMdcSnapshot);
-                        }
                     });
         }
 
