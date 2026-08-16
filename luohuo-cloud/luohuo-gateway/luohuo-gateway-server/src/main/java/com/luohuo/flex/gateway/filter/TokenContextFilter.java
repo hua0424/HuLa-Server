@@ -34,8 +34,9 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import java.time.Duration;
+
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import com.luohuo.basic.base.R;
 import com.luohuo.basic.context.ContextConstants;
 import com.luohuo.basic.context.ContextUtil;
@@ -63,19 +64,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
     private static final String AICLAW_TOKEN_CACHE_PREFIX = "aiclaw:token:";
 
     /**
-     * #231 本地降级缓存：仅在 Redis 基础设施瞬断（DataAccessException）时观测性留档，
-     * 不作放行依据（放行必须由 Redis 权威存在性 + handleAiclawToken 完整校验决定，
-     * 避免本地缓存遮蔽 im 侧停用/激活对 Redis 的改写，保证失效语义）。
-     * <ul>
-     *   <li>写入时机：Redis 缓存命中路径（handleAiclawToken 成功）+ im 回源重建路径（handleAiclawTokenFromIm 成功）。</li>
-     *   <li>TTL：{@value #LOCAL_FALLBACK_TTL_SECONDS}s 短期，过期即失效。</li>
-     * </ul>
+     * #231 P1-2 可测性：取 SaToken 会话的函数接口。生产默认 StpUtil 实现；
+     * 测试经 package-private 构造器注入桩——Mockito mockStatic 的 inline maker registry
+     * 是 ThreadLocal 绑定，boundedElastic 异步线程上桩全部失效，无法可靠测「有效会话」用例。
      */
-    private static final long LOCAL_FALLBACK_TTL_SECONDS = 30;
-    private static final Map<String, LocalFallbackEntry> LOCAL_FALLBACK_CACHE = new ConcurrentHashMap<>();
-
-    private record LocalFallbackEntry(String json, long expireAtMillis) {
-    }
+    private final Function<String, SaSession> tokenSessionSupplier;
 
     @Value("${spring.profiles.active:dev}")
     protected String profiles;
@@ -99,6 +92,25 @@ public class TokenContextFilter implements WebFilter, Ordered {
         this.saTokenConfig = saTokenConfig;
         this.stringRedisTemplate = stringRedisTemplate;
         this.webClient = webClientBuilder.build();
+        // 生产默认：StpUtil 真实实现
+        this.tokenSessionSupplier = StpUtil::getTokenSessionByToken;
+    }
+
+    /**
+     * #231 P1-2 可测性构造器：注入 tokenSessionSupplier 桩（测试专用，不走 Spring）。
+     * mockStatic(StpUtil) 的 inline maker registry 是 ThreadLocal 绑定，boundedElastic 异步线程上
+     * 桩全部失效；注入函数接口让「有效会话」用例真实可测，不依赖恰好失效的静态桩。
+     */
+    TokenContextFilter(IgnoreProperties ignoreProperties,
+                       SaTokenConfig saTokenConfig,
+                       StringRedisTemplate stringRedisTemplate,
+                       WebClient.Builder webClientBuilder,
+                       Function<String, SaSession> tokenSessionSupplier) {
+        this.ignoreProperties = ignoreProperties;
+        this.saTokenConfig = saTokenConfig;
+        this.stringRedisTemplate = stringRedisTemplate;
+        this.webClient = webClientBuilder.build();
+        this.tokenSessionSupplier = tokenSessionSupplier;
     }
 
     protected boolean isDev(String token) {
@@ -206,6 +218,12 @@ public class TokenContextFilter implements WebFilter, Ordered {
         // --- aiclaw token 分支：先查 Redis 前缀，命中则走 aiclaw 校验；缺失则 SaToken-first 判别 ---
         if (isAiclawToken(token)) {
             final String aiclawToken = token;
+            // #231 P1-3：切 boundedElastic 前在当前（订阅/事件循环）线程捕获 TTL 快照
+            // （grayVersion/applicationId 等，TransmittableThreadLocal 不会自动传播到调度线程）；
+            // MDC 同步快照。null 防御：局部串行 Mono 通常同步订阅在调用线程，但 WebFlux 装配线
+            // 不保证 → 快照可空，doFinally 双侧清理只清实际污染的那一侧。
+            final Map<String, String> epollTtlSnapshot = ContextUtil.copyContext();
+            final Map<String, String> epollMdcSnapshot = MDC.getCopyOfContextMap();
             // #231：Redis 判别（hasKey）+ aiclaw 缓存读（GET/EXPIRE）均为 Redisson 同步阻塞，
             // 挪到 boundedElastic 执行，不占 reactor-http-epoll 事件循环（3s×4 重试阻塞窗口消除）。
             return Mono.fromCallable(() -> {
@@ -213,15 +231,22 @@ public class TokenContextFilter implements WebFilter, Ordered {
                             return hasAiclawCache(aiclawToken);
                         } catch (DataAccessException redisDown) {
                             // #231 方向 2/3：Redis 基础设施瞬断（Redisson 超时/断连）。
-                            // 本地降级缓存仅观测性留档，不作放行依据（失效语义：im 侧停用/激活会
-                            // 改写 Redis，本地副本可能滞后）→ 不放行，报「服务繁忙」让客户端重试，
-                            // 绝不误报「验证token出错」。异常转抛 BizException，由 filter() 既有
-                            // catch (BizException) 统一写响应（与其他网关基础设施失败语义一致）；
-                            // 因 callable 在 boundedElastic 异步执行，BizException 经 reactor error
-                            // signal 传播，由下方 onErrorResume 转成错误响应（语义与同步 catch 一致）。
+                            // 本地短期缓存降级放行已评估否决（失效语义：im 侧停用/激活改写 Redis，
+                            // 本地副本滞后可能遮蔽 authStatus=2；不作放行依据 → 只写不读的死结构
+                            // 已于返工批次删除）→ 不放行，报「服务繁忙」让客户端重试，绝不误报
+                            // 「验证token出错」。异常转抛 BizException，经 reactor error signal 传播，
+                            // 由下方 onErrorResume 转成错误响应（callable 在 boundedElastic 异步执行，
+                            // 不会被 filter() 同步 try-catch 捕获）。
                             log.error("Redis hasKey failed for aiclaw token, prefix={}, err={}",
                                     aiclawToken.substring(0, 8), redisDown.getMessage(), redisDown);
                             throw new BizException(R.FAIL_CODE, "服务繁忙，请稍后重试");
+                        }
+                    })
+                    // P1-3：进入 boundedElastic 后恢复 TTL/MDC（下游 LB 灰度路由读 grayVersion）。
+                    .doOnNext(hasCache -> {
+                        ContextUtil.restoreContext(epollTtlSnapshot);
+                        if (epollMdcSnapshot != null) {
+                            MDC.setContextMap(epollMdcSnapshot);
                         }
                     })
                     .subscribeOn(Schedulers.boundedElastic())
@@ -229,7 +254,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
                         if (Boolean.TRUE.equals(hasCache)) {
                             return handleAiclawToken(aiclawToken, request, mutate, exchange, chain);
                         }
-                        return proceedAfterCacheMiss(aiclawToken, request, mutate, exchange, chain);
+                        // P1-2：SaToken 判别（getTokenSessionByToken 底层同样走 Redis 读）也是阻塞调用，
+                        // 整个 proceedAfterCacheMiss 挪进 defer 保持 boundedElastic 线程执行。
+                        // P0 修复：SaToken 命中分支返回真实 chain.filter Mono（原 return null 落进
+                        // flatMap mapper → Reactor NPE，正常用户 UUID token 全量锁死）。
+                        return Mono.defer(() -> proceedAfterCacheMiss(aiclawToken, request, mutate, exchange, chain));
                     })
                     // callable 在 boundedElastic 执行，其内抛的 BizException 经 reactor error signal
                     // 传播（不会被 filter() 的同步 try-catch 捕获），此处转成「服务繁忙」错误响应。
@@ -239,7 +268,21 @@ public class TokenContextFilter implements WebFilter, Ordered {
                     // token 无效/停用/未激活，406）同样经 error signal 传播，转成 406 错误响应
                     // （语义与 filter() 同步 catch (UnauthorizedException) 一致，只是异步路径）。
                     .onErrorResume(UnauthorizedException.class, e ->
-                            errorResponse(exchange.getResponse(), e.getMessage(), e.getCode()));
+                            errorResponse(exchange.getResponse(), e.getMessage(), e.getCode()))
+                    // P1-3 双侧清理：清 boundedElastic 一侧恢复的 TTL/MDC（防调度线程泄漏到下一任务），
+                    // 并恢复订阅一侧被 ContextUtil.remove() 清掉的快照——remove() 清的是当前 map 实例，
+                    // 而 grayVersion/applicationId 是 filter() 早期 set 进同一实例的，需恢复，
+                    // 否则同线程后续读 grayVersion 的 filter 会读空（语义对齐重构前：return null 时
+                    // map 实例存活到请求结束）。
+                    .doFinally(s -> {
+                        ContextUtil.remove();
+                        ContextUtil.clearTenantContext();
+                        MDC.clear();
+                        ContextUtil.restoreContext(epollTtlSnapshot);
+                        if (epollMdcSnapshot != null) {
+                            MDC.setContextMap(epollMdcSnapshot);
+                        }
+                    });
         }
 
         // --- 原有 SaToken 逻辑（非 UUID token）---
@@ -265,14 +308,16 @@ public class TokenContextFilter implements WebFilter, Ordered {
             // sa-token 1.42 对非已注册 token 抛 SaTokenException(11074) → 视作 aiclaw，落 im 回源。
             SaSession tokenSession;
             try {
-                tokenSession = StpUtil.getTokenSessionByToken(token);
+                tokenSession = tokenSessionSupplier.apply(token);
             } catch (SaTokenException e) {
                 // sa-token 1.42: tokenSessionCheckLogin=true（默认）下，未注册 token 取 Token-Session 抛 11074
                 tokenSession = null;
             }
             if (tokenSession != null) {
                 fillSaTokenUserHeaders(tokenSession, mutate);
-                return null;  // 继续原有 chain（正常用户路径，完全不变）
+                // P0 修复：返回真实 chain.filter Mono（原 return null 落进 flatMap mapper → Reactor NPE，
+                // 正常用户 UUID token 全量锁死）。doFinally 由 parseToken aiclaw 分支统一挂，此处不重复。
+                return chain.filter(exchange.mutate().request(mutate.build()).build());
             }
             // 缓存缺失 → 经 WebClient 回源 im internal verify-token（reactive，不阻塞 netty 事件循环）
             return handleAiclawTokenFromIm(token, request, mutate, exchange, chain);
@@ -344,9 +389,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
         return Mono.fromRunnable(() -> handleAiclawTokenBlocking(token, request, mutate))
                 .subscribeOn(Schedulers.boundedElastic())
                 // #231 修复：then() 后必须继续 filter chain（否则缓存命中路径 Mono 完成即结束，
-                // 请求永不到达下游），并 doFinally 清 ThreadLocal 上下文（与 filter() 尾部、
-                // handleAiclawTokenFromIm 尾部的清理语义一致）。
-                .then(chain.filter(exchange.mutate().request(mutate.build()).build()))
+                // 请求永不到达下游）。chain.filter 必须包 Mono.defer——filter() 是急切求值（装配
+                // 阶段就调真实 chain），裸 then(chain.filter(...)) 在 GET/EXPIRE 异常场景下
+                // 「chain 不继续」契约无法成立（defer 把调用延迟到 then 实际订阅时，仅上游成功才发生）。
+                // doFinally 清 ThreadLocal 上下文（与 filter() 尾部、handleAiclawTokenFromIm 尾部一致）。
+                .then(Mono.defer(() -> chain.filter(exchange.mutate().request(mutate.build()).build())))
                 .doFinally(s -> {
                     ContextUtil.remove();
                     ContextUtil.clearTenantContext();
@@ -417,8 +464,6 @@ public class TokenContextFilter implements WebFilter, Ordered {
             throw new BizException(R.FAIL_CODE, "服务繁忙，请稍后重试");
         }
 
-        // #231：认证成功 → 写入本地降级缓存（供 Redis 瞬断时兜底放行）
-        seedLocalFallbackCache(prefix, cachedJson);
     }
 
     /**
@@ -494,8 +539,6 @@ public class TokenContextFilter implements WebFilter, Ordered {
                     stringRedisTemplate.opsForValue().setIfAbsent(
                             cacheKey, cache.toString(), Duration.ofDays(7));
                     log.info("aiclaw token cache rebuilt from im, uid={}", uid);
-                    // #231：im 回源重建成功 → 本地降级缓存同步置位
-                    seedLocalFallbackCache(prefix, cache.toString());
 
                     // 写下游请求头
                     mutate.header(U_ID_HEADER, String.valueOf(uid));
@@ -542,30 +585,6 @@ public class TokenContextFilter implements WebFilter, Ordered {
         response.setStatusCode(HttpStatus.OK);
         DataBuffer dataBuffer = response.bufferFactory().wrap(tokenError.toString().getBytes());
         return response.writeWith(Mono.just(dataBuffer));
-    }
-
-    // ===== #231 本地降级缓存：写入入口 + 测试钩子 =====
-
-    /** 写入本地降级缓存（短期 TTL）。 */
-    private static void seedLocalFallbackCache(String prefix, String json) {
-        LOCAL_FALLBACK_CACHE.put(prefix, new LocalFallbackEntry(
-                json, System.currentTimeMillis() + LOCAL_FALLBACK_TTL_SECONDS * 1000));
-    }
-
-    /** 测试钩子：预置本地降级缓存条目。 */
-    static void testSeedLocalFallbackCache(String prefix, String json) {
-        seedLocalFallbackCache(prefix, json);
-    }
-
-    /** 测试钩子：清除本地降级缓存条目。 */
-    static void testEvictLocalFallbackCache(String prefix) {
-        LOCAL_FALLBACK_CACHE.remove(prefix);
-    }
-
-    /** 测试钩子：本地降级缓存是否含该 prefix（未过期）。 */
-    static boolean testHasLocalFallbackCache(String prefix) {
-        LocalFallbackEntry e = LOCAL_FALLBACK_CACHE.get(prefix);
-        return e != null && System.currentTimeMillis() <= e.expireAtMillis();
     }
 
 }

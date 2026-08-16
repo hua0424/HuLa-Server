@@ -96,6 +96,19 @@ class TokenContextFilterImFallbackTest {
 		return new TokenContextFilter(ignoreProps, saConfig, redis, wb);
 	}
 
+	/**
+	 * #231 P1-2：注入 tokenSessionSupplier 的测试专用构造（不走 mockStatic——其 inline maker
+	 * registry 是 ThreadLocal 绑定，boundedElastic 异步线程上桩全部失效）。
+	 */
+	private TokenContextFilter newFilter(IgnoreProperties ignoreProps, SaTokenConfig saConfig,
+										  StringRedisTemplate redis, ExchangeFunction xf,
+										  java.util.function.Function<String, SaSession> tokenSessionSupplier) {
+		lenient().when(saConfig.getTokenName()).thenReturn("Authorization");
+		lenient().when(ignoreProps.isIgnoreUser(anyString(), anyString())).thenReturn(false);
+		WebClient.Builder wb = WebClient.builder().exchangeFunction(xf);
+		return new TokenContextFilter(ignoreProps, saConfig, redis, wb, tokenSessionSupplier);
+	}
+
 	@SuppressWarnings("unchecked")
 	private ValueOperations<String, String> stubValueOps(StringRedisTemplate redis) {
 		ValueOperations<String, String> valueOps = mock(ValueOperations.class);
@@ -115,45 +128,46 @@ class TokenContextFilterImFallbackTest {
 
 	// ===== P0 回归闸：UUID token + SaToken 有效会话 → 走用户路径，im 不被调用 =====
 	@Test
-	@DisplayName("P0 闸：UUID token + SaToken miss → im 回源 404 → 406，chain 不进（防正常用户全锁死回归）")
+	@DisplayName("P0 闸：UUID token + SaToken 有效会话 → 走 SaToken 用户路径，im 不被调用，chain 继续，body 无 406")
 	void uuidToken_validSaTokenSession_goesSaTokenPath_imNotCalled() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		stubValueOps(redis);
+		// 注意：不调 stubValueOps（避免 opsForValue 桩残留）；本测试走 SaToken 用户路径，不触 opsForValue。
 
+		// SaToken 有效会话：getLoginId + getLong(覆盖 5 个字段) + getString(systemType)
+		SaSession session = mock(SaSession.class);
+		lenient().when(session.getLoginId()).thenReturn(456L);
+		lenient().when(session.getLong(anyString())).thenReturn(1L);
+		lenient().when(session.getString(JWT_KEY_SYSTEM_TYPE)).thenReturn("im");
+
+		// xf 应当永不被调（im 路径不触达）
 		ExchangeFunction xf = mock(ExchangeFunction.class);
 		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
-				Mono.just(ClientResponse.create(HttpStatus.NOT_FOUND)
-						.header("Content-Type", "application/json")
-						.body("{\"code\":-10,\"msg\":\"aiclaw token\u65e0\u6548\"}")
-						.build()));
+				Mono.just(ClientResponse.create(HttpStatus.OK).build()));
 
 		WebFilterChain chain = mock(WebFilterChain.class);
 		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
-		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源 → 404 → 406（永久拒绝）
-		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
-			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
-					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
-			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY); // aiclaw 缓存缺失 → SaToken-first → im 回源
-			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
-			StepVerifier.create(filter.filter(exchange, chain)
-					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
-					.assertNext(body -> assertTrue(body.contains("\"code\":406"),
-							"im 404 应映射为永久拒绝 body code=406"))
-					.verifyComplete();
-		}
+		// #231 P1-2：有效会话经注入 tokenSessionSupplier 提供（不走 mockStatic——其 inline maker
+		// registry 是 ThreadLocal 绑定，boundedElastic 异步线程上桩全部失效，无法可靠测此用例）。
+		// aiclaw 缓存缺失（hasKey=false）→ SaToken-first → 会话非空 → 正常用户路径继续 chain。
+		lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf, token -> session);
+		StepVerifier.create(filter.filter(exchange, chain))
+				.verifyComplete();
 
-		verify(xf).exchange(any(ClientRequest.class)); // im 回源被调（缓存缺失 + SaToken miss 的 aiclaw 路径）
-		verify(chain, never()).filter(any()); // 406 永久拒绝，chain 不继续
+		verify(xf, never()).exchange(any(ClientRequest.class)); // im 完全没被调
+		verify(chain).filter(any()); // 正常用户路径继续 chain
+		// P0 闸：正常用户路径不应写任何错误响应（response 未 commit = 没有 406/503 body）
+		assertTrue(!((MockServerWebExchange) exchange).getResponse().isCommitted(),
+				"P0 回归：SaToken 有效会话的正常用户绝不能被写 406/错误响应");
 	}
 
 	@Test
 	@DisplayName("缓存缺失 + SaToken miss + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain，INFO 含 uid")
 	void cacheMiss_imReturnsInfo_rebuildsCacheAndContinuesChain() {
-		TokenContextFilter.testEvictLocalFallbackCache(PREFIX); // 防静态缓存跨测试残留
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
@@ -200,7 +214,6 @@ class TokenContextFilterImFallbackTest {
 	@Test
 	@DisplayName("缓存命中 → 不调 im（xf 不 exchange），继续 chain（cache-hit 路径防回归）")
 	void cacheHit_imNotCalled() {
-		TokenContextFilter.testEvictLocalFallbackCache(PREFIX); // 防前序测试静态缓存残留
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
@@ -436,7 +449,7 @@ class TokenContextFilterImFallbackTest {
 	}
 
 	@Test
-	@DisplayName("#231-2: Redis 基础设施异常（QueryTimeoutException）→ body msg=「服务繁忙，请稍后重试」，非「验证token出错」")
+	@DisplayName("#231-2: Redis 基础设施异常（hasKey 抛 QueryTimeoutException）→ body msg=「服务繁忙，请稍后重试」，非「验证token出错」，chain 不继续")
 	void redisInfraException_returnsBusyNotTokenError() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
@@ -462,9 +475,11 @@ class TokenContextFilterImFallbackTest {
 		verify(chain, never()).filter(any());
 	}
 
+
+
 	@Test
-	@DisplayName("#231-3: Redis 瞬断（hasKey 抛 QueryTimeoutException）→ body msg=「服务繁忙，请稍后重试」，非「验证token出错」，chain 不继续")
-	void redisDown_hasKeyThrows_returnsBusy503() throws Exception {
+	@DisplayName("#231-5: 缓存命中路径 GET 抛 QueryTimeoutException → 「服务繁忙」，非「验证token出错」，chain 不继续")
+	void cacheHit_redisGetThrows_returnsBusyNotTokenError() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
@@ -472,61 +487,50 @@ class TokenContextFilterImFallbackTest {
 
 		ExchangeFunction xf = mock(ExchangeFunction.class);
 		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
-
 		WebFilterChain chain = mock(WebFilterChain.class);
 		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
-		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
-			// Redis 全挂：hasKey 超时（Redisson 瞬断形态）
-			doThrow(new QueryTimeoutException("timeout")).when(redis).hasKey(CACHE_KEY);
-			StepVerifier.create(filter.filter(exchange, chain)
-					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
-					.assertNext(body -> {
-						assertTrue(body.contains("服务繁忙"), "Redis 基础设施异常应报「服务繁忙」，实际 body: " + body);
-						assertTrue(!body.contains("验证token出错"), "不应再误报「验证token出错」，实际 body: " + body);
-					})
-					.verifyComplete();
-		}
-
-		// Redis 瞬断 → chain 不继续（请求被拒，503 给客户端重试信号）
+		// hasKey=true（缓存存在）→ handleAiclawTokenBlocking 的 GET 抛超时 → 转 BizException
+		doReturn(true).when(redis).hasKey(CACHE_KEY);
+		doThrow(new QueryTimeoutException("Redis GET timeout")).when(valueOps).get(CACHE_KEY);
+		StepVerifier.create(filter.filter(exchange, chain)
+				.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+				.assertNext(body -> {
+					assertTrue(body.contains("服务繁忙"), "GET 基础设施异常应报「服务繁忙」，实际 body: " + body);
+					assertTrue(!body.contains("验证token出错"), "不应再误报「验证token出错」，实际 body: " + body);
+				})
+				.verifyComplete();
 		verify(chain, never()).filter(any());
 	}
 
 	@Test
-	@DisplayName("#231-4: im 回源 200 重建缓存时本地降级缓存同步置位")
-	void imFallbackRebuild_populatesLocalFallbackCache() {
-		TokenContextFilter.testEvictLocalFallbackCache(PREFIX); // 防前序测试静态缓存残留
+	@DisplayName("#231-6: 缓存命中路径 EXPIRE 抛 QueryTimeoutException → 「服务繁忙」，非「验证token出错」，chain 不继续")
+	void cacheHit_redisExpireThrows_returnsBusyNotTokenError() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		stubValueOps(redis);
-
-		String rebuildJson = "{\"uid\":999,\"ownerUid\":1,\"tenantId\":1,\"authStatus\":1,"
+		ValueOperations<String, String> valueOps = stubValueOps(redis);
+		String cachedJson = "{\"uid\":123,\"ownerUid\":1,\"tenantId\":1,\"authStatus\":1,"
 				+ "\"tokenSha256\":\"" + SecureUtil.sha256(TOKEN) + "\",\"machineCode\":\"m1\"}";
-		ExchangeFunction xf = mock(ExchangeFunction.class);
-		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
-				Mono.just(ClientResponse.create(HttpStatus.OK)
-						.header("Content-Type", "application/json")
-						.body("{\"code\":200,\"data\":{\"uid\":999,\"ownerUid\":1,\"tenantId\":1,"
-								+ "\"authStatus\":1,\"machineCode\":\"m1\"}}")
-						.build()));
 
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
 		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
-		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
-			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
-					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
-			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
-			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
-			StepVerifier.create(filter.filter(exchange, chain)).verifyComplete();
-		}
-
-		// 重建后本地降级缓存应有该 prefix 的条目
-		assertTrue(TokenContextFilter.testHasLocalFallbackCache(PREFIX),
-				"im 回源重建后本地降级缓存应含 prefix 条目");
-		TokenContextFilter.testEvictLocalFallbackCache(PREFIX);
+		// hasKey=true + GET 成功 → EXPIRE 抛超时 → 转 BizException
+		doReturn(true).when(redis).hasKey(CACHE_KEY);
+		doReturn(cachedJson).when(valueOps).get(CACHE_KEY);
+		doThrow(new QueryTimeoutException("Redis EXPIRE timeout")).when(redis).expire(eq(CACHE_KEY), any(Duration.class));
+		StepVerifier.create(filter.filter(exchange, chain)
+				.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+				.assertNext(body -> {
+					assertTrue(body.contains("服务繁忙"), "EXPIRE 基础设施异常应报「服务繁忙」，实际 body: " + body);
+					assertTrue(!body.contains("验证token出错"), "不应再误报「验证token出错」，实际 body: " + body);
+				})
+				.verifyComplete();
+		verify(chain, never()).filter(any());
 	}
 }
