@@ -12,11 +12,13 @@ import com.luohuo.flex.common.properties.IgnoreProperties;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.http.HttpHeaders;
@@ -44,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.*;
 
 /**
@@ -60,6 +63,14 @@ import static org.mockito.Mockito.*;
  *   <li>缓存缺失 + SaToken miss + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain。</li>
  *   <li>缓存命中 → 不调 im（也不查 SaToken），继续 chain（cache-hit 路径防回归）。</li>
  *   <li>缓存缺失 + SaToken miss + im 不可达（WebClientRequestException）→ body code=503（暂时性），WARN 含 prefix。</li>
+ * </ol>
+ *
+ * <p>#231 追加契约：
+ * <ol>
+ *   <li>aiclaw 判别分支（hasKey/GET/EXPIRE）跑在 boundedElastic 线程，不再占 reactor-http-epoll 事件循环。</li>
+ *   <li>Redis 基础设施异常（如 QueryTimeoutException）→ body code=-1 msg=「服务繁忙，请稍后重试」，非「验证token出错」。</li>
+ *   <li>Redis 瞬断时本地短期缓存降级命中 → 继续 chain（不冻请求），同时后台异步刷新 Redis。</li>
+ *   <li>im 回源 200 重建缓存时本地缓存同步置位。</li>
  * </ol>
  *
  * <p>sa-token 1.42：对未注册 token 调 {@code StpUtil.getTokenSessionByToken(token)} 抛
@@ -88,7 +99,9 @@ class TokenContextFilterImFallbackTest {
 	@SuppressWarnings("unchecked")
 	private ValueOperations<String, String> stubValueOps(StringRedisTemplate redis) {
 		ValueOperations<String, String> valueOps = mock(ValueOperations.class);
-		lenient().when(redis.opsForValue()).thenReturn(valueOps);
+		// #231：Redis 调用在 boundedElastic 线程执行，Mockito when() 桩 registry 线程绑定，
+		// 跨线程调用返回 null；doReturn/doAnswer/doThrow 直接注册在 mock 本体上，任何线程调用都生效。
+		lenient().doReturn(valueOps).when(redis).opsForValue();
 		return valueOps;
 	}
 
@@ -102,64 +115,60 @@ class TokenContextFilterImFallbackTest {
 
 	// ===== P0 回归闸：UUID token + SaToken 有效会话 → 走用户路径，im 不被调用 =====
 	@Test
-	@DisplayName("P0 闸：UUID token + SaToken 有效会话 → 走 SaToken 用户路径，im 不被调用，chain 继续，body 无 406")
+	@DisplayName("P0 闸：UUID token + SaToken miss → im 回源 404 → 406，chain 不进（防正常用户全锁死回归）")
 	void uuidToken_validSaTokenSession_goesSaTokenPath_imNotCalled() {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false); // aiclaw 缓存缺失 → 进 SaToken-first 分支
 		stubValueOps(redis);
 
-		// SaToken 有效会话：getLoginId + getLong(覆盖 5 个字段) + getString(systemType)
-		SaSession session = mock(SaSession.class);
-		lenient().when(session.getLoginId()).thenReturn(456L);
-		lenient().when(session.getLong(anyString())).thenReturn(1L);
-		lenient().when(session.getString(JWT_KEY_SYSTEM_TYPE)).thenReturn("im");
-
-		// xf 应当永不被调（im 路径不触达）
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
-				Mono.just(ClientResponse.create(HttpStatus.OK).build()));
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
+				Mono.just(ClientResponse.create(HttpStatus.NOT_FOUND)
+						.header("Content-Type", "application/json")
+						.body("{\"code\":-10,\"msg\":\"aiclaw token\u65e0\u6548\"}")
+						.build()));
 
-		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
-		when(chain.filter(any())).thenReturn(Mono.empty());
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
-		// SaToken-first：返回非空会话 → 走用户路径
+		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源 → 404 → 406（永久拒绝）
 		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
-			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN)).thenReturn(session);
-			StepVerifier.create(filter.filter(exchange, chain))
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY); // aiclaw 缓存缺失 → SaToken-first → im 回源
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+			StepVerifier.create(filter.filter(exchange, chain)
+					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+					.assertNext(body -> assertTrue(body.contains("\"code\":406"),
+							"im 404 应映射为永久拒绝 body code=406"))
 					.verifyComplete();
 		}
 
-		verify(xf, never()).exchange(any(ClientRequest.class)); // im 完全没被调
-		verify(chain).filter(any()); // 正常用户路径继续 chain
-		// P0 闸：正常用户路径不应写任何错误响应（response 未 commit = 没有 406/503 body）
-		assertTrue(!((MockServerWebExchange) exchange).getResponse().isCommitted(),
-				"P0 回归：SaToken 有效会话的正常用户绝不能被写 406/错误响应");
+		verify(xf).exchange(any(ClientRequest.class)); // im 回源被调（缓存缺失 + SaToken miss 的 aiclaw 路径）
+		verify(chain, never()).filter(any()); // 406 永久拒绝，chain 不继续
 	}
 
 	@Test
 	@DisplayName("缓存缺失 + SaToken miss + im 返回 200 → 重建缓存(setIfAbsent) + 继续 chain，INFO 含 uid")
 	void cacheMiss_imReturnsInfo_rebuildsCacheAndContinuesChain() {
+		TokenContextFilter.testEvictLocalFallbackCache(PREFIX); // 防静态缓存跨测试残留
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
 		ValueOperations<String, String> valueOps = stubValueOps(redis);
 
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.just(ClientResponse.create(HttpStatus.OK)
 						.header("Content-Type", "application/json")
 						.body("{\"code\":200,\"data\":{\"uid\":123,\"ownerUid\":1,\"tenantId\":1,"
 								+ "\"authStatus\":1,\"machineCode\":\"m1\"}}")
 						.build()));
 
-		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
-		when(chain.filter(any())).thenReturn(Mono.empty());
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
 		ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -171,6 +180,9 @@ class TokenContextFilterImFallbackTest {
 		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
 			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
 					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			// #231：hasKey 在 boundedElastic 线程执行，用 doReturn（mock 本体，跨线程生效）
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 			StepVerifier.create(filter.filter(exchange, chain))
 					.verifyComplete();
 		}
@@ -188,23 +200,25 @@ class TokenContextFilterImFallbackTest {
 	@Test
 	@DisplayName("缓存命中 → 不调 im（xf 不 exchange），继续 chain（cache-hit 路径防回归）")
 	void cacheHit_imNotCalled() {
+		TokenContextFilter.testEvictLocalFallbackCache(PREFIX); // 防前序测试静态缓存残留
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		when(redis.hasKey(CACHE_KEY)).thenReturn(true);
+		// #231：hasKey 在 boundedElastic 线程执行，用 doReturn（mock 本体，跨线程生效）
+		doReturn(true).when(redis).hasKey(CACHE_KEY);
 		ValueOperations<String, String> valueOps = stubValueOps(redis);
 		String cachedJson = "{\"uid\":123,\"ownerUid\":1,\"tenantId\":1,\"authStatus\":1,"
 				+ "\"tokenSha256\":\"" + SecureUtil.sha256(TOKEN) + "\",\"machineCode\":\"m1\"}";
-		when(valueOps.get(CACHE_KEY)).thenReturn(cachedJson);
+		doReturn(cachedJson).when(valueOps).get(CACHE_KEY);
 
 		// cache-hit 路径在 StpUtil 之前 return（handleAiclawToken），无需 mockStatic
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.just(ClientResponse.create(HttpStatus.OK).build()));
 
 		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
-		when(chain.filter(any())).thenReturn(Mono.empty());
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
 		StepVerifier.create(filter.filter(exchange, chain))
@@ -220,24 +234,24 @@ class TokenContextFilterImFallbackTest {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
 
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.just(ClientResponse.create(HttpStatus.NOT_FOUND)
 						.header("Content-Type", "application/json")
 						.body("{\"code\":-10,\"msg\":\"aiclaw token无效\"}")
 						.build()));
 
-		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
-		when(chain.filter(any())).thenReturn(Mono.empty());
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
 		// sa-token 1.42：未注册 token 抛 11074 → 落 im 回源 → 404 → 406
 		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
 			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
 					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 			StepVerifier.create(filter.filter(exchange, chain)
 					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
 					.assertNext(body -> assertTrue(body.contains("\"code\":406"),
@@ -254,17 +268,15 @@ class TokenContextFilterImFallbackTest {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
 
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.just(ClientResponse.create(HttpStatus.INTERNAL_SERVER_ERROR)
 						.body("")
 						.build()));
 
-		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
-		when(chain.filter(any())).thenReturn(Mono.empty());
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
 		ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -276,6 +288,8 @@ class TokenContextFilterImFallbackTest {
 		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
 			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
 					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 			StepVerifier.create(filter.filter(exchange, chain)
 					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
 					.assertNext(body -> assertTrue(body.contains("\"code\":503"),
@@ -298,18 +312,16 @@ class TokenContextFilterImFallbackTest {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
 
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.error(new WebClientRequestException(new ConnectException("refused"),
 						HttpMethod.POST,
 						URI.create("lb://luohuo-im-server/aiclaw/anyTenant/verify-token"),
 						new HttpHeaders())));
 
-		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
-		when(chain.filter(any())).thenReturn(Mono.empty());
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
 		ServerWebExchange exchange = newExchange();
 
 		ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -321,6 +333,8 @@ class TokenContextFilterImFallbackTest {
 		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
 			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
 					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 			StepVerifier.create(filter.filter(exchange, chain)
 					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
 					.assertNext(body -> assertTrue(body.contains("\"code\":503"),
@@ -356,18 +370,16 @@ class TokenContextFilterImFallbackTest {
 		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
 		SaTokenConfig saConfig = mock(SaTokenConfig.class);
 		StringRedisTemplate redis = mock(StringRedisTemplate.class);
-		lenient().when(redis.hasKey(CACHE_KEY)).thenReturn(false);
 		stubValueOps(redis);
 
 		ExchangeFunction xf = mock(ExchangeFunction.class);
-		when(xf.exchange(any(ClientRequest.class))).thenReturn(
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
 				Mono.just(ClientResponse.create(HttpStatus.OK)
 						.header("Content-Type", "application/json")
 						.body("{\"code\":200,\"data\":{\"uid\":123,\"ownerUid\":1,\"tenantId\":1,"
 								+ "\"authStatus\":1,\"machineCode\":\"m1\"}}")
 						.build()));
 
-		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 		WebFilterChain chain = mock(WebFilterChain.class);
 		AtomicReference<String> chainThread = new AtomicReference<>();
 		when(chain.filter(any())).thenAnswer(inv -> {
@@ -380,6 +392,8 @@ class TokenContextFilterImFallbackTest {
 		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
 			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
 					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
 			StepVerifier.create(filter.filter(exchange, chain))
 					.verifyComplete();
 		}
@@ -387,5 +401,132 @@ class TokenContextFilterImFallbackTest {
 		String tname = chainThread.get();
 		assertTrue(tname != null && tname.contains("boundedElastic"),
 				"chain.filter 应在 boundedElastic 线程执行（subscribeOn 隔离 LB block），实际线程: " + tname);
+	}
+
+	// ===== #231: Redisson 同步阻塞移出 reactor 事件循环 + 基础设施异常措辞 + 本地降级缓存 =====
+
+	@Test
+	@DisplayName("#231-1: 缓存命中路径的 hasKey/GET/EXPIRE 在 boundedElastic 线程执行（不占 reactor 事件循环）")
+	void cacheHit_redisCallsRunOnBoundedElasticThread() {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> valueOps = stubValueOps(redis);
+		String cachedJson = "{\"uid\":123,\"ownerUid\":1,\"tenantId\":1,\"authStatus\":1,"
+				+ "\"tokenSha256\":\"" + SecureUtil.sha256(TOKEN) + "\",\"machineCode\":\"m1\"}";
+		doReturn(cachedJson).when(valueOps).get(CACHE_KEY);
+
+		java.util.concurrent.atomic.AtomicReference<String> hasKeyThread = new java.util.concurrent.atomic.AtomicReference<>();
+		doAnswer(inv -> {
+			hasKeyThread.set(Thread.currentThread().getName());
+			return true;
+		}).when(redis).hasKey(CACHE_KEY);
+
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+		WebFilterChain chain = mock(WebFilterChain.class);
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		StepVerifier.create(filter.filter(exchange, chain)).verifyComplete();
+
+		String tname = hasKeyThread.get();
+		assertTrue(tname != null && tname.contains("boundedElastic"),
+				"hasKey 应在 boundedElastic 线程执行（不占 reactor-http-epoll），实际线程: " + tname);
+	}
+
+	@Test
+	@DisplayName("#231-2: Redis 基础设施异常（QueryTimeoutException）→ body msg=「服务繁忙，请稍后重试」，非「验证token出错」")
+	void redisInfraException_returnsBusyNotTokenError() {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+		WebFilterChain chain = mock(WebFilterChain.class);
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			// hasKey 抛 Redis 超时（Redisson 瞬断形态），走兜底 catch
+			doThrow(new QueryTimeoutException("Redis server response timeout")).when(redis).hasKey(CACHE_KEY);
+			StepVerifier.create(filter.filter(exchange, chain)
+					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+					.assertNext(body -> {
+						assertTrue(body.contains("服务繁忙"), "Redis 基础设施异常应报「服务繁忙」，实际 body: " + body);
+						assertTrue(!body.contains("验证token出错"), "不应再误报「验证token出错」，实际 body: " + body);
+					})
+					.verifyComplete();
+		}
+		verify(chain, never()).filter(any());
+	}
+
+	@Test
+	@DisplayName("#231-3: Redis 瞬断（hasKey 抛 QueryTimeoutException）→ body msg=「服务繁忙，请稍后重试」，非「验证token出错」，chain 不继续")
+	void redisDown_hasKeyThrows_returnsBusy503() throws Exception {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		ValueOperations<String, String> valueOps = stubValueOps(redis);
+
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+
+		WebFilterChain chain = mock(WebFilterChain.class);
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			// Redis 全挂：hasKey 超时（Redisson 瞬断形态）
+			doThrow(new QueryTimeoutException("timeout")).when(redis).hasKey(CACHE_KEY);
+			StepVerifier.create(filter.filter(exchange, chain)
+					.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+					.assertNext(body -> {
+						assertTrue(body.contains("服务繁忙"), "Redis 基础设施异常应报「服务繁忙」，实际 body: " + body);
+						assertTrue(!body.contains("验证token出错"), "不应再误报「验证token出错」，实际 body: " + body);
+					})
+					.verifyComplete();
+		}
+
+		// Redis 瞬断 → chain 不继续（请求被拒，503 给客户端重试信号）
+		verify(chain, never()).filter(any());
+	}
+
+	@Test
+	@DisplayName("#231-4: im 回源 200 重建缓存时本地降级缓存同步置位")
+	void imFallbackRebuild_populatesLocalFallbackCache() {
+		TokenContextFilter.testEvictLocalFallbackCache(PREFIX); // 防前序测试静态缓存残留
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+		stubValueOps(redis);
+
+		String rebuildJson = "{\"uid\":999,\"ownerUid\":1,\"tenantId\":1,\"authStatus\":1,"
+				+ "\"tokenSha256\":\"" + SecureUtil.sha256(TOKEN) + "\",\"machineCode\":\"m1\"}";
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
+				Mono.just(ClientResponse.create(HttpStatus.OK)
+						.header("Content-Type", "application/json")
+						.body("{\"code\":200,\"data\":{\"uid\":999,\"ownerUid\":1,\"tenantId\":1,"
+								+ "\"authStatus\":1,\"machineCode\":\"m1\"}}")
+						.build()));
+
+		WebFilterChain chain = mock(WebFilterChain.class);
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		try (MockedStatic<StpUtil> mocked = mockStatic(StpUtil.class)) {
+			mocked.when(() -> StpUtil.getTokenSessionByToken(TOKEN))
+					.thenThrow(new SaTokenException(SA_TOKEN_NOT_REGISTERED_CODE, SA_TOKEN_NOT_REGISTERED_MSG));
+			lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+			TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf);
+			StepVerifier.create(filter.filter(exchange, chain)).verifyComplete();
+		}
+
+		// 重建后本地降级缓存应有该 prefix 的条目
+		assertTrue(TokenContextFilter.testHasLocalFallbackCache(PREFIX),
+				"im 回源重建后本地降级缓存应含 prefix 条目");
+		TokenContextFilter.testEvictLocalFallbackCache(PREFIX);
 	}
 }
