@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件说明 server 构建、架构与协议。跨组件质量判据见伞仓 `../docs/agents/verification.md`；部署示例是操作参考，不代表已取得目标环境写入授权。
 
 ## Overview
 
@@ -17,21 +17,21 @@ This repo contains **two independent Maven reactors**, not one:
 ### Build commands
 
 ```bash
-# 1. Install the framework library to the local Maven repo (REQUIRED first, fast flags):
+# 1. Install the framework library to the local Maven repo (REQUIRED first):
 cd luohuo-util
-mvn clean install -Dmaven.javadoc.skip=true -Dgpg.skip=true -Dmaven.source.skip=true -DskipTests=true -f pom.xml
+mvn clean install -Dmaven.javadoc.skip=true -Dgpg.skip=true -Dmaven.source.skip=true -f pom.xml
 
 # 2. Install the microservices reactor. The `install` (not just `package`) step is REQUIRED:
 #    src/main/filters/*.properties values are filtered into target/ during install — bootstrap.yml
 #    placeholders like @nacos.ip@, @profile.active@, @database.type@ are resolved at this step.
 cd ../luohuo-cloud
-mvn clean install -DskipTests=true
+mvn clean install
 
 # Bump version across a reactor:
 mvn versions:set -DnewVersion="3.0.7" -DskipTests -DgenerateBackupPoms=false
 ```
 
-There are no unit tests of note; `-DskipTests=true` is standard. Production deploy uses `luohuo-cloud/src/main/bin/*.sh` (Jenkins) — `run.sh <module> <dir> <profile> {start|stop|restart|status}`, plus per-service `restart-luohuo-*.sh` and `all-start.sh` / `all-stop.sh`.
+测试范围以当前源码、POM 和实际运行输出为准。部署配方可能跳过测试，仅证明构建，不能报告为单测通过；运行正确性需要对应版本的实际服务行为与端到端证据，构建成功不能代替。 Production deploy uses `luohuo-cloud/src/main/bin/*.sh` (Jenkins) — `run.sh <module> <dir> <profile> {start|stop|restart|status}`, plus per-service `restart-luohuo-*.sh` and `all-start.sh` / `all-stop.sh`.
 
 ## Required infrastructure (must be running before any service)
 
