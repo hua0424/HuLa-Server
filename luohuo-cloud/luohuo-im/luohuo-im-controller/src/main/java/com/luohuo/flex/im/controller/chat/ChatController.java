@@ -2,6 +2,11 @@ package com.luohuo.flex.im.controller.chat;
 
 import com.luohuo.basic.tenant.core.aop.TenantIgnore;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.controller.ThinkingInternalAuth;
+import com.luohuo.flex.im.enums.UserTypeEnum;
+import jakarta.servlet.http.HttpServletRequest;
+import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.domain.vo.request.*;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -42,6 +47,10 @@ public class ChatController {
     private ChatService chatService;
     @Resource
     private UserSummaryCache userSummaryCache;
+    @Resource
+    private UserCache userCache;
+    @Resource
+    private ThinkingInternalAuth thinkingInternalAuth;
 
     private Set<String> getBlackUidSet() {
         return userSummaryCache.getBlackMap().getOrDefault(BlackTypeEnum.UID.getType(), new HashSet<>());
@@ -74,10 +83,19 @@ public class ChatController {
     @PostMapping("/msg")
     @Operation(summary ="发送消息")
 //    @FrequencyControl(target = FrequencyControl.Target.UID, time = 60, count = 10)
-    public R<ChatMessageResp> sendMsg(@Valid @RequestBody ChatMessageReq request) {
-        Long msgId = chatService.sendMsg(request, ContextUtil.getUid());
+    public R<ChatMessageResp> sendMsg(@Valid @RequestBody ChatMessageReq request, HttpServletRequest httpRequest) {
+        Long uid = ContextUtil.getUid();
+        var sender = uid == null ? null : userCache.get(uid);
+        boolean aiclaw = sender != null && UserTypeEnum.AICLAW.getValue().equals(sender.getUserType());
+        if (aiclaw || (request.getExtra() != null && request.getExtra().containsKey("thinkingId"))) {
+            Long authenticated = thinkingInternalAuth.require(httpRequest);
+            if (!authenticated.equals(uid)) {
+                throw new BizException("消息身份与可信服务身份不符");
+            }
+        }
+        Long msgId = chatService.sendMsg(request, uid);
         // 返回完整消息格式，方便前端展示
-        return R.success(chatService.getMsgResp(msgId, ContextUtil.getUid()));
+        return R.success(chatService.getMsgResp(msgId, uid));
     }
 
     @PutMapping("/msg/mark")

@@ -4,6 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.controller.ThinkingInternalAuth;
+import com.luohuo.flex.im.domain.entity.User;
+import com.luohuo.flex.im.enums.UserTypeEnum;
+import com.luohuo.basic.exception.BizException;
+import jakarta.servlet.http.HttpServletRequest;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -19,6 +25,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -45,6 +53,9 @@ class ChatControllerSendMsgTest {
 
 	private ChatService chatService;
 	private UserSummaryCache userSummaryCache;
+	private UserCache userCache;
+	private ThinkingInternalAuth thinkingInternalAuth;
+	private ChatController controller;
 	private MockMvc mockMvc;
 	private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -52,10 +63,14 @@ class ChatControllerSendMsgTest {
 	void setUp() {
 		chatService = mock(ChatService.class);
 		userSummaryCache = mock(UserSummaryCache.class);
-		ChatController controller = new ChatController();
+		userCache = mock(UserCache.class);
+		thinkingInternalAuth = mock(ThinkingInternalAuth.class);
+		controller = new ChatController();
 		// @Resource 字段注入 → 反射注入 mock（与 AiclawGroupConfigControllerTest 同款）。
 		org.springframework.test.util.ReflectionTestUtils.setField(controller, "chatService", chatService);
 		org.springframework.test.util.ReflectionTestUtils.setField(controller, "userSummaryCache", userSummaryCache);
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "userCache", userCache);
+		org.springframework.test.util.ReflectionTestUtils.setField(controller, "thinkingInternalAuth", thinkingInternalAuth);
 		mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
 	}
 
@@ -82,6 +97,32 @@ class ChatControllerSendMsgTest {
 							.content(json))
 					.andExpect(status().isOk())
 					.andExpect(jsonPath("$.data").value(nullValue()));
+		}
+	}
+
+	@Test
+	@DisplayName("AICLAW message cannot enter IM with a forged identity header and no trusted service proof")
+	void aiclawWithoutServiceProofIsRejectedBeforePersistence() {
+		when(userCache.get(UID)).thenReturn(User.builder().userType(UserTypeEnum.AICLAW.getValue()).build());
+		when(thinkingInternalAuth.require(any())).thenThrow(new BizException("未授权的内部 thinking 调用"));
+		ChatMessageReq req = ChatMessageReq.builder().roomId(10L).msgType(1).body("hello").skip(true).build();
+		try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class)) {
+			ctx.when(ContextUtil::getUid).thenReturn(UID);
+			assertThrows(BizException.class, () -> controller.sendMsg(req, mock(HttpServletRequest.class)));
+			verifyNoInteractions(chatService);
+		}
+	}
+
+	@Test
+	@DisplayName("thinking association rejects caller mismatch even with a valid service proof")
+	void thinkingAssociationRejectsActorMismatch() {
+		when(thinkingInternalAuth.require(any())).thenReturn(2002L);
+		ChatMessageReq req = ChatMessageReq.builder().roomId(10L).msgType(1).body("hello")
+				.extra(java.util.Map.of("thinkingId", "3003")).build();
+		try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class)) {
+			ctx.when(ContextUtil::getUid).thenReturn(UID);
+			assertThrows(BizException.class, () -> controller.sendMsg(req, mock(HttpServletRequest.class)));
+			verifyNoInteractions(chatService);
 		}
 	}
 }

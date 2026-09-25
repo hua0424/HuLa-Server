@@ -193,7 +193,8 @@ class AiclawServiceImplTest {
 		self.setAuthStatus(0);
 		self.setTokenHash(BCrypt.hashpw(CONNECTION_TOKEN));
 		self.setTokenPrefix("pref1234");
-		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(self);
+		self.setTenantId(1L);
+		when(aiclawDao.getByUidForActivation(AICLAW_UID)).thenReturn(self);
 		return self;
 	}
 

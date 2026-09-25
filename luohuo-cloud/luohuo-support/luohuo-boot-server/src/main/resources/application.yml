@@ -59,6 +59,8 @@ luohuo:
     anyUser: # 请求中 需要携带Tenant，但 不需要携带Token(不需要登录) 和 不需要验证uri权限
       ALL:
         - /anyUser/**
+        # IM /thinking enforces mandatory internal-service secret + explicit actor/tenant itself.
+        - /thinking/**
     anyTenant: # 请求中 不需要携带Tenant 且 不需要携带Token(不需要登录) 和 不需要验证uri权限
       ALL:
         - /anyTenant/**
