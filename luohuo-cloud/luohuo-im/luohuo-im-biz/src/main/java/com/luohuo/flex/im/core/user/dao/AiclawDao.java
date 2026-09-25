@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.user.dao;
 
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.luohuo.basic.tenant.core.aop.TenantIgnore;
 import com.luohuo.flex.im.core.user.mapper.AiclawMapper;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import org.springframework.stereotype.Service;
@@ -20,6 +21,14 @@ public class AiclawDao extends ServiceImpl<AiclawMapper, Aiclaw> {
 		return lambdaQuery().eq(Aiclaw::getUid, uid).one();
 	}
 
+	// Activation token carries a global uid (uk_uid); establish tenant from the verified record.
+	@TenantIgnore
+	public Aiclaw getByUidForActivation(Long uid) {
+		return lambdaQuery().eq(Aiclaw::getUid, uid).one();
+	}
+
+	// Token prefix is globally unique (uk_token_prefix); tenant is learned only after bcrypt verifies this row.
+	@TenantIgnore
 	public Aiclaw getByTokenPrefix(String tokenPrefix) {
 		return lambdaQuery().eq(Aiclaw::getTokenPrefix, tokenPrefix).one();
 	}

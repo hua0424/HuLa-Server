@@ -6,6 +6,7 @@ import cn.hutool.core.lang.Assert;
 import cn.hutool.core.util.ObjectUtil;
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.basic.utils.TimeUtils;
 import com.luohuo.flex.im.core.chat.dao.*;
@@ -42,7 +43,7 @@ import com.luohuo.flex.im.core.chat.service.strategy.msg.MsgHandlerFactory;
 import com.luohuo.flex.im.core.chat.service.strategy.msg.RecallMsgHandler;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
-import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
+import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
@@ -76,7 +77,7 @@ public class ChatServiceImpl implements ChatService {
     private AiclawThinkingMapper aiclawThinkingMapper;
     private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
     private final UserCache userCache;
-    private final AiclawRoomMembershipService aiclawRoomMembershipService;
+    private final ThinkingService thinkingService;
     private final UserSummaryCache userSummaryCache;
     /**
      * 发送消息
@@ -86,6 +87,8 @@ public class ChatServiceImpl implements ChatService {
     public Long sendMsg(ChatMessageReq request, Long uid) {
         // aichatoverview#3: aiclaw 房间成员校验（先于 checkDeFriend，确保非成员抛正确异常）
         checkAiclawRoomMembership(request, uid);
+        // Explicit associations must be verified before any message persistence, even for skip/skipPush.
+        Long thinkingId = authorizedThinkingId(request, uid);
 
         // BL-010 #144 P1a: friend 房间的 RoomFriend 在一次发送内只读一次，供 checkDeFriend 与
         // syncContactLastMsgId 复用，消除对同一 im_room_friend 行的重复直查（RoomFriendDao 无缓存，
@@ -98,8 +101,8 @@ public class ChatServiceImpl implements ChatService {
         AbstractMsgHandler<?> msgHandler = MsgHandlerFactory.getStrategyNoNull(request.getMsgType());
         Long msgId = msgHandler.checkAndSaveMsg(request, uid);
 
-        // REQ-004 [S4]: thinking_msg_rel 关联回写 + has_response 更新（extra 优先，否则按 active 自动关联）
-        associateThinking(request, uid, msgId);
+        // Explicit association and has_response are committed with the message in this transaction.
+        associateThinking(thinkingId, uid, request.getRoomId(), msgId);
 
         // ISS-003: 同事务推进房间内所有成员的 contact.last_msg_id,避免写入路径与 /chat/msg/page 游标失同步
         syncContactLastMsgId(request.getRoomId(), msgId, preloadedRoomFriend);
@@ -152,45 +155,43 @@ public class ChatServiceImpl implements ChatService {
 		return null;
 	}
 
-	/**
-	 * REQ-004 [S4]: 将本次发送的消息关联到对应的 thinking 记录。
-	 * <p>
-	 * thinkingId 解析优先级：
-	 * <ol>
-	 *   <li>extra.thinkingId（plugin 显式回传）→ source=extra（覆盖优先）</li>
-	 *   <li>否则按 (aiclawUid=uid, roomId) 反查最近一条进行中的 thinking → source=auto</li>
-	 * </ol>
-	 * 二者都解析不到则静默跳过（迟到丢关联路径）。
-	 *
-	 * @param request 发送请求
-	 * @param uid     消息发送者（即 aiclaw uid）
-	 * @param msgId   已落库的消息 ID
-	 */
-	private void associateThinking(ChatMessageReq request, Long uid, Long msgId) {
-		Long thinkingId = null;
-		String source = null;
-		if (request.getExtra() != null && request.getExtra().get("thinkingId") != null) {
-			thinkingId = Long.valueOf(request.getExtra().get("thinkingId").toString());
-			source = "extra";
-		} else {
-			thinkingId = aiclawThinkingMapper.selectActiveThinkingId(uid, request.getRoomId());
-			if (thinkingId != null) {
-				source = "auto";
-			}
+	private Long authorizedThinkingId(ChatMessageReq request, Long uid) {
+		if (request.getExtra() == null || request.getExtra().get("thinkingId") == null) {
+			return null; // No active/latest record can prove that this message belongs to a particular run.
 		}
+		Long tenantId = ContextUtil.getTenantId();
+		if (tenantId == null || uid == null || request.getRoomId() == null) {
+			throw new BizException("缺少可信租户或消息身份");
+		}
+		thinkingService.requireActiveAgent(uid, request.getRoomId(), tenantId);
+		Long thinkingId;
+		try {
+			thinkingId = Long.valueOf(request.getExtra().get("thinkingId").toString());
+		} catch (NumberFormatException e) {
+			throw new BizException("无效 thinkingId");
+		}
+		if (aiclawThinkingMapper.selectOwned(thinkingId, tenantId, uid, request.getRoomId()) == null) {
+			throw new BizException("思考记录不存在或无权关联");
+		}
+		return thinkingId; // Completed thinking remains eligible for explicit association.
+	}
 
+	private void associateThinking(Long thinkingId, Long uid, Long roomId, Long msgId) {
 		if (thinkingId == null) {
-			log.debug("no active thinking, skip association: msgId={}, roomId={}", msgId, request.getRoomId());
 			return;
 		}
-
 		AiclawThinkingMsgRel rel = new AiclawThinkingMsgRel();
 		rel.setThinkingId(thinkingId);
 		rel.setMsgId(msgId);
 		rel.setCreateTime(LocalDateTime.now());
-		aiclawThinkingMsgRelMapper.insertIgnore(rel);
-		aiclawThinkingMapper.updateHasResponse(thinkingId, 1);
-		log.debug("thinking_msg_rel writeback: msgId={}, thinkingId={}, source={}", msgId, thinkingId, source);
+		if (aiclawThinkingMsgRelMapper.insertIgnore(rel) != 1) {
+			throw new BizException("思考关联写入失败");
+		}
+		// MySQL may report zero changed rows when this thinking already has another response.
+		if (aiclawThinkingMapper.markHasResponse(thinkingId, ContextUtil.getTenantId(), uid, roomId) == 0
+				&& aiclawThinkingMapper.selectOwned(thinkingId, ContextUtil.getTenantId(), uid, roomId) == null) {
+			throw new BizException("思考关联写入失败");
+		}
 	}
 
 	/**
@@ -199,11 +200,17 @@ public class ChatServiceImpl implements ChatService {
 	 * 普通用户绕过。
 	 */
 	private void checkAiclawRoomMembership(ChatMessageReq request, Long uid) {
-		User sender = userCache.get(uid);
-		if (sender == null || !UserTypeEnum.AICLAW.getValue().equals(sender.getUserType())) {
-			return; // 普通用户绕过
+		if (uid == null) {
+			throw new BizException("发送者不存在或无权发送消息");
 		}
-		aiclawRoomMembershipService.checkMembership(uid, request.getRoomId());
+		User sender = userCache.get(uid);
+		if (sender == null) {
+			throw new BizException("发送者不存在或无权发送消息");
+		}
+		if (!UserTypeEnum.AICLAW.getValue().equals(sender.getUserType())) {
+			return; // 普通用户绕过 AICLAW 专属校验
+		}
+		thinkingService.requireActiveAgent(uid, request.getRoomId(), ContextUtil.getTenantId());
 	}
 
     /**

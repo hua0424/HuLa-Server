@@ -58,6 +58,8 @@ luohuo:
         - /*/anyUser/**
         - /*/*/anyUser/**
         - /anyUser/**
+        # Restricted by ThinkingInternalAuth (secret + actor + tenant); gateway blocks external route.
+        - /thinking/**
     anyTenant:    # 请求中 不需要携带Tenant 且 不需要携带Token(不需要登录) 和 不需要验证uri权限
       ALL:
         - /*/anyTenant/**

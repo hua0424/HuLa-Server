@@ -1,7 +1,9 @@
 package com.luohuo.flex.im.core.chat.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 import com.luohuo.flex.im.domain.entity.AiclawThinking;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
@@ -19,15 +21,87 @@ import java.util.List;
 @Repository
 public interface AiclawThinkingMapper extends BaseMapper<AiclawThinking> {
 
+	@Insert("INSERT INTO im_aiclaw_thinking (id, tenant_id, aiclaw_uid, room_id, trigger_msg_id, "
+			+ "content, has_response, status, is_del) VALUES (#{id}, #{tenantId}, #{actor}, #{roomId}, "
+			+ "#{triggerMsgId}, '', 0, 0, 0)")
+	int insertThinking(@Param("id") Long id, @Param("tenantId") Long tenantId,
+			@Param("actor") Long actor, @Param("roomId") Long roomId,
+			@Param("triggerMsgId") Long triggerMsgId);
+
 	/**
-	 * 更新 thinking 记录的 has_response 字段
-	 *
-	 * @param thinkingId  thinking ID
-	 * @param hasResponse 是否有回复（0=无，1=有）
+	 * 仅更新当前租户、actor、room 的 thinking.has_response 字段。
 	 * @return 影响行数
 	 */
-	@Update("UPDATE im_aiclaw_thinking SET has_response = #{hasResponse} WHERE id = #{thinkingId}")
-	int updateHasResponse(@Param("thinkingId") Long thinkingId, @Param("hasResponse") Integer hasResponse);
+	@Update("UPDATE im_aiclaw_thinking SET has_response = 1 WHERE id = #{thinkingId} "
+			+ "AND tenant_id = #{tenantId} AND aiclaw_uid = #{actor} AND room_id = #{roomId} AND is_del = 0")
+	int markHasResponse(@Param("thinkingId") Long thinkingId, @Param("tenantId") Long tenantId,
+			@Param("actor") Long actor, @Param("roomId") Long roomId);
+
+	@Select("SELECT * FROM im_aiclaw_thinking WHERE id = #{id} AND tenant_id = #{tenantId} "
+			+ "AND aiclaw_uid = #{actor} AND room_id = #{roomId} AND is_del = 0")
+	AiclawThinking selectOwned(@Param("id") Long id, @Param("tenantId") Long tenantId,
+			@Param("actor") Long actor, @Param("roomId") Long roomId);
+
+	@Select("SELECT * FROM im_aiclaw_thinking WHERE id = #{id} AND tenant_id = #{tenantId} AND is_del = 0")
+	AiclawThinking selectInTenant(@Param("id") Long id, @Param("tenantId") Long tenantId);
+
+	@Update("UPDATE im_aiclaw_thinking SET content = #{content}, duration_ms = #{duration}, "
+			+ "status = #{status}, error_code = #{error} WHERE id = #{id} AND tenant_id = #{tenantId} "
+			+ "AND aiclaw_uid = #{actor} AND room_id = #{roomId} AND status = 0 AND is_del = 0")
+	int finalizeActive(@Param("id") Long id, @Param("tenantId") Long tenantId,
+			@Param("actor") Long actor, @Param("roomId") Long roomId,
+			@Param("content") String content, @Param("duration") Integer duration,
+			@Param("status") Integer status, @Param("error") String error);
+
+	@Select("SELECT 1 FROM im_room r WHERE r.id = #{roomId} AND r.tenant_id = #{tenantId} "
+			+ "AND r.is_del = 0 AND ((r.type = 1 AND EXISTS (SELECT 1 FROM im_room_group rg "
+			+ "JOIN im_group_member gm ON gm.group_id = rg.id AND gm.uid = #{actor} AND gm.is_del = 0 "
+			+ "WHERE rg.room_id = r.id AND rg.tenant_id = r.tenant_id "
+			+ "AND gm.tenant_id = r.tenant_id AND rg.is_del = 0)) "
+			+ "OR (r.type = 2 AND EXISTS (SELECT 1 FROM im_room_friend rf "
+			+ "WHERE rf.room_id = r.id AND rf.tenant_id = r.tenant_id AND rf.is_del = 0 "
+			+ "AND (rf.uid1 = #{actor} OR rf.uid2 = #{actor})))) LIMIT 1")
+	Integer isCurrentMember(@Param("actor") Long actor, @Param("roomId") Long roomId,
+			@Param("tenantId") Long tenantId);
+
+	/** Cross-tenant service scan: every returned row carries its own tenant; the update still uses tenant-bound CAS. */
+	@InterceptorIgnore(tenantLine = "true")
+	@Select("SELECT t.id, t.tenant_id, t.aiclaw_uid, t.room_id, t.create_time "
+			+ "FROM im_aiclaw_thinking t "
+			+ "LEFT JOIN im_user u ON u.id = t.aiclaw_uid AND u.tenant_id = t.tenant_id AND u.is_del = 0 "
+			+ "LEFT JOIN im_aiclaw a ON a.uid = t.aiclaw_uid AND a.tenant_id = t.tenant_id AND a.is_del = 0 "
+			+ "LEFT JOIN im_room r ON r.id = t.room_id AND r.tenant_id = t.tenant_id AND r.is_del = 0 "
+			+ "WHERE t.status = 0 AND t.is_del = 0 AND t.id > #{afterId} AND (t.create_time <= #{cutoff} "
+			+ "OR u.id IS NULL OR u.user_type <> 4 OR u.state IS NULL OR u.state <> 0 "
+			+ "OR a.id IS NULL OR a.auth_status <> 1 OR a.deactivated_at IS NOT NULL "
+			+ "OR r.id IS NULL OR NOT ("
+			+ "(r.type = 1 AND EXISTS (SELECT 1 FROM im_room_group rg "
+			+ "JOIN im_group_member gm ON gm.group_id = rg.id AND gm.is_del = 0 "
+			+ "WHERE rg.room_id = t.room_id AND rg.tenant_id = t.tenant_id "
+			+ "AND gm.tenant_id = t.tenant_id AND gm.uid = t.aiclaw_uid AND rg.is_del = 0)) "
+			+ "OR (r.type = 2 AND EXISTS (SELECT 1 FROM im_room_friend rf WHERE rf.room_id = t.room_id "
+			+ "AND rf.tenant_id = t.tenant_id AND rf.is_del = 0 "
+			+ "AND (rf.uid1 = t.aiclaw_uid OR rf.uid2 = t.aiclaw_uid))))) "
+			+ "ORDER BY t.id LIMIT 100")
+	List<AiclawThinking> selectCleanupCandidates(@Param("cutoff") java.time.LocalDateTime cutoff,
+			@Param("afterId") Long afterId);
+
+	/** Current room members only; filter deleted/disabled identities and cross-tenant rows at DB read time. */
+	@Select("SELECT gm.uid FROM im_room r JOIN im_room_group rg ON rg.room_id = r.id "
+			+ "AND rg.tenant_id = r.tenant_id AND rg.is_del = 0 "
+			+ "JOIN im_group_member gm ON gm.group_id = rg.id AND gm.tenant_id = r.tenant_id AND gm.is_del = 0 "
+			+ "JOIN im_user u ON u.id = gm.uid AND u.tenant_id = r.tenant_id AND u.is_del = 0 AND u.state = 0 "
+			+ "WHERE r.id = #{roomId} AND r.tenant_id = #{tenantId} AND r.is_del = 0 AND r.type = 1 "
+			+ "AND (u.user_type <> 4 OR EXISTS (SELECT 1 FROM im_aiclaw a WHERE a.uid = u.id "
+			+ "AND a.tenant_id = r.tenant_id AND a.is_del = 0 AND a.auth_status = 1 AND a.deactivated_at IS NULL)) "
+			+ "UNION SELECT u.id FROM im_room r JOIN im_room_friend rf ON rf.room_id = r.id "
+			+ "AND rf.tenant_id = r.tenant_id AND rf.is_del = 0 "
+			+ "JOIN im_user u ON u.id IN (rf.uid1, rf.uid2) AND u.tenant_id = r.tenant_id "
+			+ "AND u.is_del = 0 AND u.state = 0 "
+			+ "WHERE r.id = #{roomId} AND r.tenant_id = #{tenantId} AND r.is_del = 0 AND r.type = 2 "
+			+ "AND (u.user_type <> 4 OR EXISTS (SELECT 1 FROM im_aiclaw a WHERE a.uid = u.id "
+			+ "AND a.tenant_id = r.tenant_id AND a.is_del = 0 AND a.auth_status = 1 AND a.deactivated_at IS NULL))")
+	List<Long> selectCurrentMemberUids(@Param("roomId") Long roomId, @Param("tenantId") Long tenantId);
 
 	/**
 	 * #182: 解散群聊时逻辑删除该房间的全部 thinking 记录（保留审计）。
@@ -37,16 +111,6 @@ public interface AiclawThinkingMapper extends BaseMapper<AiclawThinking> {
 	 */
 	@Update("UPDATE im_aiclaw_thinking SET is_del = 1 WHERE room_id = #{roomId} AND is_del = 0")
 	int logicDeleteByRoomId(@Param("roomId") Long roomId);
-
-	/**
-	 * 反查指定 aiclaw 在指定房间内最近一条进行中（status=0）的 thinking id
-	 *
-	 * @param aiclawUid aiclaw uid
-	 * @param roomId    房间 ID
-	 * @return 最新的进行中 thinking id，无则 null
-	 */
-	@Select("SELECT id FROM im_aiclaw_thinking WHERE aiclaw_uid = #{aiclawUid} AND room_id = #{roomId} AND status = 0 AND is_del = 0 ORDER BY create_time DESC LIMIT 1")
-	Long selectActiveThinkingId(@Param("aiclawUid") Long aiclawUid, @Param("roomId") Long roomId);
 
 	/**
 	 * 按触发消息 ID 批量反查指定房间的 thinking 元数据（metadata only）。

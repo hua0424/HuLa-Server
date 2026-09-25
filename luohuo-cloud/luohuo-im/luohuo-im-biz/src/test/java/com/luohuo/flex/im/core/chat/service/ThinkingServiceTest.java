@@ -1,6 +1,14 @@
 package com.luohuo.flex.im.core.chat.service;
 
+import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.basic.exception.BizException;
+import com.luohuo.flex.im.core.chat.dao.MessageDao;
+import com.luohuo.flex.im.core.user.dao.AiclawDao;
+import com.luohuo.flex.im.core.user.dao.UserDao;
+import com.luohuo.flex.im.domain.entity.Aiclaw;
+import com.luohuo.flex.im.domain.entity.Message;
+import com.luohuo.flex.im.domain.entity.User;
+import com.luohuo.flex.im.enums.UserTypeEnum;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -17,6 +25,8 @@ import jakarta.validation.Validator;
 import jakarta.validation.ValidatorFactory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -26,7 +36,6 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,8 +47,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 /**
- * REQ-004 [S4] ThinkingService.finalize 全文落库 + 200KB UTF-8 安全截断 + 状态映射，
- * 以及 resolveActiveThinking 反查的纯 Mockito 单元测试。
+ * ThinkingService 写入授权、终态 CAS 与 UTF-8 截断单元测试。
  */
 @ExtendWith(MockitoExtension.class)
 class ThinkingServiceTest {
@@ -48,6 +56,17 @@ class ThinkingServiceTest {
 
 	@Mock
 	private AiclawThinkingMapper thinkingMapper;
+	@Mock private AiclawDao aiclawDao;
+	@Mock private UserDao userDao;
+	@Mock private com.luohuo.flex.common.config.AiclawProperties aiclawProperties;
+	@Mock private com.luohuo.flex.im.core.user.service.impl.PushService pushService;
+	@Mock private MessageDao messageDao;
+
+	@BeforeEach
+	void tenant() { ContextUtil.setTenantId(1L); }
+
+	@AfterEach
+	void clearTenant() { ContextUtil.remove(); }
 
 	@Mock
 	private RoomCache roomCache;
@@ -73,105 +92,123 @@ class ThinkingServiceTest {
 		return t;
 	}
 
-	// ==================== slice 1：content 未超长 + complete → status=1 ====================
+	private void activeAgent() { activeAgent(1L); }
 
-	@Test
-	@DisplayName("finalize: 内容未超长且 complete → 全文落库 + duration + status=1")
-	void finalize_underLimit_complete_persistsFullContentStatus1() {
-		Long id = 1L;
-		when(thinkingMapper.selectById(id)).thenReturn(existing(id));
-
-		String content = "这是一段完整的思考文本";
-		thinkingService.finalize(id, content, 1234, "complete", null);
-
-		ArgumentCaptor<AiclawThinking> captor = ArgumentCaptor.forClass(AiclawThinking.class);
-		verify(thinkingMapper).updateById(captor.capture());
-		AiclawThinking saved = captor.getValue();
-		assertEquals(content, saved.getContent());
-		assertEquals(1234, saved.getDurationMs());
-		assertEquals(1, saved.getStatus());
-	}
-
-	// ==================== slice 2：content 超长 + complete → 截断 + status=4，无损 ====================
-
-	@Test
-	@DisplayName("finalize: 内容超 200KB 且 complete → UTF-8 安全截断 + status=4 + 不破坏多字节字符")
-	void finalize_overLimit_complete_truncatesStatus4_noCorruption() {
-		Long id = 2L;
-		when(thinkingMapper.selectById(id)).thenReturn(existing(id));
-
-		// "思" = 3 字节，重复至超过 200*1024 字节（边界落在多字节字符中间以验证不破坏字符）
-		int repeat = (MAX_BYTES / 3) + 1000;
-		String content = "思".repeat(repeat);
-		assertTrue(content.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES, "构造的内容应超过上限");
-
-		thinkingService.finalize(id, content, 500, "complete", null);
-
-		ArgumentCaptor<AiclawThinking> captor = ArgumentCaptor.forClass(AiclawThinking.class);
-		verify(thinkingMapper).updateById(captor.capture());
-		String stored = captor.getValue().getContent();
-
-		assertTrue(stored.getBytes(StandardCharsets.UTF_8).length <= MAX_BYTES, "截断后字节数应 <= 200KB");
-		assertEquals(4, captor.getValue().getStatus());
-		// 无损：每个字符都是 "思"，没有 U+FFFD 或半个字符
-		assertTrue(stored.chars().allMatch(c -> c == '思'), "截断结果不得损坏多字节字符");
-		// 字节上限内能容纳的完整 "思" 个数
-		int expectedChars = MAX_BYTES / 3;
-		assertEquals(expectedChars, stored.length(), "应保留尽可能多的完整字符");
-	}
-
-	// ==================== slice 3：error + 超长 → 保持 status=2，仍截断 ====================
-
-	@Test
-	@DisplayName("finalize: error 且内容超长 → 保持 status=2 + 仍截断 + errorCode 落库")
-	void finalize_error_overLimit_keepsStatus2_stillTruncates() {
-		Long id = 3L;
-		when(thinkingMapper.selectById(id)).thenReturn(existing(id));
-
-		int repeat = (MAX_BYTES / 3) + 1000;
-		String content = "思".repeat(repeat);
-
-		thinkingService.finalize(id, content, 500, "error", "some_error");
-
-		ArgumentCaptor<AiclawThinking> captor = ArgumentCaptor.forClass(AiclawThinking.class);
-		verify(thinkingMapper).updateById(captor.capture());
-		AiclawThinking saved = captor.getValue();
-
-		assertEquals(2, saved.getStatus(), "error 路径不得降级为 4");
-		assertEquals("some_error", saved.getErrorCode());
-		assertTrue(saved.getContent().getBytes(StandardCharsets.UTF_8).length <= MAX_BYTES);
-	}
-
-	// ==================== slice 4：error 含 timeout → status=3 ====================
-
-	@Test
-	@DisplayName("finalize: error 含 timeout → status=3")
-	void finalize_error_timeout_status3() {
-		Long id = 4L;
-		when(thinkingMapper.selectById(id)).thenReturn(existing(id));
-
-		thinkingService.finalize(id, "short", 100, "error", "request_timeout");
-
-		ArgumentCaptor<AiclawThinking> captor = ArgumentCaptor.forClass(AiclawThinking.class);
-		verify(thinkingMapper).updateById(captor.capture());
-		assertEquals(3, captor.getValue().getStatus());
-		assertEquals("request_timeout", captor.getValue().getErrorCode());
-	}
-
-	// ==================== slice 5：resolveActiveThinking ====================
-
-	@Test
-	@DisplayName("resolveActiveThinking: mapper 返回 id → 透传")
-	void resolveActiveThinking_returnsId() {
-		when(thinkingMapper.selectActiveThinkingId(100L, 10L)).thenReturn(777L);
-		assertEquals(777L, thinkingService.resolveActiveThinking(100L, 10L));
+	private void activeAgent(Long tenantId) {
+		User user = new User();
+		user.setUserType(UserTypeEnum.AICLAW.getValue());
+		user.setTenantId(tenantId);
+		user.setState(0);
+		Aiclaw aiclaw = new Aiclaw();
+		aiclaw.setTenantId(tenantId);
+		aiclaw.setAuthStatus(1);
+		when(userDao.getById(100L)).thenReturn(user);
+		when(aiclawDao.getByUid(100L)).thenReturn(aiclaw);
+		when(thinkingMapper.isCurrentMember(100L, 10L, tenantId)).thenReturn(1);
 	}
 
 	@Test
-	@DisplayName("resolveActiveThinking: mapper 返回 null → null")
-	void resolveActiveThinking_returnsNull() {
-		when(thinkingMapper.selectActiveThinkingId(100L, 10L)).thenReturn(null);
-		assertNull(thinkingService.resolveActiveThinking(100L, 10L));
+	void startInTenantTwoWritesExplicitTenantTwoNotDefaultOne() {
+		ContextUtil.setTenantId(2L);
+		activeAgent(2L);
+		when(thinkingMapper.insertThinking(anyLong(), eq(2L), eq(100L), eq(10L), isNull())).thenReturn(1);
+		Long id = thinkingService.create(100L, 10L, null);
+		verify(thinkingMapper).insertThinking(id, 2L, 100L, 10L, null);
+	}
+
+	@Test
+	void createRejectsCrossRoomTriggerWithoutInsertion() {
+		activeAgent();
+		Message trigger = new Message();
+		trigger.setRoomId(99L);
+		trigger.setTenantId(1L);
+		when(messageDao.getById(42L)).thenReturn(trigger);
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, 42L));
+		verify(thinkingMapper, never()).insertThinking(any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void startRejectsMissingTenantAndDisabledAgentBeforeInsertion() {
+		ContextUtil.remove();
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null));
+		verifyNoInteractions(thinkingMapper, userDao);
+		ContextUtil.setTenantId(1L);
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null));
+		verify(thinkingMapper, never()).insertThinking(any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void unknownEndStatusRejectedWithoutUpdate() {
+		activeAgent();
+		assertThrows(BizException.class, () -> thinkingService.finalize(1L, 100L, 10L, "text", 12, "pending", null));
+		verify(thinkingMapper, never()).finalizeActive(any(), any(), any(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void endRejectsForeignRecordBeforeAnyUpdate() {
+		activeAgent();
+		assertThrows(BizException.class, () -> thinkingService.finalize(1L, 100L, 10L, "text", 12, "complete", null));
+		verify(thinkingMapper).selectOwned(1L, 1L, 100L, 10L);
+		verify(thinkingMapper, never()).finalizeActive(any(), any(), any(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void endCasWinnerAndIdenticalRetryNoSecondUpdate() {
+		activeAgent();
+		AiclawThinking active = existing(1L);
+		AiclawThinking completed = existing(1L);
+		completed.setStatus(1);
+		completed.setContent("text");
+		completed.setDurationMs(12);
+		when(thinkingMapper.selectOwned(1L, 1L, 100L, 10L)).thenReturn(active, completed, completed);
+		when(thinkingMapper.finalizeActive(1L, 1L, 100L, 10L, "text", 12, 1, null)).thenReturn(1);
+		assertTrue(thinkingService.finalize(1L, 100L, 10L, "text", 12, "complete", null));
+		assertFalse(thinkingService.finalize(1L, 100L, 10L, "text", 12, "complete", null));
+		assertThrows(BizException.class, () -> thinkingService.finalize(1L, 100L, 10L, "different", 12, "complete", null));
+		verify(thinkingMapper, times(1)).finalizeActive(any(), any(), any(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void casLoserChecksPersistedWinnerAndTruncatesUtf8() {
+		activeAgent();
+		String content = "思".repeat(MAX_BYTES / 3 + 1000);
+		String expected = "思".repeat(MAX_BYTES / 3);
+		AiclawThinking active = existing(1L);
+		AiclawThinking completed = existing(1L);
+		completed.setStatus(4);
+		completed.setContent(expected);
+		completed.setDurationMs(12);
+		when(thinkingMapper.selectOwned(1L, 1L, 100L, 10L)).thenReturn(active, completed);
+		assertFalse(thinkingService.finalize(1L, 100L, 10L, content, 12, "complete", null));
+		verify(thinkingMapper).finalizeActive(1L, 1L, 100L, 10L, expected, 12, 4, null);
+	}
+
+	@Test
+	void agentErrorTextCannotClaimServiceTimeoutStatus() {
+		activeAgent();
+		when(thinkingMapper.selectOwned(1L, 1L, 100L, 10L)).thenReturn(existing(1L));
+		when(thinkingMapper.finalizeActive(1L, 1L, 100L, 10L, "", 12, 2, "request_timeout"))
+				.thenReturn(1);
+		assertTrue(thinkingService.finalize(1L, 100L, 10L, null, 12, "error", "request_timeout"));
+		verify(thinkingMapper).finalizeActive(1L, 1L, 100L, 10L, "", 12, 2, "request_timeout");
+	}
+
+	@Test
+	void serviceTimeoutOnlyUpdatesMatchingOwnedRecord() {
+		when(thinkingMapper.selectOwned(1L, 1L, 100L, 10L)).thenReturn(existing(1L));
+		when(thinkingMapper.finalizeActive(1L, 1L, 100L, 10L, "", null, 3, "timeout")).thenReturn(1);
+		assertTrue(thinkingService.markError(1L, 100L, 10L, "timeout", true));
+		verifyNoInteractions(userDao);
+	}
+
+	@Test
+	void onlySameOwnedPersistedTerminalProvesRemoteCompletion() {
+		AiclawThinking completed = existing(1L);
+		completed.setStatus(2);
+		when(thinkingMapper.selectOwned(1L, 1L, 100L, 10L)).thenReturn(completed);
+		assertTrue(thinkingService.isOwnedTerminal(1L, 100L, 10L));
+		assertFalse(thinkingService.isOwnedTerminal(1L, 200L, 10L));
+		verify(thinkingMapper).selectOwned(1L, 1L, 200L, 10L);
 	}
 
 	// ==================== REQ-004 [S7]：reviewThinking IDOR 安全授权 ====================

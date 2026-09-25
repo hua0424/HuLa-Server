@@ -5,12 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.flex.im.core.chat.dao.*;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
-import com.luohuo.flex.im.core.chat.service.AiclawRoomMembershipService;
+import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.core.chat.service.ContactService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.MsgCache;
@@ -25,6 +26,8 @@ import com.luohuo.flex.im.domain.entity.*;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.mockito.ArgumentCaptor;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
 import com.luohuo.flex.im.enums.UserTypeEnum;
@@ -68,7 +71,7 @@ class ChatServiceImplTest {
 	@Mock private RoomDao roomDao;
 	@Mock private GroupMemberDao groupMemberDao;
 	@Mock private UserCache userCache;
-	@Mock private AiclawRoomMembershipService aiclawRoomMembershipService;
+	@Mock private ThinkingService thinkingService;
 	@Mock private AiclawThinkingMapper aiclawThinkingMapper;
 	@Mock private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
 	@Mock private UserSummaryCache userSummaryCache;
@@ -79,6 +82,9 @@ class ChatServiceImplTest {
 	private static final Long AICLAW_UID = 100L;
 	private static final Long NORMAL_UID = 200L;
 	private static final Long ROOM_ID = 10L;
+
+	@BeforeEach void setTenant() { ContextUtil.setTenantId(1L); }
+	@AfterEach void clearTenant() { ContextUtil.remove(); }
 
 	// ==================== 辅助方法 ====================
 
@@ -151,7 +157,7 @@ class ChatServiceImplTest {
 		when(userCache.get(AICLAW_UID)).thenReturn(aiclawUser());
 		// 共享 Service 抛异常
 		doThrow(new BizException("非房间成员，无法发送消息"))
-				.when(aiclawRoomMembershipService).checkMembership(AICLAW_UID, ROOM_ID);
+				.when(thinkingService).requireActiveAgent(AICLAW_UID, ROOM_ID, 1L);
 
 		ChatMessageReq req = baseReq(ROOM_ID);
 		BizException ex = assertThrows(BizException.class, () -> chatService.sendMsg(req, AICLAW_UID));
@@ -171,7 +177,7 @@ class ChatServiceImplTest {
 		assertEquals(999L, msgId);
 
 		// 验证共享 Service 未被调用
-		verify(aiclawRoomMembershipService, never()).checkMembership(any(), any());
+		verifyNoInteractions(thinkingService);
 	}
 
 	@Test
@@ -190,22 +196,17 @@ class ChatServiceImplTest {
 		Long msgId = sendMsgWithMockedHandler(baseReq(20L), NORMAL_UID);
 		assertEquals(999L, msgId);
 
-		verify(aiclawRoomMembershipService, never()).checkMembership(any(), any());
+		verifyNoInteractions(thinkingService);
 	}
 
 	// ==================== sender==null 边缘测试（顺手项） ====================
 
 	@Test
-	@DisplayName("userCache 返回 null → 视为非 aiclaw，绕过校验")
-	void senderNull_shouldBypass() {
+	@DisplayName("userCache 返回 null → 拒绝，不能绕过成员校验")
+	void senderNull_rejectedBeforePersistence() {
 		when(userCache.get(999L)).thenReturn(null);
-		stubRoomCache();
-		when(groupMemberDao.getMember(ROOM_ID, 999L)).thenReturn(mockGroupMember());
-
-		Long msgId = sendMsgWithMockedHandler(baseReq(ROOM_ID), 999L);
-		assertEquals(999L, msgId);
-
-		verify(aiclawRoomMembershipService, never()).checkMembership(any(), any());
+		assertThrows(BizException.class, () -> chatService.sendMsg(baseReq(ROOM_ID), 999L));
+		verifyNoInteractions(thinkingService, aiclawThinkingMapper);
 	}
 
 	// ==================== 短回复不再 skip ====================
@@ -226,12 +227,9 @@ class ChatServiceImplTest {
 		assertEquals(999L, msgId);
 	}
 
-	// ==================== REQ-004 [S4] thinking 自动关联 ====================
-
 	@Nested
-	@DisplayName("S4 thinking 自动关联")
+	@DisplayName("显式 thinking 关联")
 	class ThinkingAssociation {
-
 		private void stubAiclawGroupSend() {
 			stubRoomCache();
 			when(userCache.get(AICLAW_UID)).thenReturn(aiclawUser());
@@ -240,50 +238,52 @@ class ChatServiceImplTest {
 		}
 
 		@Test
-		@DisplayName("extra.thinkingId 存在 → 用该 id 关联（source=extra），不查 active")
-		void extraThinkingId_associatesWithThatId() {
+		void completedOwnedRecordMayAssociateWithSkipPush() {
 			stubAiclawGroupSend();
 			ChatMessageReq req = baseReq(ROOM_ID);
 			req.setExtra(Map.of("thinkingId", "555"));
-
-			Long msgId = sendMsgWithMockedHandler(req, AICLAW_UID);
-			assertEquals(999L, msgId);
-
+			req.setSkipPush(true);
+			AiclawThinking completed = new AiclawThinking();
+			completed.setStatus(1);
+			when(aiclawThinkingMapper.selectOwned(555L, 1L, AICLAW_UID, ROOM_ID)).thenReturn(completed);
+			when(aiclawThinkingMsgRelMapper.insertIgnore(any())).thenReturn(1);
+			when(aiclawThinkingMapper.markHasResponse(555L, 1L, AICLAW_UID, ROOM_ID)).thenReturn(1);
+			assertEquals(999L, sendMsgWithMockedHandler(req, AICLAW_UID));
 			ArgumentCaptor<AiclawThinkingMsgRel> captor = ArgumentCaptor.forClass(AiclawThinkingMsgRel.class);
 			verify(aiclawThinkingMsgRelMapper).insertIgnore(captor.capture());
 			assertEquals(555L, captor.getValue().getThinkingId());
-			assertEquals(999L, captor.getValue().getMsgId());
-			verify(aiclawThinkingMapper).updateHasResponse(555L, 1);
-			verify(aiclawThinkingMapper, never()).selectActiveThinkingId(any(), any());
+			verify(aiclawThinkingMapper).markHasResponse(555L, 1L, AICLAW_UID, ROOM_ID);
 		}
 
 		@Test
-		@DisplayName("无 extra + 存在 active thinking → 自动关联该 id（source=auto）")
-		void noExtra_activeThinkingExists_associatesAuto() {
+		void completedThinkingWithExistingResponseCanAssociateAgain() {
 			stubAiclawGroupSend();
-			when(aiclawThinkingMapper.selectActiveThinkingId(AICLAW_UID, ROOM_ID)).thenReturn(777L);
-
-			Long msgId = sendMsgWithMockedHandler(baseReq(ROOM_ID), AICLAW_UID);
-			assertEquals(999L, msgId);
-
-			ArgumentCaptor<AiclawThinkingMsgRel> captor = ArgumentCaptor.forClass(AiclawThinkingMsgRel.class);
-			verify(aiclawThinkingMsgRelMapper).insertIgnore(captor.capture());
-			assertEquals(777L, captor.getValue().getThinkingId());
-			assertEquals(999L, captor.getValue().getMsgId());
-			verify(aiclawThinkingMapper).updateHasResponse(777L, 1);
+			ChatMessageReq req = baseReq(ROOM_ID);
+			req.setExtra(Map.of("thinkingId", "555"));
+			AiclawThinking completed = new AiclawThinking();
+			completed.setStatus(1);
+			when(aiclawThinkingMapper.selectOwned(555L, 1L, AICLAW_UID, ROOM_ID)).thenReturn(completed);
+			when(aiclawThinkingMsgRelMapper.insertIgnore(any())).thenReturn(1);
+			assertEquals(999L, sendMsgWithMockedHandler(req, AICLAW_UID));
+			verify(aiclawThinkingMapper).markHasResponse(555L, 1L, AICLAW_UID, ROOM_ID);
 		}
 
 		@Test
-		@DisplayName("无 extra + 无 active thinking → 跳过关联，不写 rel、不更新 has_response")
-		void noExtra_noActiveThinking_skipsAssociation() {
+		void foreignThinkingIdRejectedBeforeMessageInsertEvenWithSkip() {
 			stubAiclawGroupSend();
-			when(aiclawThinkingMapper.selectActiveThinkingId(AICLAW_UID, ROOM_ID)).thenReturn(null);
-
-			Long msgId = sendMsgWithMockedHandler(baseReq(ROOM_ID), AICLAW_UID);
-			assertEquals(999L, msgId);
-
+			ChatMessageReq req = baseReq(ROOM_ID);
+			req.setExtra(Map.of("thinkingId", "555"));
+			req.setSkip(true);
+			assertThrows(BizException.class, () -> sendMsgWithMockedHandler(req, AICLAW_UID));
 			verify(aiclawThinkingMsgRelMapper, never()).insertIgnore(any());
-			verify(aiclawThinkingMapper, never()).updateHasResponse(any(), any());
+			verify(aiclawThinkingMapper, never()).markHasResponse(any(), any(), any(), any());
+		}
+
+		@Test
+		void missingIdNeverFallsBackToLatestActive() {
+			stubAiclawGroupSend();
+			assertEquals(999L, sendMsgWithMockedHandler(baseReq(ROOM_ID), AICLAW_UID));
+			verifyNoInteractions(aiclawThinkingMapper, aiclawThinkingMsgRelMapper);
 		}
 	}
 
