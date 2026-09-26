@@ -910,6 +910,36 @@ class AiclawServiceImplTest {
 	}
 
 	@Test
+	@DisplayName("restore(#297/#250): 从未激活（machineCode=null）的停用 aiclaw 恢复为 0，不得凭空获得已激活态")
+	void restore_neverActivated_restoresToZero() {
+		Aiclaw aiclaw = stubRestorePath(LocalDateTime.now().minusHours(1));
+		aiclaw.setMachineCode(null); // 未激活：无机器码绑定
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+		stubRedisTokenCache();
+
+		aiclawService.restore(AICLAW_UID, OWNER_UID);
+
+		ArgumentCaptor<Aiclaw> captor = ArgumentCaptor.forClass(Aiclaw.class);
+		verify(aiclawDao).updateById(captor.capture());
+		assertEquals(0, captor.getValue().getAuthStatus(), "未激活身份 restore 后必须仍是 0（#250：不能跳过激活流程）");
+	}
+
+	@Test
+	@DisplayName("restore(#297): 曾激活（machineCode 非空）的停用 aiclaw 恢复为 1，恢复正常")
+	void restore_activatedBefore_restoresToOne() {
+		Aiclaw aiclaw = stubRestorePath(LocalDateTime.now().minusHours(1));
+		aiclaw.setMachineCode("machine-A"); // activate 绑定的机器码，停用不清除
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+		stubRedisTokenCache();
+
+		aiclawService.restore(AICLAW_UID, OWNER_UID);
+
+		ArgumentCaptor<Aiclaw> captor = ArgumentCaptor.forClass(Aiclaw.class);
+		verify(aiclawDao).updateById(captor.capture());
+		assertEquals(1, captor.getValue().getAuthStatus(), "曾激活身份停用后恢复应回到 1");
+	}
+
+	@Test
 	@DisplayName("purgeExpiredDeactivated: 配置 1 分钟 → 传给 listExpiredDeactivated 的 cutoff ≈ now-1min")
 	void purgeExpiredDeactivated_config1min_cutoffApproxNowMinus1Min() {
 		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("1");

@@ -725,13 +725,21 @@ public class AiclawServiceImpl implements AiclawService {
 			throw new BizException("已超过停用恢复期（" + retentionMinutes + " 分钟）");
 		}
 
+		// #297（交叉核对 #250）：restore 必须恢复停用前状态，不能一律置 1——否则
+		// 未激活（authStatus=0）的 aiclaw 被停用再恢复会凭空获得已激活态（可写身份），
+		// 绕过凭据激活流程（#250 实测缺陷，属本票"禁用身份不能凭历史绑定取得能力"范围）。
+		// 推导依据（免加列）：activate 强制 machineCode @NotBlank，refresh 会同时清
+		// machineCode 并回到 0，故"曾经激活"⇔machineCode 非空；历史脏行（status=1 但
+		// 无 machineCode）按 0 恢复（fail-closed，需重新激活）。
+		int priorStatus = StrUtil.isNotBlank(aiclaw.getMachineCode()) ? 1 : 0;
+
 		Aiclaw update = new Aiclaw();
 		update.setId(aiclaw.getId());
-		update.setAuthStatus(1);
+		update.setAuthStatus(priorStatus);
 		update.setDeactivatedAt(null);
 		aiclawDao.updateById(update);
 
-		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), 1);
+		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), priorStatus);
 		aiclawOwnerCache.refresh(aiclawUid);
 
 		log.info("aiclaw restored: uid={}", aiclawUid);
