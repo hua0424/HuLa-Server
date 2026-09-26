@@ -174,8 +174,8 @@
                     <skip>false</skip>
                     <skipTests>false</skipTests>
                     <systemPropertyVariables>
-                        <!-- Testcontainers 内嵌 docker-java 默认 API 1.32,Docker 29.x daemon 要求 >=1.40 -->
-                        <api.version>1.43</api.version>
+                        <!-- Docker 29.x daemon 要求 API >=1.44；Testcontainers 默认 1.43 会被拒绝 -->
+                        <api.version>1.44</api.version>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

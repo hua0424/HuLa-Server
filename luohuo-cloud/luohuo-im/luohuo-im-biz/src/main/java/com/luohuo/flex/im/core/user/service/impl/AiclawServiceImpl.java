@@ -733,11 +733,10 @@ public class AiclawServiceImpl implements AiclawService {
 		// 无 machineCode）按 0 恢复（fail-closed，需重新激活）。
 		int priorStatus = StrUtil.isNotBlank(aiclaw.getMachineCode()) ? 1 : 0;
 
-		Aiclaw update = new Aiclaw();
-		update.setId(aiclaw.getId());
-		update.setAuthStatus(priorStatus);
-		update.setDeactivatedAt(null);
-		aiclawDao.updateById(update);
+		aiclawDao.update(new LambdaUpdateWrapper<Aiclaw>()
+				.eq(Aiclaw::getId, aiclaw.getId())
+				.set(Aiclaw::getAuthStatus, priorStatus)
+				.set(Aiclaw::getDeactivatedAt, null));
 
 		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), priorStatus);
 		aiclawOwnerCache.refresh(aiclawUid);
