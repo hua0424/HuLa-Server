@@ -13,6 +13,7 @@ import com.luohuo.basic.exception.code.ResponseEnum;
 import com.luohuo.flex.common.utils.IPUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
@@ -88,7 +89,10 @@ public class TokenContextFilter implements WebFilter, Ordered {
     /**
      * 显式构造器：disambiguate the {@code @LoadBalanced} {@link WebClient.Builder} bean
      * (与 Spring Boot 默认 WebClientAutoConfiguration 注册的 builder 区分)。
+     * #295 修复：两个构造器且无默认构造器时 Spring 无法自行选择 → 必须标记唯一 @Autowired
+     * 构造器，否则 BeanInstantiationException(No default constructor found)，gateway 启动失败。
      */
+    @Autowired
     public TokenContextFilter(IgnoreProperties ignoreProperties,
                               SaTokenConfig saTokenConfig,
                               StringRedisTemplate stringRedisTemplate,
