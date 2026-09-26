@@ -28,7 +28,7 @@ import javax.sql.DataSource;
  * 不引入 Spring Cloud / Nacos / Web 等业务上下文。
  */
 @SpringBootConfiguration
-@MapperScan("com.luohuo.flex.im.core.chat.mapper")
+@MapperScan({"com.luohuo.flex.im.core.chat.mapper", "com.luohuo.flex.im.core.user.mapper"})
 @ImportAutoConfiguration({
         DataSourceTransactionManagerAutoConfiguration.class,
         JdbcTemplateAutoConfiguration.class,
