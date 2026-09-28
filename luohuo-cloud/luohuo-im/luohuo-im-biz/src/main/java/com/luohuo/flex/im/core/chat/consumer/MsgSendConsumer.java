@@ -30,8 +30,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.spring.annotation.MessageModel;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
-import org.springframework.scheduling.annotation.Async;
+import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -63,16 +64,43 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 
     @Override
     public void onMessage(MsgSendMessageDTO dto) {
-        // 恢复租户上下文（@SecureInvoke 异步线程丢失 ThreadLocal，从 DTO 中恢复）
-        if (dto.getTenantId() != null) {
-            com.luohuo.basic.context.ContextUtil.setTenantId(dto.getTenantId());
+        // MQ worker threads are reused. A missing DTO identity must never inherit a prior tenant.
+        com.luohuo.basic.context.ContextUtil.clearTenantContext();
+        com.luohuo.basic.context.ContextUtil.remove();
+        if (dto == null || dto.getTenantId() == null || dto.getTenantId() <= 0
+                || dto.getUid() == null || dto.getUid() <= 0 || dto.getMsgId() == null || dto.getMsgId() <= 0) {
+            throw new IllegalArgumentException("message notification lacks trusted tenant, actor or msgId");
         }
-        if (dto.getUid() != null) {
-            com.luohuo.basic.context.ContextUtil.setUid(dto.getUid());
+        // Restore before the Spring proxy opens its transaction; never trust caller thread state.
+        com.luohuo.basic.context.ContextUtil.setTenantId(dto.getTenantId());
+        com.luohuo.basic.context.ContextUtil.setUid(dto.getUid());
+        try {
+            pushService.withMessageTransaction(() -> routeMessage(dto));
+        } finally {
+            com.luohuo.basic.context.ContextUtil.clearTenantContext();
+            com.luohuo.basic.context.ContextUtil.remove();
         }
+    }
+
+    private void routeMessage(MsgSendMessageDTO dto) {
+        // Register before @SecureInvoke: seed in-flight state before any afterCommit MQ publication.
+        List<Runnable> afterCommitTasks = new ArrayList<>();
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                afterCommitTasks.forEach(task -> {
+                    try {
+                        task.run();
+                    } catch (Exception e) {
+                        // DB intent is committed: never suppress its publication callback.
+                        log.error("消息提交后在途缓存/延迟推送失败: msgId={}", dto.getMsgId(), e);
+                    }
+                });
+            }
+        });
         Message message = messageDao.getById(dto.getMsgId());
         if (Objects.isNull(message)) {
-            return;
+            throw new IllegalStateException("message not readable before ACK: " + dto.getMsgId());
         }
         Room room = roomCache.get(message.getRoomId());
         // 1. 所有房间更新房间最新消息
@@ -105,8 +133,8 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				// REQ-004 S5: 回填房间类型，供 aiclaw 插件区分群聊/单聊
 				MessageAdapter.fillRoomType(selfMsgResp, room.getType());
 				WsBaseResp<ChatMessageResp> selfResp = WsAdapter.buildMsgSend(selfMsgResp);
-				pushService.sendPushMsg(selfResp, uid, dto.getUid());
-				asyncSavePassageMsg(message.getId(), selfResp, Set.of(uid), dto.getUid());
+				pushService.sendReliablePushMsg(selfResp, List.of(uid), message.getId(), dto.getUid());
+				schedulePassageMsgAfterCommit(message.getId(), selfResp, Set.of(uid), dto.getUid(), afterCommitTasks);
 
 				// 3.2 修改消息发送者为通话创建者（用于其他人接收）
 				Long originalFromUid = message.getFromUid();
@@ -121,7 +149,7 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 										.orElse(originalFromUid)
 						);
 				message.setFromUid(creator);
-
+                try {
 				// 3.3 推送给其他成员
 				onlineUsersList.remove(uid);
 				List<Long> otherMembers = new ArrayList<>(onlineUsersList);
@@ -140,9 +168,11 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 					MessageAdapter.fillFromUserType(othersResp.getData(), originalFromUser.getUserType());
 					MessageAdapter.fillFromUserName(othersResp.getData(), originalFromUser.getName());
 				}
-				pushService.sendPushMsg(othersResp, otherMembers, dto.getUid());
-				asyncSavePassageMsg(message.getId(), othersResp, onlineUsersList, dto.getUid());
-				message.setFromUid(originalFromUid);
+				pushService.sendReliablePushMsg(othersResp, otherMembers, message.getId(), dto.getUid());
+				schedulePassageMsgAfterCommit(message.getId(), othersResp, onlineUsersList, dto.getUid(), afterCommitTasks);
+                } finally {
+                    message.setFromUid(originalFromUid);
+                }
 			}
 			default -> {
 				// 常规消息处理
@@ -166,39 +196,41 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 					List<Long> normalUsers = new ArrayList<>(onlineUsersList);
 					normalUsers.remove(aiclawUid);
 					if (!normalUsers.isEmpty()) {
-						pushService.sendPushMsg(wsBaseResp, normalUsers, dto.getUid());
+						pushService.sendReliablePushMsg(wsBaseResp, normalUsers, message.getId(), dto.getUid());
 					}
 					if (onlineUsersList.contains(aiclawUid)) {
-						pushService.sendPushMsg(aiclawWsResp, aiclawUid, dto.getUid());
+						pushService.sendReliablePushMsg(aiclawWsResp, List.of(aiclawUid), message.getId(), dto.getUid());
 					}
-					asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
+					schedulePassageMsgAfterCommit(message.getId(), wsBaseResp, new java.util.HashSet<>(normalUsers), dto.getUid(), afterCommitTasks);
+                    if (onlineUsersList.contains(aiclawUid)) {
+                        schedulePassageMsgAfterCommit(message.getId(), aiclawWsResp, Set.of(aiclawUid), dto.getUid(), afterCommitTasks);
+                    }
 					break;
 				}
 
 				// 常规场景：原有逻辑
-				pushService.sendPushMsg(wsBaseResp, new ArrayList<>(onlineUsersList), dto.getUid());
-				asyncSavePassageMsg(message.getId(), wsBaseResp, onlineUsersList, dto.getUid());
+				pushService.sendReliablePushMsg(wsBaseResp, new ArrayList<>(onlineUsersList), message.getId(), dto.getUid());
+				schedulePassageMsgAfterCommit(message.getId(), wsBaseResp, onlineUsersList, dto.getUid(), afterCommitTasks);
 			}
 		}
     }
 
-	/**
-	 * 这里理论上一定会比 pushService 到达前端后在ack给后端 先执行完成
-	 * @param messageId 消息的id [唯一标识，未来升级为hash之后的值]
-	 * @param wsBaseResp 推送的消息
-	 * @param memberUidList 推送的列表
-	 * @param cuid 操作人
-	 */
-	@Async
-	public void asyncSavePassageMsg(Long messageId, WsBaseResp<?> wsBaseResp, Set<Long> memberUidList, Long cuid) {
-		// 1. 发送重试消息
-		pushService.sendPushMsgWithRetry(wsBaseResp, new ArrayList<>(memberUidList), messageId, cuid);
-
-		// 2. 给每条消息加入 在途的状态
-		memberUidList.forEach(memberUid -> {
-			// 添加在途消息
-			cachePlusOps.sAdd(PassageMsgCacheKeyBuilder.build(memberUid), messageId);
-		});
+    /** Seed the legacy in-flight cache before committed @SecureInvoke intents publish to MQ. */
+	private void schedulePassageMsgAfterCommit(Long messageId, WsBaseResp<?> wsBaseResp, Set<Long> memberUidList,
+                                   Long cuid, List<Runnable> afterCommitTasks) {
+		Set<Long> recipients = Set.copyOf(memberUidList);
+		if (recipients.isEmpty()) return;
+        afterCommitTasks.add(() -> {
+            for (Long memberUid : recipients) {
+                try {
+                    cachePlusOps.sAdd(PassageMsgCacheKeyBuilder.build(memberUid), messageId);
+                } catch (RuntimeException e) {
+                    // A transient cache outage must not suppress the delayed retry for other recipients.
+                    log.warn("在途缓存写入失败: msgId={}, uid={}", messageId, memberUid, e);
+                }
+            }
+            pushService.sendPushMsgWithRetry(wsBaseResp, new ArrayList<>(recipients), messageId, cuid);
+        });
 	}
 
 }

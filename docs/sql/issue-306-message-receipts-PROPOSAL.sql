@@ -1,4 +1,4 @@
--- PROPOSAL ONLY (issue #306). Never executed by this change.
+-- PROPOSAL ONLY for shared hula (issue #306); executed only in a disposable task-isolated MySQL5.7 rehearsal.
 -- Observed live hula MySQL 5.7 (read-only): im_message InnoDB PK(id), tenant_id BIGINT
 -- DEFAULT 1, room_id/from_uid/content/type/extra JSON; no request uniqueness.
 -- secure_invoke_record InnoDB holds pending MQ calls. Verify target schema/database,
@@ -25,5 +25,9 @@ CREATE TABLE im_message_receipt (
 -- Envelope: committed -> R.success(ChatMessageResp.message.id); conflict -> R.code 43061
 -- (rejected); receipt/response unknown -> 43062 (unknown/pending). Other auth/validation
 -- rejection uses existing error codes. Probe GET /chat/msg/receipt-capability before retries.
--- SecureInvoke retries are finite (default 3, then permanent FAIL); delivery recovery
--- beyond that requires operational replay after diagnosis. This code does not prove live MQ.
+-- Message MQ publication uses existing secure_invoke_record: 200 attempts (64-minute
+-- backoff ceiling, >8 days), then FAIL with the saved invocation for diagnosed,
+-- operator-approved replay; permanent failures must be monitored. The IM consumer
+-- records each routed node's second-hop intent in this same existing table before
+-- ACKing the first MQ message. MQ/WS may redeliver; clients dedupe by message.id.
+-- No broker enqueue or WS write proves a client's ACK or live end-to-end acceptance.
