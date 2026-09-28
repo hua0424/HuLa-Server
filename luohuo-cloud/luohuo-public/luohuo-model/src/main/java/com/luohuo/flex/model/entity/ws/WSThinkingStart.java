@@ -26,4 +26,7 @@ public class WSThinkingStart {
 
 	@Schema(description = "thinking 记录 ID（server 生成，出参时携带）")
 	private String thinkingId;
+
+	@Schema(description = "本轮执行 ID（仅关联，不授权；START 回执原样回显）")
+	private String clientRunId;
 }

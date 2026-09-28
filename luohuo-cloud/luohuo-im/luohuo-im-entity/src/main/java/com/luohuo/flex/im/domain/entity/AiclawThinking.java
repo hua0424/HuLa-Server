@@ -45,6 +45,12 @@ public class AiclawThinking extends SuperEntity<Long> {
 	@TableField("trigger_msg_id")
 	private Long triggerMsgId;
 
+	@TableField("client_run_id")
+	private String clientRunId;
+
+	@TableField("start_ready")
+	private Boolean startReady;
+
 	/**
 	 * 完整思考文本
 	 */
