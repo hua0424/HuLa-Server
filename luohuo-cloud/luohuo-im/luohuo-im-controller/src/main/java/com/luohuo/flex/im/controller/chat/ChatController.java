@@ -80,6 +80,12 @@ public class ChatController {
         memberPage.getList().removeIf(a -> blackMembers.contains(a.getFromUser().getUid().toString()));
     }
 
+    /** Clients must probe this endpoint, not infer support from an older server accepting unknown JSON fields. */
+    @GetMapping("/msg/receipt-capability")
+    public R<String> receiptCapability() {
+        return R.success("requestId-v1;retention-min=7d");
+    }
+
     @PostMapping("/msg")
     @Operation(summary ="发送消息")
 //    @FrequencyControl(target = FrequencyControl.Target.UID, time = 60, count = 10)
@@ -94,8 +100,25 @@ public class ChatController {
             }
         }
         Long msgId = chatService.sendMsg(request, uid);
+        if (request.getRequestId() != null && (msgId == null || msgId <= 0)) {
+            throw new BizException(43062, "消息发送结果未知，请用原 requestId 重试");
+        }
         // 返回完整消息格式，方便前端展示
-        return R.success(chatService.getMsgResp(msgId, uid));
+        ChatMessageResp response;
+        try {
+            response = chatService.getMsgResp(msgId, uid);
+        } catch (RuntimeException e) {
+            if (request.getRequestId() == null) {
+                throw e;
+            }
+            // sendMsg already committed: a failed response read cannot be reported as rejected.
+            throw new BizException(43062, "消息已提交但回执未知，请用原 requestId 重试", e);
+        }
+        if (request.getRequestId() != null && (response == null || response.getMessage() == null ||
+                !msgId.toString().equals(response.getMessage().getId()))) {
+            throw new BizException(43062, "消息发送结果未知，请用原 requestId 重试");
+        }
+        return R.success(response);
     }
 
     @PutMapping("/msg/mark")

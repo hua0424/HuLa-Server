@@ -101,6 +101,35 @@ class ChatControllerSendMsgTest {
 	}
 
 	@Test
+	@DisplayName("requestId send must not report success without a persisted message response")
+	void receiptSendWithMissingResponseIsUnknown() {
+		when(chatService.sendMsg(any(), eq(UID))).thenReturn(MSG_ID);
+		ChatMessageReq req = ChatMessageReq.builder().roomId(10L).msgType(1)
+				.body("hello").requestId("test-receipt").build();
+		try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class)) {
+			ctx.when(ContextUtil::getUid).thenReturn(UID);
+			BizException ex = assertThrows(BizException.class,
+					() -> controller.sendMsg(req, mock(HttpServletRequest.class)));
+			org.junit.jupiter.api.Assertions.assertEquals(43062, ex.getCode());
+		}
+	}
+
+	@Test
+	@DisplayName("requestId send remains unknown when post-commit response lookup fails")
+	void receiptSendWithFailedResponseLookupIsUnknown() {
+		when(chatService.sendMsg(any(), eq(UID))).thenReturn(MSG_ID);
+		when(chatService.getMsgResp(eq(MSG_ID), eq(UID))).thenThrow(new IllegalStateException("lookup failed"));
+		ChatMessageReq req = ChatMessageReq.builder().roomId(10L).msgType(1)
+				.body("hello").requestId("test-receipt").build();
+		try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class)) {
+			ctx.when(ContextUtil::getUid).thenReturn(UID);
+			BizException ex = assertThrows(BizException.class,
+					() -> controller.sendMsg(req, mock(HttpServletRequest.class)));
+			org.junit.jupiter.api.Assertions.assertEquals(43062, ex.getCode());
+		}
+	}
+
+	@Test
 	@DisplayName("AICLAW message cannot enter IM with a forged identity header and no trusted service proof")
 	void aiclawWithoutServiceProofIsRejectedBeforePersistence() {
 		when(userCache.get(UID)).thenReturn(User.builder().userType(UserTypeEnum.AICLAW.getValue()).build());

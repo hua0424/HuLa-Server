@@ -11,6 +11,7 @@ import com.luohuo.basic.utils.SpringUtils;
 import com.luohuo.flex.im.core.chat.dao.*;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMsgRelMapper;
+import com.luohuo.flex.im.core.chat.mapper.MessageReceiptMapper;
 import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.im.core.chat.service.ContactService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -75,6 +76,7 @@ class ChatServiceImplTest {
 	@Mock private AiclawThinkingMapper aiclawThinkingMapper;
 	@Mock private AiclawThinkingMsgRelMapper aiclawThinkingMsgRelMapper;
 	@Mock private UserSummaryCache userSummaryCache;
+	@Mock private MessageReceiptMapper messageReceiptMapper;
 
 	@InjectMocks
 	private ChatServiceImpl chatService;
@@ -135,6 +137,102 @@ class ChatServiceImplTest {
 
 			return chatService.sendMsg(req, uid);
 		}
+	}
+
+	@Test
+	void receiptFingerprintNormalizesMapOrderButDetectsPayloadChanges() {
+		ChatMessageReq first = baseReq(ROOM_ID);
+		first.setExtra(Map.of("a", 1, "b", Map.of("x", 1, "y", 2)));
+		ChatMessageReq second = baseReq(ROOM_ID);
+		second.setExtra(Map.of("b", Map.of("y", 2, "x", 1), "a", 1));
+		assertEquals(ChatServiceImpl.receiptFingerprint(first), ChatServiceImpl.receiptFingerprint(second));
+		second.setClientMsgId("bubble-2");
+		assertNotEquals(ChatServiceImpl.receiptFingerprint(first), ChatServiceImpl.receiptFingerprint(second));
+		second.setClientMsgId(null);
+		second.setBody("changed");
+		assertNotEquals(ChatServiceImpl.receiptFingerprint(first), ChatServiceImpl.receiptFingerprint(second));
+	}
+
+	@Test
+	void receiptReplayReturnsOriginalWithoutSecondSaveAndChecksPermission() {
+		stubRoomCache();
+		when(userCache.get(NORMAL_UID)).thenReturn(normalUser());
+		when(groupMemberDao.getMember(ROOM_ID, NORMAL_UID)).thenReturn(mockGroupMember());
+		ChatMessageReq req = baseReq(ROOM_ID);
+		req.setRequestId("one");
+		String hash = ChatServiceImpl.receiptFingerprint(req);
+		when(messageReceiptMapper.reserve(1L, NORMAL_UID, "one", hash)).thenReturn(0);
+		when(messageReceiptMapper.lockedReceipt(1L, NORMAL_UID, "one"))
+				.thenReturn(Map.of("fingerprint", hash, "msgId", 999L));
+		when(messageReceiptMapper.validMessage(999L, 1L, NORMAL_UID, ROOM_ID)).thenReturn(1);
+		assertEquals(999L, sendMsgWithMockedHandler(req, NORMAL_UID));
+		verify(messageReceiptMapper, never()).commit(any(), any(), any(), any());
+		verify(roomDao, never()).refreshActiveTime(any(), any(), any());
+		when(groupMemberDao.getMember(ROOM_ID, NORMAL_UID)).thenReturn(null);
+		assertThrows(RuntimeException.class, () -> sendMsgWithMockedHandler(req, NORMAL_UID));
+	}
+
+	@Test
+	void temporaryGreetingReplayIgnoresConsumedQuotaButRechecksRoomBlock() {
+		Room room = new Room();
+		room.setType(RoomTypeEnum.FRIEND.getType());
+		when(roomCache.get(ROOM_ID)).thenReturn(room);
+		when(userCache.get(NORMAL_UID)).thenReturn(normalUser());
+		RoomFriend friend = new RoomFriend();
+		friend.setUid1(NORMAL_UID);
+		friend.setUid2(201L);
+		when(roomFriendDao.getByRoomId(ROOM_ID)).thenReturn(friend);
+		UserFriend temporary = new UserFriend();
+		temporary.setUid(NORMAL_UID);
+		temporary.setIsTemp(true);
+		temporary.setTempStatus(false);
+		temporary.setTempMsgCount(1);
+		when(userFriendDao.getByRoomId(ROOM_ID, NORMAL_UID)).thenReturn(temporary);
+		ChatMessageReq req = baseReq(ROOM_ID);
+		req.setTemp(true);
+		req.setRequestId("greeting");
+		String hash = ChatServiceImpl.receiptFingerprint(req);
+		when(messageReceiptMapper.lockedReceipt(1L, NORMAL_UID, "greeting"))
+				.thenReturn(Map.of("fingerprint", hash, "msgId", 999L));
+		when(messageReceiptMapper.validMessage(999L, 1L, NORMAL_UID, ROOM_ID)).thenReturn(1);
+		assertEquals(999L, sendMsgWithMockedHandler(req, NORMAL_UID));
+		verify(userFriendDao, never()).updateById(any());
+		friend.setDeFriend1(true);
+		assertThrows(BizException.class, () -> sendMsgWithMockedHandler(req, NORMAL_UID));
+	}
+
+	@Test
+	void receiptFirstWriteCommitsAndSkipCannotBypassAuthorization() {
+		stubRoomCache();
+		when(userCache.get(NORMAL_UID)).thenReturn(normalUser());
+		ChatMessageReq req = baseReq(ROOM_ID);
+		req.setRequestId("one");
+		req.setSkip(true);
+		String hash = ChatServiceImpl.receiptFingerprint(req);
+		when(messageReceiptMapper.reserve(1L, NORMAL_UID, "one", hash)).thenReturn(1);
+		assertThrows(RuntimeException.class, () -> sendMsgWithMockedHandler(req, NORMAL_UID));
+		verify(messageReceiptMapper, never()).commit(any(), any(), any(), any());
+		when(groupMemberDao.getMember(ROOM_ID, NORMAL_UID)).thenReturn(mockGroupMember());
+		when(messageReceiptMapper.commit(1L, NORMAL_UID, "one", 999L)).thenReturn(1);
+		assertEquals(999L, sendMsgWithMockedHandler(req, NORMAL_UID));
+		verify(messageReceiptMapper).commit(1L, NORMAL_UID, "one", 999L);
+	}
+
+	@Test
+	void receiptConflictRejectedBeforeSaveAndNullReceiptUnknown() {
+		stubRoomCache();
+		when(userCache.get(NORMAL_UID)).thenReturn(normalUser());
+		when(groupMemberDao.getMember(ROOM_ID, NORMAL_UID)).thenReturn(mockGroupMember());
+		ChatMessageReq req = baseReq(ROOM_ID);
+		req.setRequestId("one");
+		when(messageReceiptMapper.lockedReceipt(1L, NORMAL_UID, "one"))
+				.thenReturn(Map.of("fingerprint", "other"));
+		assertEquals(43061, assertThrows(BizException.class,
+				() -> sendMsgWithMockedHandler(req, NORMAL_UID)).getCode());
+		when(messageReceiptMapper.lockedReceipt(1L, NORMAL_UID, "one")).thenReturn(null);
+		assertEquals(43062, assertThrows(BizException.class,
+				() -> sendMsgWithMockedHandler(req, NORMAL_UID)).getCode());
+		verify(messageReceiptMapper, never()).commit(any(), any(), any(), any());
 	}
 
 	// ==================== aiclaw 成员校验（委托 Service 层） ====================
