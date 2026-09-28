@@ -353,7 +353,7 @@ public class ThinkingService {
 	 *                      调用方无法区分原因（见 {@link #REVIEW_REJECTED_MESSAGE}）；真实原因仅记日志。
 	 */
 	public AiclawThinkingDetailResp reviewThinking(Long thinkingId, Long currentUid) {
-		AiclawThinking thinking = thinkingMapper.selectById(thinkingId);
+		AiclawThinking thinking = thinkingMapper.selectInTenant(thinkingId, requireTenant());
 		if (thinking == null) {
 			// 真实原因仅记日志，对外抛统一异常以消除枚举预言机
 			log.warn("reviewThinking rejected: thinking not found, thinkingId={}, currentUid={}",
@@ -365,6 +365,11 @@ public class ThinkingService {
 		checkCurrentUserMembership(currentUid, thinking.getRoomId());
 
 		return AiclawThinkingDetailResp.builder()
+				.thinkingId(String.valueOf(thinking.getId()))
+				.roomId(String.valueOf(thinking.getRoomId()))
+				.aiclawUid(String.valueOf(thinking.getAiclawUid()))
+				.triggerMsgId(thinking.getTriggerMsgId() == null ? null : String.valueOf(thinking.getTriggerMsgId()))
+				.clientRunId(thinking.getClientRunId())
 				.content(thinking.getContent())
 				.status(thinking.getStatus())
 				.durationMs(thinking.getDurationMs())

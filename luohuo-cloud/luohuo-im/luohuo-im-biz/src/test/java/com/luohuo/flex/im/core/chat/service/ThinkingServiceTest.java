@@ -326,13 +326,21 @@ class ThinkingServiceTest {
 		@Test
 		@DisplayName("群聊：caller 是群成员 → 返回 content/status/durationMs")
 		void groupMember_returnsContent() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 1));
+			AiclawThinking row = record(GROUP_ROOM_ID, 1);
+			row.setTriggerMsgId(9007199254740993L);
+			row.setClientRunId("run-123");
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(row);
 			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(groupRoom());
 			when(groupMemberCache.getMemberUidList(GROUP_ROOM_ID))
 					.thenReturn(List.of(AICLAW_UID, CALLER_UID, 999L));
 
 			AiclawThinkingDetailResp resp = thinkingService.reviewThinking(THINKING_ID, CALLER_UID);
 
+			assertEquals("555", resp.getThinkingId());
+			assertEquals("10", resp.getRoomId());
+			assertEquals("100", resp.getAiclawUid());
+			assertEquals("9007199254740993", resp.getTriggerMsgId());
+			assertEquals("run-123", resp.getClientRunId());
 			assertEquals("完整的思考内容", resp.getContent());
 			assertEquals(1, resp.getStatus());
 			assertEquals(1234, resp.getDurationMs());
@@ -341,7 +349,7 @@ class ThinkingServiceTest {
 		@Test
 		@DisplayName("私聊：caller 是 uid1 → 返回内容")
 		void friendMemberUid1_returnsContent() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(FRIEND_ROOM_ID, 1));
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(record(FRIEND_ROOM_ID, 1));
 			when(roomCache.get(FRIEND_ROOM_ID)).thenReturn(friendRoom());
 			RoomFriend rf = new RoomFriend();
 			rf.setUid1(CALLER_UID);
@@ -357,7 +365,7 @@ class ThinkingServiceTest {
 		@Test
 		@DisplayName("私聊：caller 是 uid2 → 返回内容")
 		void friendMemberUid2_returnsContent() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(FRIEND_ROOM_ID, 1));
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(record(FRIEND_ROOM_ID, 1));
 			when(roomCache.get(FRIEND_ROOM_ID)).thenReturn(friendRoom());
 			RoomFriend rf = new RoomFriend();
 			rf.setUid1(AICLAW_UID);
@@ -374,13 +382,13 @@ class ThinkingServiceTest {
 		// 下列 helper 触发各拒绝分支并返回抛出的 BizException，供不可区分性断言。
 
 		private BizException rejectFromNotFound() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(null);
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(null);
 			return assertThrows(BizException.class,
 					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
 		}
 
 		private BizException rejectFromGroupNonMember() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 1));
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(record(GROUP_ROOM_ID, 1));
 			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(groupRoom());
 			// 成员列表里有 aiclaw 但没有 caller —— 用 aiclaw 成员身份不能授权 caller
 			when(groupMemberCache.getMemberUidList(GROUP_ROOM_ID))
@@ -390,7 +398,7 @@ class ThinkingServiceTest {
 		}
 
 		private BizException rejectFromFriendNonMember() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(FRIEND_ROOM_ID, 1));
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(record(FRIEND_ROOM_ID, 1));
 			when(roomCache.get(FRIEND_ROOM_ID)).thenReturn(friendRoom());
 			RoomFriend rf = new RoomFriend();
 			rf.setUid1(AICLAW_UID);
@@ -401,7 +409,7 @@ class ThinkingServiceTest {
 		}
 
 		private BizException rejectFromRoomMissing() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 1));
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(record(GROUP_ROOM_ID, 1));
 			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(null);
 			return assertThrows(BizException.class,
 					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
@@ -413,6 +421,20 @@ class ThinkingServiceTest {
 			BizException ex = rejectFromGroupNonMember();
 			// 安全：对外消息为统一拒绝文案，绝不暴露 "非成员" 这类可区分原因
 			assertEquals("思考记录不存在或无权查看", ex.getMessage(), "拒绝消息必须是统一文案，不得泄露真实原因");
+		}
+
+		@Test
+		@DisplayName("其他房间的 thinking 即使 ID 已知，也不能泄漏新增 run/trigger 关联")
+		void foreignRoomMemberCannotReadCorrelation() {
+			AiclawThinking foreign = record(99L, 1);
+			foreign.setTriggerMsgId(9007199254740993L);
+			foreign.setClientRunId("secret-run-context");
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(foreign);
+			when(roomCache.get(99L)).thenReturn(groupRoom());
+			when(groupMemberCache.getMemberUidList(99L)).thenReturn(List.of(AICLAW_UID, 999L));
+			BizException denied = assertThrows(BizException.class,
+					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
+			assertEquals("思考记录不存在或无权查看", denied.getMessage());
 		}
 
 		@Test
@@ -431,6 +453,20 @@ class ThinkingServiceTest {
 		}
 
 		// ==================== REQ-004 [S7] 安全核心：枚举预言机不可区分性 ====================
+
+		@Test
+		@DisplayName("租户缺失或记录位于其他租户时，不读取房间或元数据")
+		void missingOrForeignTenantCannotReadCorrelation() {
+			ContextUtil.remove();
+			assertThrows(BizException.class, () -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
+			verifyNoInteractions(thinkingMapper, roomCache);
+			ContextUtil.setTenantId(2L);
+			BizException denied = assertThrows(BizException.class,
+					() -> thinkingService.reviewThinking(THINKING_ID, CALLER_UID));
+			assertEquals("思考记录不存在或无权查看", denied.getMessage());
+			verify(thinkingMapper).selectInTenant(THINKING_ID, 2L);
+			verifyNoInteractions(roomCache);
+		}
 
 		@Test
 		@DisplayName("安全：不存在 与 非成员 的拒绝异常必须完全一致（消息+code 不可区分）")
@@ -476,7 +512,7 @@ class ThinkingServiceTest {
 		@Test
 		@DisplayName("status==4（超长截断）：成员 caller 拿到 status=4，前端据此显示截断提示")
 		void status4_truncationHintExposed() {
-			when(thinkingMapper.selectById(THINKING_ID)).thenReturn(record(GROUP_ROOM_ID, 4));
+			when(thinkingMapper.selectInTenant(THINKING_ID, 1L)).thenReturn(record(GROUP_ROOM_ID, 4));
 			when(roomCache.get(GROUP_ROOM_ID)).thenReturn(groupRoom());
 			when(groupMemberCache.getMemberUidList(GROUP_ROOM_ID))
 					.thenReturn(List.of(CALLER_UID));
