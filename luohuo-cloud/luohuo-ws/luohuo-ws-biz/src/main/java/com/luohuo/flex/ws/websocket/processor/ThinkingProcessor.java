@@ -101,6 +101,8 @@ public class ThinkingProcessor implements MessageProcessor {
 			}
 			if (end == null || positive(end.getThinkingId()) == null || positive(end.getRoomId()) == null) {
 				log.warn("thinking END rejected: explicit thinkingId and roomId required, actor={}", actor);
+				if (end != null && end.getClientRunId() != null) pushRejected(actor, end.getRoomId(),
+						end.getThinkingId(), end.getClientRunId(), "thinking_end_rejected");
 				return;
 			}
 			work = () -> handleEnd(actor, tenant, end);
@@ -124,7 +126,20 @@ public class ThinkingProcessor implements MessageProcessor {
 						work.run();
 					} catch (RuntimeException e) {
 						log.warn("thinking rejected: actor={}, kind={}", actor, e.getClass().getSimpleName());
-						if (type == WSReqTypeEnum.THINKING_START) pushError(actor, null, null, "thinking_start_failed");
+						if (type == WSReqTypeEnum.THINKING_START) {
+							try {
+								WSThinkingStart start = JSONUtil.toBean(payload.getData(), WSThinkingStart.class);
+								pushError(actor, start == null ? null : start.getRoomId(), null,
+										start == null ? null : start.getClientRunId(), "thinking_start_failed");
+							} catch (RuntimeException ignored) { pushError(actor, null, null, null, "thinking_start_invalid"); }
+						} else {
+							try {
+								WSThinkingEnd end = JSONUtil.toBean(payload.getData(), WSThinkingEnd.class);
+								pushRejected(actor, end == null ? null : end.getRoomId(),
+										end == null ? null : end.getThinkingId(), end == null ? null : end.getClientRunId(),
+										"thinking_end_rejected");
+							} catch (RuntimeException ignored) { pushRejected(actor, null, null, null, "thinking_end_rejected"); }
+						}
 					} finally {
 						ReactiveContextUtil.remove();
 					}
@@ -153,19 +168,47 @@ public class ThinkingProcessor implements MessageProcessor {
 
 	private void handleStart(Long actor, Long tenant, WSBaseReq payload) {
 		WSThinkingStart req = JSONUtil.toBean(payload.getData(), WSThinkingStart.class);
-		Long room = positive(req.getRoomId());
+		Long room = req == null ? null : positive(req.getRoomId());
 		if (room == null) {
-			pushError(actor, req.getRoomId(), null, "thinking_room_invalid");
+			pushError(actor, req == null ? null : req.getRoomId(), null,
+					req == null ? null : req.getClientRunId(), "thinking_room_invalid");
 			return;
 		}
 		req.setFromUid(String.valueOf(actor)); // Never use a client-reported fromUid.
 		JSONObject result = callIm("POST", "/thinking/start", req, actor, tenant, false);
-		Long id = result == null ? null : result.getLong("data");
+		JSONObject receipt = result != null && result.get("data") instanceof JSONObject data ? data : null;
+		Long id = result == null || !Boolean.TRUE.equals(result.getBool("success")) ? null
+				: receipt != null ? receipt.getLong("thinkingId")
+				: req.getClientRunId() == null ? result.getLong("data") : null; // Old IM cannot promise run idempotency.
 		if (id == null) {
-			pushError(actor, req.getRoomId(), null, "thinking_start_failed");
+			pushError(actor, req.getRoomId(), null, req.getClientRunId(), result == null
+					? "thinking_start_unknown" : "thinking_run_conflict".equals(result.getStr("msg"))
+					? "thinking_run_conflict" : receipt == null && req.getClientRunId() != null && Boolean.TRUE.equals(result.getBool("success"))
+					? "thinking_run_unsupported" : "thinking_start_failed");
 			return;
 		}
 		String thinkingId = String.valueOf(id);
+		WSThinkingStart start = WSThinkingStart.builder().thinkingId(thinkingId)
+				.fromUid(String.valueOf(actor)).roomId(req.getRoomId()).triggerMsgId(req.getTriggerMsgId())
+				.clientRunId(req.getClientRunId()).build();
+		if (receipt != null && Boolean.TRUE.equals(receipt.getBool("replayed"))) {
+			Integer status = receipt.getInt("status");
+			if (status == null || status < 0 || status > 4) {
+				pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
+				return;
+			}
+			pushToMembers("thinkingStart", start, List.of(actor), actor);
+			if (status != 0) {
+				WSThinkingEnd terminal = WSThinkingEnd.builder().thinkingId(thinkingId)
+						.clientRunId(req.getClientRunId()).roomId(req.getRoomId()).fromUid(String.valueOf(actor))
+						.status(status == 1 || status == 4 ? "complete" : "error")
+						.error(receipt.getStr("errorCode")).build();
+				pushToMembers("thinkingEnd", terminal, List.of(actor), actor);
+			}
+			// ponytail: caller-only replay avoids frontend same-ID supersede; recovering a crash between
+			// DB insert and room broadcast needs an idempotent UI plus durable delivery/outbox.
+			return;
+		}
 		ThinkingContext ctx = new ThinkingContext();
 		ctx.setFromUid(actor);
 		ctx.setTenantId(tenant);
@@ -179,7 +222,7 @@ public class ThinkingProcessor implements MessageProcessor {
 					? "rate_limit_exceeded" : "daily_limit_exceeded";
 			if (markError(thinkingId, actor, tenant, room, error, false)) {
 				activeThinkings.remove(thinkingId, ctx);
-				pushError(actor, req.getRoomId(), thinkingId, error);
+				pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), error);
 			}
 			return;
 		}
@@ -187,11 +230,12 @@ public class ThinkingProcessor implements MessageProcessor {
 		List<Long> members = queryRoomMembers(room, actor, tenant);
 		if (members.isEmpty()) {
 			log.warn("thinking start persisted but members unavailable: id={}", thinkingId);
-			pushError(actor, req.getRoomId(), thinkingId, "thinking_members_unavailable");
+			pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), "thinking_members_unavailable");
 			return;
 		}
-		WSThinkingStart start = WSThinkingStart.builder().thinkingId(thinkingId)
-				.fromUid(String.valueOf(actor)).roomId(req.getRoomId()).triggerMsgId(req.getTriggerMsgId()).build();
+		// The authenticated caller must receive the receipt even if not listed by a stale member lookup.
+		if (!members.contains(actor)) members = new ArrayList<>(members);
+		if (!members.contains(actor)) members.add(actor);
 		pushToMembers("thinkingStart", start, members, actor);
 	}
 
@@ -205,12 +249,24 @@ public class ThinkingProcessor implements MessageProcessor {
 		}
 		String thinkingId = String.valueOf(id);
 		JSONObject result = callIm("POST", "/thinking/end", req, actor, tenant, false);
-		if (result == null || !Boolean.TRUE.equals(result.getBool("data"))) return;
+		if (result == null || !Boolean.TRUE.equals(result.getBool("success"))) {
+			pushRejected(actor, req.getRoomId(), thinkingId, req.getClientRunId(),
+					result == null ? "thinking_end_unknown" : "thinking_end_rejected");
+			return;
+		}
+		if (!Boolean.TRUE.equals(result.getBool("data"))) {
+			if (req.getClientRunId() != null) pushToMembers("thinkingEnd", WSThinkingEnd.builder()
+					.thinkingId(thinkingId).roomId(req.getRoomId()).clientRunId(req.getClientRunId())
+					.fromUid(String.valueOf(actor)).durationMs(req.getDurationMs()).status(req.getStatus())
+					.error(req.getError()).build(), List.of(actor), actor);
+			return; // Verified identical terminal retry, ACK caller only.
+		}
 		ThinkingContext ctx = activeThinkings.get(thinkingId);
 		if (ctx != null && Objects.equals(ctx.getFromUid(), actor) && Objects.equals(ctx.getTenantId(), tenant)
 				&& Objects.equals(ctx.getRoomId(), room)) activeThinkings.remove(thinkingId, ctx);
 		WSThinkingEnd end = WSThinkingEnd.builder().thinkingId(thinkingId).durationMs(req.getDurationMs())
-				.status(req.getStatus()).error(req.getError()).roomId(String.valueOf(room)).build();
+				.status(req.getStatus()).error(req.getError()).roomId(String.valueOf(room))
+				.clientRunId(req.getClientRunId()).fromUid(String.valueOf(actor)).build();
 		// CAS already committed; a concurrent kick cannot suppress notification to remaining live members.
 		pushToMembers("thinkingEnd", end, queryRoomMembers(room, actor, tenant, true), actor);
 	}
@@ -261,7 +317,7 @@ public class ThinkingProcessor implements MessageProcessor {
 
 	private List<Long> queryRoomMembers(Long room, Long actor, Long tenant, boolean timeout) {
 		JSONObject result = callIm("GET", "/thinking/room/" + room + "/members", null, actor, tenant, timeout);
-		if (result == null) return List.of();
+		if (result == null || !Boolean.TRUE.equals(result.getBool("success"))) return List.of();
 		try {
 			List<Long> members = result.getBeanList("data", Long.class);
 			return members == null ? List.of() : members;
@@ -287,7 +343,7 @@ public class ThinkingProcessor implements MessageProcessor {
 				JSONObject result = JSONUtil.parseObj(response.body());
 				if (!Integer.valueOf(R.SUCCESS_CODE).equals(result.getInt("code")) || !Boolean.TRUE.equals(result.getBool("success"))) {
 					log.warn("thinking IM rejected: path={}, code={}", path, result.getInt("code"));
-					return null;
+					return result;
 				}
 				return result;
 			}
@@ -307,8 +363,16 @@ public class ThinkingProcessor implements MessageProcessor {
 		return null;
 	}
 
-	private void pushError(Long actor, String room, String id, String error) {
-		WSThinkingEnd end = WSThinkingEnd.builder().thinkingId(id).roomId(room).status("error").error(error).build();
+	private void pushRejected(Long actor, String room, String id, String clientRunId, String error) {
+		WSThinkingEnd rejection = WSThinkingEnd.builder().thinkingId(id).roomId(room)
+				.fromUid(String.valueOf(actor)).clientRunId(clientRunId)
+				.status("error").error(error).build();
+		pushToMembers("thinkingRejected", rejection, List.of(actor), actor);
+	}
+
+	private void pushError(Long actor, String room, String id, String clientRunId, String error) {
+		WSThinkingEnd end = WSThinkingEnd.builder().thinkingId(id).roomId(room)
+				.fromUid(String.valueOf(actor)).clientRunId(clientRunId).status("error").error(error).build();
 		pushToMembers("thinkingEnd", end, List.of(actor), actor);
 	}
 

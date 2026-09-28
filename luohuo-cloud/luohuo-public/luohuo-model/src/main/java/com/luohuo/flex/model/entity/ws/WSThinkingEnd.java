@@ -18,6 +18,12 @@ public class WSThinkingEnd {
 	@Schema(description = "thinking 记录 ID（String 避免 JS 精度丢失）")
 	private String thinkingId;
 
+	@Schema(description = "本轮执行 ID（提供时必须与 thinking 记录匹配）")
+	private String clientRunId;
+
+	@Schema(description = "经认证的发送者 UID（响应字段）")
+	private String fromUid;
+
 	@Schema(description = "处理耗时（毫秒）")
 	private Integer durationMs;
 

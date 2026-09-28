@@ -2,6 +2,9 @@ package com.luohuo.flex.ws.websocket.processor;
 
 import com.luohuo.basic.context.ContextConstants;
 import com.luohuo.flex.model.enums.WSReqTypeEnum;
+import com.luohuo.flex.model.entity.WsBaseResp;
+import com.luohuo.flex.model.entity.ws.WSThinkingStart;
+import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 import org.springframework.http.HttpHeaders;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
 import com.luohuo.flex.ws.service.PushService;
@@ -159,6 +162,111 @@ class ThinkingProcessorTest {
 		} finally {
 			im.stop(0);
 		}
+	}
+
+	@Test
+	void retryStartReplaysReceiptToCallerWithoutSecondRateChargeOrRoomBroadcast() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		AtomicInteger starts = new AtomicInteger();
+		im.createContext("/thinking/", exchange -> {
+			String path = exchange.getRequestURI().getPath();
+			int nthStart = path.endsWith("/start") ? starts.incrementAndGet() : 0;
+			String body = nthStart != 0
+					? "{\"code\":200,\"success\":true,\"data\":{\"thinkingId\":777,\"status\":"
+						+ (nthStart >= 3 ? 2 : 0) + ",\"errorCode\":\"rate_limit_exceeded\",\"replayed\":"
+						+ (nthStart != 1) + "}}"
+					: "{\"code\":200,\"success\":true,\"data\":[42,43]}";
+			byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, bytes.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(bytes); }
+		});
+		im.start();
+		try {
+			ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+			PushService push = mock(PushService.class);
+			ReflectionTestUtils.setField(processor, "pushService", push);
+			AiclawRateLimitChecker rate = mock(AiclawRateLimitChecker.class);
+			when(rate.check(42L, 10L)).thenReturn(AiclawRateLimitChecker.LimitResult.ALLOWED,
+					AiclawRateLimitChecker.LimitResult.RATE_LIMITED);
+			ReflectionTestUtils.setField(processor, "rateLimitChecker", rate);
+			WSBaseReq start = reqOfType(WSReqTypeEnum.THINKING_START.getType());
+			start.setData("{\"roomId\":\"10\",\"clientRunId\":\"run-a\"}");
+			processor.process(session(trustedHeaders()), 42L, start);
+			verify(push, timeout(3000)).sendPushMsg(any(), eq(List.of(42L, 43L)), eq(42L));
+			processor.process(session(trustedHeaders()), 42L, start);
+			org.mockito.ArgumentCaptor<WsBaseResp> receipts = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(push, timeout(3000).times(2)).sendPushMsg(receipts.capture(), anyList(), eq(42L));
+			assertEquals(2, starts.get());
+			verify(rate, times(1)).check(42L, 10L);
+			verify(rate, times(1)).record(42L, 10L);
+			assertEquals("run-a", ((WSThinkingStart) receipts.getAllValues().get(1).getData()).getClientRunId());
+			assertEquals("777", ((WSThinkingStart) receipts.getAllValues().get(1).getData()).getThinkingId());
+			verify(push).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
+			processor.process(session(trustedHeaders()), 42L, start);
+			org.mockito.ArgumentCaptor<WsBaseResp> terminalEvents = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(push, timeout(3000).times(4)).sendPushMsg(terminalEvents.capture(), anyList(), eq(42L));
+			assertEquals(3, starts.get());
+			assertEquals("thinkingEnd", terminalEvents.getAllValues().get(3).getType());
+			assertEquals("rate_limit_exceeded",
+					((WSThinkingEnd) terminalEvents.getAllValues().get(3).getData()).getError());
+			verify(rate, times(1)).check(42L, 10L);
+		} finally { im.stop(0); }
+	}
+
+	@Test
+	void unknownStartTransportDoesNotClaimDefiniteFailure() {
+		ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+		DiscoveryClient discovery = mock(DiscoveryClient.class);
+		when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of());
+		ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+		PushService push = mock(PushService.class);
+		ReflectionTestUtils.setField(processor, "pushService", push);
+		WSBaseReq start = reqOfType(WSReqTypeEnum.THINKING_START.getType());
+		start.setData("{\"roomId\":\"10\",\"clientRunId\":\"run-a\"}");
+		processor.process(session(trustedHeaders()), 42L, start);
+		org.mockito.ArgumentCaptor<WsBaseResp> events = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+		verify(push, timeout(3000)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+		assertEquals("thinkingEnd", events.getValue().getType());
+		WSThinkingEnd unknown = (WSThinkingEnd) events.getValue().getData();
+		assertEquals("thinking_start_unknown", unknown.getError());
+		assertEquals("run-a", unknown.getClientRunId());
+	}
+
+	@Test
+	void rejectedEndIsDistinctCorrelatedActorOnlyAndNeverBroadcastAsTerminal() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		im.createContext("/thinking/end", exchange -> {
+			byte[] bytes = "{\"code\":-10,\"success\":false,\"msg\":\"unauthorized\"}"
+					.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, bytes.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(bytes); }
+		});
+		im.start();
+		try {
+			ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+			PushService push = mock(PushService.class);
+			ReflectionTestUtils.setField(processor, "pushService", push);
+			WSBaseReq end = reqOfType(WSReqTypeEnum.THINKING_END.getType());
+			end.setData("{\"roomId\":\"10\",\"thinkingId\":\"777\",\"clientRunId\":\"run-old\",\"status\":\"complete\"}");
+			processor.process(session(trustedHeaders()), 42L, end);
+			org.mockito.ArgumentCaptor<WsBaseResp> events = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(push, timeout(3000)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+			assertEquals("thinkingRejected", events.getValue().getType());
+			WSThinkingEnd rejection = (WSThinkingEnd) events.getValue().getData();
+			assertEquals("run-old", rejection.getClientRunId());
+			assertEquals("777", rejection.getThinkingId());
+			assertEquals("42", rejection.getFromUid());
+		} finally { im.stop(0); }
 	}
 
 	@Test

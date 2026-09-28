@@ -32,6 +32,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DuplicateKeyException;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -209,6 +210,60 @@ class ThinkingServiceTest {
 		assertTrue(thinkingService.isOwnedTerminal(1L, 100L, 10L));
 		assertFalse(thinkingService.isOwnedTerminal(1L, 200L, 10L));
 		verify(thinkingMapper).selectOwned(1L, 1L, 200L, 10L);
+	}
+
+	@Test
+	void sameRunReturnsOriginalIdAndRejectsDifferentRoomOrTrigger() {
+		activeAgent();
+		AiclawThinking original = existing(456L);
+		original.setTriggerMsgId(42L);
+		original.setClientRunId("run-a");
+		when(thinkingMapper.selectByRun(1L, 100L, "run-a")).thenReturn(original);
+		assertEquals(456L, thinkingService.create(100L, 10L, 42L, "run-a").thinkingId());
+		assertTrue(thinkingService.create(100L, 10L, 42L, "run-a").replayed());
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, 99L, "run-a"));
+		when(thinkingMapper.selectByRun(1L, 100L, "RUN-A")).thenReturn(original);
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, 42L, "RUN-A"));
+		when(thinkingMapper.isCurrentMember(100L, 11L, 1L)).thenReturn(1);
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 11L, 42L, "run-a"));
+		verify(thinkingMapper, never()).insertWithRun(any(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void concurrentStartDuplicateReadsWinningRowAndOtherDuplicateFailsClosed() {
+		activeAgent();
+		AiclawThinking original = existing(456L);
+		original.setClientRunId("run-a");
+		when(thinkingMapper.selectByRun(1L, 100L, "run-a")).thenReturn(null, original);
+		when(thinkingMapper.insertWithRun(anyLong(), eq(1L), eq(100L), eq(10L), isNull(), eq("run-a")))
+				.thenThrow(new DuplicateKeyException("concurrent START"));
+		assertEquals(456L, thinkingService.create(100L, 10L, null, "run-a").thinkingId());
+		when(thinkingMapper.selectByRun(1L, 100L, "other")).thenReturn(null);
+		when(thinkingMapper.insertWithRun(anyLong(), eq(1L), eq(100L), eq(10L), isNull(), eq("other")))
+				.thenThrow(new DuplicateKeyException("other constraint"));
+		assertThrows(DuplicateKeyException.class, () -> thinkingService.create(100L, 10L, null, "other"));
+	}
+
+	@Test
+	void endForOldRunCannotFinishNewRunEvenWithSameActorAndRoom() {
+		activeAgent();
+		AiclawThinking newer = existing(2L);
+		newer.setClientRunId("new-run");
+		when(thinkingMapper.selectOwned(2L, 1L, 100L, 10L)).thenReturn(newer);
+		assertThrows(BizException.class,
+				() -> thinkingService.finalize(2L, 100L, 10L, "", 1, "complete", null, "old-run"));
+		verify(thinkingMapper, never()).finalizeActive(any(), any(), any(), any(), any(), any(), any(), any());
+	}
+
+	@Test
+	void invalidRunAndMissingTenantFailBeforeInsert() {
+		ContextUtil.remove();
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null, "run-a"));
+		ContextUtil.setTenantId(1L);
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null, " "));
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null, "x".repeat(129)));
+		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null, "run-a "));
+		verify(thinkingMapper, never()).insertWithRun(any(), any(), any(), any(), any(), any());
 	}
 
 	// ==================== REQ-004 [S7]：reviewThinking IDOR 安全授权 ====================

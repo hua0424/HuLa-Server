@@ -27,6 +27,7 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
@@ -113,6 +114,48 @@ public class ThinkingService {
 		return thinkingId;
 	}
 
+	public record StartReceipt(Long thinkingId, boolean replayed, Integer status, String errorCode) {}
+
+	/** Database uniqueness elects a single START across WS/IM nodes and process restarts. */
+	public StartReceipt create(Long actor, Long roomId, Long triggerMsgId, String clientRunId) {
+		if (clientRunId == null) return new StartReceipt(create(actor, roomId, triggerMsgId), false, 0, null); // Legacy START.
+		if (clientRunId.isBlank() || clientRunId.length() > 128 || !clientRunId.equals(clientRunId.strip()))
+			throw new BizException("thinking_run_invalid");
+		Long tenantId = requireTenant();
+		requireActiveAgent(actor, roomId, tenantId);
+		AiclawThinking previous = thinkingMapper.selectByRun(tenantId, actor, clientRunId);
+		if (previous != null) return new StartReceipt(matchingStart(previous, roomId, triggerMsgId, clientRunId), true,
+				previous.getStatus(), previous.getErrorCode());
+		if (triggerMsgId != null) {
+			Message trigger = messageDao.getById(triggerMsgId);
+			if (trigger == null || !roomId.equals(trigger.getRoomId()) || !tenantId.equals(trigger.getTenantId())) {
+				throw new BizException("触发消息不属于当前房间");
+			}
+		}
+		Long id = IdUtil.getSnowflakeNextId();
+		try {
+			if (thinkingMapper.insertWithRun(id, tenantId, actor, roomId, triggerMsgId, clientRunId) != 1) {
+				throw new BizException("思考记录创建失败");
+			}
+			return new StartReceipt(id, false, 0, null);
+		} catch (DuplicateKeyException duplicate) {
+			// A concurrent START won the unique (tenant, actor, run) key; unrelated key collisions still fail.
+			previous = thinkingMapper.selectByRun(tenantId, actor, clientRunId);
+			if (previous == null) throw duplicate;
+			return new StartReceipt(matchingStart(previous, roomId, triggerMsgId, clientRunId), true,
+				previous.getStatus(), previous.getErrorCode());
+		}
+	}
+
+	private Long matchingStart(AiclawThinking previous, Long roomId, Long triggerMsgId, String clientRunId) {
+		if (Boolean.TRUE.equals(previous.getIsDel()) || !roomId.equals(previous.getRoomId())
+				|| !Objects.equals(triggerMsgId, previous.getTriggerMsgId())
+				|| !clientRunId.equals(previous.getClientRunId())) {
+			throw new BizException("thinking_run_conflict");
+		}
+		return previous.getId();
+	}
+
 	/**
 	 * 结束 thinking 记录：落全文（200KB UTF-8 安全截断）+ 回填耗时 + 映射状态
 	 *
@@ -126,6 +169,11 @@ public class ThinkingService {
 	 */
 	public boolean finalize(Long thinkingId, Long actor, Long roomId, String content,
 			Integer durationMs, String status, String error) {
+		return finalize(thinkingId, actor, roomId, content, durationMs, status, error, null);
+	}
+
+	public boolean finalize(Long thinkingId, Long actor, Long roomId, String content,
+			Integer durationMs, String status, String error, String clientRunId) {
 		Long tenantId = requireTenant();
 		requireActiveAgent(actor, roomId, tenantId);
 		if (!"complete".equals(status) && !"error".equals(status)) {
@@ -138,7 +186,7 @@ public class ThinkingService {
 		// Only the explicitly authenticated service-timeout path may set status=3.
 		int mappedStatus = isError ? 2 : (truncated ? 4 : 1);
 		String storedError = isError ? truncateErrorCode(error) : null;
-		return finish(thinkingId, tenantId, actor, roomId, stored, durationMs, mappedStatus, storedError);
+		return finish(thinkingId, tenantId, actor, roomId, stored, durationMs, mappedStatus, storedError, clientRunId);
 	}
 
 	/** Return true only for the one successful status=0 -> terminal persistence winner. */
@@ -207,8 +255,13 @@ public class ThinkingService {
 
 	private boolean finish(Long id, Long tenantId, Long actor, Long roomId,
 			String content, Integer duration, int status, String error) {
+		return finish(id, tenantId, actor, roomId, content, duration, status, error, null);
+	}
+
+	private boolean finish(Long id, Long tenantId, Long actor, Long roomId,
+			String content, Integer duration, int status, String error, String clientRunId) {
 		AiclawThinking owned = thinkingMapper.selectOwned(id, tenantId, actor, roomId);
-		if (owned == null) {
+		if (owned == null || (clientRunId != null && !clientRunId.equals(owned.getClientRunId()))) {
 			throw new BizException("思考记录不存在或无权修改");
 		}
 		if (Integer.valueOf(0).equals(owned.getStatus())) {

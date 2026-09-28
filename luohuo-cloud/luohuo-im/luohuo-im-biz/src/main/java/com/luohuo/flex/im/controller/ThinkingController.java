@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.controller;
 
 import com.luohuo.basic.base.R;
+import com.luohuo.basic.exception.BizException;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.im.core.chat.service.ThinkingService;
 import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
@@ -22,11 +23,18 @@ public class ThinkingController {
 	private ThinkingService thinkingService;
 
 	@PostMapping("/start")
-	public R<Long> start(@RequestBody WSThinkingStart req, HttpServletRequest request) {
+	public R<ThinkingService.StartReceipt> start(@RequestBody WSThinkingStart req, HttpServletRequest request) {
 		Long actor = internalAuth.require(request);
 		Long room = Long.valueOf(req.getRoomId());
 		Long trigger = req.getTriggerMsgId() == null ? null : Long.valueOf(req.getTriggerMsgId());
-		return R.success(thinkingService.create(actor, room, trigger));
+		try {
+			ThinkingService.StartReceipt receipt = thinkingService.create(actor, room, trigger, req.getClientRunId());
+			return R.success(receipt);
+		} catch (BizException rejected) {
+			if ("thinking_run_conflict".equals(rejected.getMessage()))
+				return R.fail(409, "thinking_run_conflict");
+			throw rejected;
+		}
 	}
 
 	@PostMapping("/end")
@@ -34,7 +42,7 @@ public class ThinkingController {
 		Long actor = internalAuth.require(request);
 		Long room = Long.valueOf(req.getRoomId());
 		return R.success(thinkingService.finalize(Long.valueOf(req.getThinkingId()), actor, room,
-				req.getContent(), req.getDurationMs(), req.getStatus(), req.getError()));
+				req.getContent(), req.getDurationMs(), req.getStatus(), req.getError(), req.getClientRunId()));
 	}
 
 	@PostMapping("/error")
