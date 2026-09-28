@@ -23,10 +23,11 @@ public class ThinkingController {
 	private ThinkingService thinkingService;
 
 	@PostMapping("/start")
-	public R<ThinkingService.StartReceipt> start(@RequestBody WSThinkingStart req, HttpServletRequest request) {
+	public R<?> start(@RequestBody WSThinkingStart req, HttpServletRequest request) {
 		Long actor = internalAuth.require(request);
 		Long room = Long.valueOf(req.getRoomId());
 		Long trigger = req.getTriggerMsgId() == null ? null : Long.valueOf(req.getTriggerMsgId());
+		if (req.getClientRunId() == null) return R.success(thinkingService.create(actor, room, trigger));
 		try {
 			ThinkingService.StartReceipt receipt = thinkingService.create(actor, room, trigger, req.getClientRunId());
 			return R.success(receipt);
@@ -37,12 +38,25 @@ public class ThinkingController {
 		}
 	}
 
+	@PostMapping("/ready")
+	public R<Boolean> ready(@RequestBody WSThinkingStart req, HttpServletRequest request) {
+		Long actor = internalAuth.require(request);
+		return R.success(thinkingService.markStartReady(Long.valueOf(req.getThinkingId()), actor,
+				Long.valueOf(req.getRoomId()), req.getClientRunId()));
+	}
+
 	@PostMapping("/end")
 	public R<Boolean> end(@RequestBody WSThinkingEnd req, HttpServletRequest request) {
 		Long actor = internalAuth.require(request);
 		Long room = Long.valueOf(req.getRoomId());
-		return R.success(thinkingService.finalize(Long.valueOf(req.getThinkingId()), actor, room,
-				req.getContent(), req.getDurationMs(), req.getStatus(), req.getError(), req.getClientRunId()));
+		try {
+			return R.success(thinkingService.finalize(Long.valueOf(req.getThinkingId()), actor, room,
+					req.getContent(), req.getDurationMs(), req.getStatus(), req.getError(), req.getClientRunId()));
+		} catch (BizException pending) {
+			if ("thinking_start_pending".equals(pending.getMessage()))
+				return R.fail(425, "thinking_start_pending");
+			throw pending;
+		}
 	}
 
 	@PostMapping("/error")

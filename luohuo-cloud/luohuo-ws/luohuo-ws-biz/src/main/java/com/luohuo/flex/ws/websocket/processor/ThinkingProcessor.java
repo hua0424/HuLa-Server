@@ -130,7 +130,9 @@ public class ThinkingProcessor implements MessageProcessor {
 							try {
 								WSThinkingStart start = JSONUtil.toBean(payload.getData(), WSThinkingStart.class);
 								pushError(actor, start == null ? null : start.getRoomId(), null,
-										start == null ? null : start.getClientRunId(), "thinking_start_failed");
+										start == null ? null : start.getClientRunId(),
+										start != null && start.getClientRunId() != null
+												? "thinking_start_unknown" : "thinking_start_failed");
 							} catch (RuntimeException ignored) { pushError(actor, null, null, null, "thinking_start_invalid"); }
 						} else {
 							try {
@@ -197,6 +199,10 @@ public class ThinkingProcessor implements MessageProcessor {
 				pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
 				return;
 			}
+			if (status == 0 && !Boolean.TRUE.equals(receipt.getBool("ready"))) {
+				pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
+				return;
+			}
 			pushToMembers("thinkingStart", start, List.of(actor), actor);
 			if (status != 0) {
 				WSThinkingEnd terminal = WSThinkingEnd.builder().thinkingId(thinkingId)
@@ -223,6 +229,8 @@ public class ThinkingProcessor implements MessageProcessor {
 			if (markError(thinkingId, actor, tenant, room, error, false)) {
 				activeThinkings.remove(thinkingId, ctx);
 				pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), error);
+			} else if (req.getClientRunId() != null) {
+				pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
 			}
 			return;
 		}
@@ -230,13 +238,31 @@ public class ThinkingProcessor implements MessageProcessor {
 		List<Long> members = queryRoomMembers(room, actor, tenant);
 		if (members.isEmpty()) {
 			log.warn("thinking start persisted but members unavailable: id={}", thinkingId);
-			pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), "thinking_members_unavailable");
+			if (req.getClientRunId() == null || markError(thinkingId, actor, tenant, room,
+					"thinking_members_unavailable", false)) {
+				pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), "thinking_members_unavailable");
+			} else pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
 			return;
 		}
-		// The authenticated caller must receive the receipt even if not listed by a stale member lookup.
-		if (!members.contains(actor)) members = new ArrayList<>(members);
-		if (!members.contains(actor)) members.add(actor);
-		pushToMembers("thinkingStart", start, members, actor);
+		if (req.getClientRunId() == null) {
+			// Legacy: unchanged room push and scalar IM receipt.
+			if (!members.contains(actor)) members = new ArrayList<>(members);
+			if (!members.contains(actor)) members.add(actor);
+			pushToMembers("thinkingStart", start, members, actor);
+			return;
+		}
+		// New run: the caller receives no START until the DB says the first room push was scheduled.
+		List<Long> others = members.stream().filter(uid -> !uid.equals(actor)).toList();
+		pushToMembers("thinkingStart", start, others, actor);
+		WSThinkingStart ready = WSThinkingStart.builder().thinkingId(thinkingId)
+				.roomId(req.getRoomId()).clientRunId(req.getClientRunId()).build();
+		JSONObject marked = callIm("POST", "/thinking/ready", ready, actor, tenant, false);
+		if (marked == null || !Boolean.TRUE.equals(marked.getBool("success"))
+				|| !Boolean.TRUE.equals(marked.getBool("data"))) {
+			pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
+			return;
+		}
+		pushToMembers("thinkingStart", start, List.of(actor), actor);
 	}
 
 	private void handleEnd(Long actor, Long tenant, WSThinkingEnd req) {
@@ -251,7 +277,8 @@ public class ThinkingProcessor implements MessageProcessor {
 		JSONObject result = callIm("POST", "/thinking/end", req, actor, tenant, false);
 		if (result == null || !Boolean.TRUE.equals(result.getBool("success"))) {
 			pushRejected(actor, req.getRoomId(), thinkingId, req.getClientRunId(),
-					result == null ? "thinking_end_unknown" : "thinking_end_rejected");
+					result == null || "thinking_start_pending".equals(result.getStr("msg"))
+						? "thinking_end_unknown" : "thinking_end_rejected");
 			return;
 		}
 		if (!Boolean.TRUE.equals(result.getBool("data"))) {

@@ -40,6 +40,13 @@ public interface AiclawThinkingMapper extends BaseMapper<AiclawThinking> {
 	AiclawThinking selectByRun(@Param("tenantId") Long tenantId, @Param("actor") Long actor,
 			@Param("clientRunId") String clientRunId);
 
+	@Update("UPDATE im_aiclaw_thinking SET start_ready = 1 WHERE id = #{id} AND tenant_id = #{tenantId} "
+			+ "AND aiclaw_uid = #{actor} AND room_id = #{roomId} AND client_run_id = #{clientRunId} "
+			+ "AND status = 0 AND start_ready = 0 AND is_del = 0")
+	int markStartReady(@Param("id") Long id, @Param("tenantId") Long tenantId,
+			@Param("actor") Long actor, @Param("roomId") Long roomId,
+			@Param("clientRunId") String clientRunId);
+
 	/**
 	 * 仅更新当前租户、actor、room 的 thinking.has_response 字段。
 	 * @return 影响行数

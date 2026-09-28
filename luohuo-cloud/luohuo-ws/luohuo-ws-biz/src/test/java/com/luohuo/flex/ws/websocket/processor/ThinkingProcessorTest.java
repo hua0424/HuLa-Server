@@ -17,6 +17,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ExecutorService;
@@ -168,13 +169,16 @@ class ThinkingProcessorTest {
 	void retryStartReplaysReceiptToCallerWithoutSecondRateChargeOrRoomBroadcast() throws Exception {
 		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
 		AtomicInteger starts = new AtomicInteger();
+		AtomicBoolean ready = new AtomicBoolean();
 		im.createContext("/thinking/", exchange -> {
 			String path = exchange.getRequestURI().getPath();
 			int nthStart = path.endsWith("/start") ? starts.incrementAndGet() : 0;
 			String body = nthStart != 0
 					? "{\"code\":200,\"success\":true,\"data\":{\"thinkingId\":777,\"status\":"
 						+ (nthStart >= 3 ? 2 : 0) + ",\"errorCode\":\"rate_limit_exceeded\",\"replayed\":"
-						+ (nthStart != 1) + "}}"
+						+ (nthStart != 1) + ",\"ready\":" + ready.get() + "}}"
+					: path.endsWith("/ready") ? "{\"code\":200,\"success\":true,\"data\":"
+						+ ready.compareAndSet(false, true) + "}"
 					: "{\"code\":200,\"success\":true,\"data\":[42,43]}";
 			byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
 			exchange.sendResponseHeaders(200, bytes.length);
@@ -197,25 +201,105 @@ class ThinkingProcessorTest {
 			WSBaseReq start = reqOfType(WSReqTypeEnum.THINKING_START.getType());
 			start.setData("{\"roomId\":\"10\",\"clientRunId\":\"run-a\"}");
 			processor.process(session(trustedHeaders()), 42L, start);
-			verify(push, timeout(3000)).sendPushMsg(any(), eq(List.of(42L, 43L)), eq(42L));
+			verify(push, timeout(3000)).sendPushMsg(any(), eq(List.of(43L)), eq(42L));
+			verify(push, timeout(3000)).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
 			processor.process(session(trustedHeaders()), 42L, start);
 			org.mockito.ArgumentCaptor<WsBaseResp> receipts = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
-			verify(push, timeout(3000).times(2)).sendPushMsg(receipts.capture(), anyList(), eq(42L));
+			verify(push, timeout(3000).times(3)).sendPushMsg(receipts.capture(), anyList(), eq(42L));
 			assertEquals(2, starts.get());
 			verify(rate, times(1)).check(42L, 10L);
 			verify(rate, times(1)).record(42L, 10L);
-			assertEquals("run-a", ((WSThinkingStart) receipts.getAllValues().get(1).getData()).getClientRunId());
-			assertEquals("777", ((WSThinkingStart) receipts.getAllValues().get(1).getData()).getThinkingId());
-			verify(push).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
+			assertEquals("run-a", ((WSThinkingStart) receipts.getAllValues().get(2).getData()).getClientRunId());
+			assertEquals("777", ((WSThinkingStart) receipts.getAllValues().get(2).getData()).getThinkingId());
+			verify(push, times(2)).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
 			processor.process(session(trustedHeaders()), 42L, start);
 			org.mockito.ArgumentCaptor<WsBaseResp> terminalEvents = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
-			verify(push, timeout(3000).times(4)).sendPushMsg(terminalEvents.capture(), anyList(), eq(42L));
+			verify(push, timeout(3000).times(5)).sendPushMsg(terminalEvents.capture(), anyList(), eq(42L));
 			assertEquals(3, starts.get());
-			assertEquals("thinkingEnd", terminalEvents.getAllValues().get(3).getType());
+			assertEquals("thinkingEnd", terminalEvents.getAllValues().get(4).getType());
 			assertEquals("rate_limit_exceeded",
-					((WSThinkingEnd) terminalEvents.getAllValues().get(3).getData()).getError());
+					((WSThinkingEnd) terminalEvents.getAllValues().get(4).getData()).getError());
 			verify(rate, times(1)).check(42L, 10L);
 		} finally { im.stop(0); }
+	}
+
+	@Test
+	void crossNodeReplayWaitsUntilFirstStartMarkedReadyAndEarlyEndStaysUnknown() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		ExecutorService handlers = Executors.newFixedThreadPool(3);
+		im.setExecutor(handlers);
+		CountDownLatch enteredReady = new CountDownLatch(1);
+		CountDownLatch releaseReady = new CountDownLatch(1);
+		AtomicBoolean ready = new AtomicBoolean();
+		AtomicInteger starts = new AtomicInteger();
+		im.createContext("/thinking/", exchange -> {
+			String path = exchange.getRequestURI().getPath();
+			String body;
+			if (path.endsWith("/start")) {
+				body = "{\"code\":200,\"success\":true,\"data\":{\"thinkingId\":777,\"status\":0,\"replayed\":"
+						+ (starts.incrementAndGet() > 1) + ",\"ready\":" + ready.get() + "}}";
+			} else if (path.endsWith("/ready")) {
+				enteredReady.countDown();
+				try { releaseReady.await(5, TimeUnit.SECONDS); }
+				catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+				ready.set(true);
+				body = "{\"code\":200,\"success\":true,\"data\":true}";
+			} else if (path.endsWith("/end")) {
+				body = ready.get() ? "{\"code\":200,\"success\":true,\"data\":true}"
+						: "{\"code\":425,\"success\":false,\"msg\":\"thinking_start_pending\"}";
+			} else body = "{\"code\":200,\"success\":true,\"data\":[42,43]}";
+			byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, bytes.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(bytes); }
+		});
+		im.start();
+		try {
+			ThinkingProcessor first = new ThinkingProcessor();
+			ThinkingProcessor otherNode = new ThinkingProcessor();
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			PushService firstPush = mock(PushService.class);
+			PushService retryPush = mock(PushService.class);
+			AiclawRateLimitChecker rate = mock(AiclawRateLimitChecker.class);
+			when(rate.check(42L, 10L)).thenReturn(AiclawRateLimitChecker.LimitResult.ALLOWED);
+			for (ThinkingProcessor node : List.of(first, otherNode)) {
+				ReflectionTestUtils.setField(node, "internalSecret", "test-internal-secret");
+				ReflectionTestUtils.setField(node, "discoveryClient", discovery);
+				ReflectionTestUtils.setField(node, "rateLimitChecker", rate);
+			}
+			ReflectionTestUtils.setField(first, "pushService", firstPush);
+			ReflectionTestUtils.setField(otherNode, "pushService", retryPush);
+			WSBaseReq start = reqOfType(WSReqTypeEnum.THINKING_START.getType());
+			start.setData("{\"roomId\":\"10\",\"clientRunId\":\"run-a\"}");
+			WebSocketSession session = session(trustedHeaders());
+			first.process(session, 42L, start);
+			assertTrue(enteredReady.await(3, TimeUnit.SECONDS));
+			verify(firstPush).sendPushMsg(any(), eq(List.of(43L)), eq(42L));
+			otherNode.process(session, 42L, start);
+			org.mockito.ArgumentCaptor<WsBaseResp> events = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(retryPush, timeout(3000)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+			assertEquals("thinkingEnd", events.getValue().getType());
+			assertEquals("thinking_start_unknown", ((WSThinkingEnd) events.getValue().getData()).getError());
+			verify(firstPush, never()).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
+			WSBaseReq end = reqOfType(WSReqTypeEnum.THINKING_END.getType());
+			end.setData("{\"roomId\":\"10\",\"thinkingId\":\"777\",\"clientRunId\":\"run-a\",\"status\":\"complete\"}");
+			otherNode.process(session, 42L, end);
+			verify(retryPush, timeout(3000).times(2)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+			assertEquals("thinkingRejected", events.getAllValues().get(2).getType());
+			assertEquals("thinking_end_unknown", ((WSThinkingEnd) events.getAllValues().get(2).getData()).getError());
+			releaseReady.countDown();
+			verify(firstPush, timeout(3000)).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
+			otherNode.process(session, 42L, start);
+			verify(retryPush, timeout(3000).times(3)).sendPushMsg(any(), eq(List.of(42L)), eq(42L));
+			verify(firstPush, times(1)).sendPushMsg(any(), eq(List.of(43L)), eq(42L));
+			verify(rate, times(1)).check(42L, 10L);
+		} finally {
+			releaseReady.countDown();
+			im.stop(0);
+			handlers.shutdownNow();
+		}
 	}
 
 	@Test

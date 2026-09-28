@@ -256,6 +256,26 @@ class ThinkingServiceTest {
 	}
 
 	@Test
+	void runEndWaitsForPersistedStartReadiness() {
+		activeAgent();
+		AiclawThinking pending = existing(7L);
+		pending.setClientRunId("run-a");
+		pending.setStartReady(false);
+		when(thinkingMapper.selectOwned(7L, 1L, 100L, 10L)).thenReturn(pending);
+		BizException notReady = assertThrows(BizException.class,
+				() -> thinkingService.finalize(7L, 100L, 10L, "text", 1, "complete", null, "run-a"));
+		assertEquals("thinking_start_pending", notReady.getMessage());
+		assertThrows(BizException.class,
+				() -> thinkingService.finalize(7L, 100L, 10L, "text", 1, "complete", null));
+		verify(thinkingMapper, never()).finalizeActive(any(), any(), any(), any(), any(), any(), any(), any());
+		when(thinkingMapper.markStartReady(7L, 1L, 100L, 10L, "run-a")).thenReturn(1);
+		assertTrue(thinkingService.markStartReady(7L, 100L, 10L, "run-a"));
+		pending.setStartReady(true);
+		when(thinkingMapper.finalizeActive(7L, 1L, 100L, 10L, "text", 1, 1, null)).thenReturn(1);
+		assertTrue(thinkingService.finalize(7L, 100L, 10L, "text", 1, "complete", null, "run-a"));
+	}
+
+	@Test
 	void invalidRunAndMissingTenantFailBeforeInsert() {
 		ContextUtil.remove();
 		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, null, "run-a"));
