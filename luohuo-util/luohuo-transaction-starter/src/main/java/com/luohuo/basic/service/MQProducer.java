@@ -30,7 +30,9 @@ public class MQProducer {
      * @param topic
      * @param body
      */
-    @SecureInvoke
+    // 200 attempts with a 64-minute capped delay protect >8 days; permanent faults stay in FAIL
+    // for diagnosed, operator-approved replay instead of an infinite retry queue.
+    @SecureInvoke(maxRetryTimes = 200)
     public void sendSecureMsg(String topic, Object body, Object key) {
         Message<Object> build = MessageBuilder
                 .withPayload(body)

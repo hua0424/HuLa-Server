@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
+import java.time.Duration;
 import java.util.Map;
 
 /**
@@ -46,7 +47,9 @@ public class PushConsumer implements RocketMQListener<NodePushDTO> {
 						sessionManager.sendToDevice(entry.getValue(), entry.getKey(), msg)
 								.subscribeOn(Schedulers.boundedElastic()) // 设备级并行
 				)
-				.subscribe(null, ex -> log.error("推送失败: {}", ex.getMessage()),
-						() -> log.debug("节点推送完成 (设备数: {})", deviceUserMap.size()));
+				.sequential()
+				.then()
+				.block(Duration.ofSeconds(10)); // MQ ACK only after observed WS write completion; not a client ACK.
+		log.debug("节点推送完成 (设备数: {})", deviceUserMap.size());
 	}
 }
