@@ -13,6 +13,7 @@ import com.luohuo.basic.exception.code.ResponseEnum;
 import com.luohuo.flex.common.utils.IPUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
@@ -73,6 +74,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
     @Value("${spring.profiles.active:dev}")
     protected String profiles;
 
+    @Value("${THINKING_INTERNAL_SECRET}")
+    private String thinkingInternalSecret;
+    private static final String THINKING_AUTH = "X-Thinking-Service-Auth";
+    private static final String THINKING_TYPE = "X-Thinking-Actor-Type";
+
     /**
      * #184(a) 方案 B: gateway 缓存缺失时回源 im 的 verify-token 端点。
      * 走 service discovery (lb://)，不经 gateway 自己的反向代理路由表。
@@ -83,7 +89,10 @@ public class TokenContextFilter implements WebFilter, Ordered {
     /**
      * 显式构造器：disambiguate the {@code @LoadBalanced} {@link WebClient.Builder} bean
      * (与 Spring Boot 默认 WebClientAutoConfiguration 注册的 builder 区分)。
+     * #295 修复：两个构造器且无默认构造器时 Spring 无法自行选择 → 必须标记唯一 @Autowired
+     * 构造器，否则 BeanInstantiationException(No default constructor found)，gateway 启动失败。
      */
+    @Autowired
     public TokenContextFilter(IgnoreProperties ignoreProperties,
                               SaTokenConfig saTokenConfig,
                               StringRedisTemplate stringRedisTemplate,
@@ -158,6 +167,28 @@ public class TokenContextFilter implements WebFilter, Ordered {
         ServerHttpRequest request = exchange.getRequest();
         ServerHttpResponse response = exchange.getResponse();
         ServerHttpRequest.Builder mutate = request.mutate();
+        String path = request.getPath().value();
+        boolean protectedThinkingPath = path.equals("/api/ws/ws") || path.equals("/ws/ws")
+                || path.equals("/api/im/chat/msg") || path.equals("/im/chat/msg")
+                || path.matches("(?:/api)?/im/thinking(?:/.*)?");
+        // Preserve a deliberately anonymous endpoint's caller-supplied tenant; authenticated paths
+        // must use token-derived identity, never a header placed by the client before the gateway.
+        mutate.headers(h -> {
+            if (protectedThinkingPath || !isIgnoreToken(request)) {
+                h.remove(U_ID_HEADER);
+                h.remove(USER_ID_HEADER);
+                h.remove(HEADER_TENANT_ID);
+            }
+            h.remove(THINKING_AUTH);
+            h.remove(THINKING_TYPE);
+            h.remove("X-Thinking-Actor-Uid");
+            h.remove("X-Thinking-Service-Timeout");
+            h.remove("X-Aiclaw-Machine-Changed");
+            h.remove("X-Aiclaw-Owner-Uid");
+        });
+        if (path.matches("(?:/api)?/im/thinking(?:/.*)?")) {
+            return errorResponse(response, "内部接口不可从网关访问", 403);
+        }
 		mutate.header(HEADER_REQUEST_IP, IPUtils.getClientIp(request));
         ContextUtil.setGrayVersion(getHeader(ContextConstants.GRAY_VERSION, request));
 
@@ -438,7 +469,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
         }
 
         Long uid = info.getLong("uid");
-        Long tenantId = info.getLong("tenantId", 1L);
+        Long tenantId = info.getLong("tenantId");
+        if (uid == null || tenantId == null || uid <= 0 || tenantId <= 0) {
+            throw new UnauthorizedException(ResponseEnum.JWT_TOKEN_EXCEED.getCode(), "aiclaw token缺少身份或租户");
+        }
+        addThinkingServiceIdentity(request, mutate, uid);
 
         mutate.header(U_ID_HEADER, String.valueOf(uid));
         mutate.header(USER_ID_HEADER, String.valueOf(uid));
@@ -518,7 +553,11 @@ public class TokenContextFilter implements WebFilter, Ordered {
                     }
                     Long uid = data.getLong("uid");
                     Long ownerUid = data.getLong("ownerUid");
-                    Long tenantId = data.getLong("tenantId") != null ? data.getLong("tenantId") : 1L;
+                    Long tenantId = data.getLong("tenantId");
+                    if (uid == null || tenantId == null || uid <= 0 || tenantId <= 0) {
+                        sink.error(new UnauthorizedException(503, "aiclaw verify-token 缺少身份或租户"));
+                        return;
+                    }
                     Integer authStatus = data.getInt("authStatus");
                     String machineCode = data.getStr("machineCode");
 
@@ -538,6 +577,7 @@ public class TokenContextFilter implements WebFilter, Ordered {
                     log.info("aiclaw token cache rebuilt from im, uid={}", uid);
 
                     // 写下游请求头
+                    addThinkingServiceIdentity(request, mutate, uid);
                     mutate.header(U_ID_HEADER, String.valueOf(uid));
                     mutate.header(USER_ID_HEADER, String.valueOf(uid));
                     mutate.header(HEADER_TENANT_ID, String.valueOf(tenantId));
@@ -574,6 +614,19 @@ public class TokenContextFilter implements WebFilter, Ordered {
                     ContextUtil.remove();
                     ContextUtil.clearTenantContext();
                 });
+    }
+
+    private void addThinkingServiceIdentity(ServerHttpRequest request, ServerHttpRequest.Builder mutate, Long uid) {
+        String path = request.getPath().value();
+        if (path.equals("/api/ws/ws") || path.equals("/ws/ws") ||
+                path.equals("/api/im/chat/msg") || path.equals("/im/chat/msg")) {
+            if (thinkingInternalSecret == null || thinkingInternalSecret.isBlank()) {
+                throw new UnauthorizedException(503, "thinking internal authentication unavailable");
+            }
+            mutate.header(THINKING_AUTH, thinkingInternalSecret);
+            mutate.header(THINKING_TYPE, "AICLAW");
+            mutate.header("X-Thinking-Actor-Uid", String.valueOf(uid));
+        }
     }
 
     protected Mono<Void> errorResponse(ServerHttpResponse response, String errMsg, int errCode) {

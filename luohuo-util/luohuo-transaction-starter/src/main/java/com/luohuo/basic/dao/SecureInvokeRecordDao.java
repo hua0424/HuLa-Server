@@ -23,6 +23,8 @@ public class SecureInvokeRecordDao extends ServiceImpl<SecureInvokeRecordMapper,
                 .lt(SecureInvokeRecord::getNextRetryTime, now)
 				//查2分钟前的失败数据。避免刚入库的数据被查出来
                 .lt(SecureInvokeRecord::getCreateTime, now.plusMinutes(- (long) SecureInvokeService.RETRY_INTERVAL_MINUTES))
+                .orderByAsc(SecureInvokeRecord::getNextRetryTime)
+                .last("LIMIT 100") // Bound each scan during a long broker outage; older due work goes first.
                 .list();
     }
 }

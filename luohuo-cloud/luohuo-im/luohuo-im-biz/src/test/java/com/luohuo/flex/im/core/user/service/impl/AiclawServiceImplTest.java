@@ -193,7 +193,8 @@ class AiclawServiceImplTest {
 		self.setAuthStatus(0);
 		self.setTokenHash(BCrypt.hashpw(CONNECTION_TOKEN));
 		self.setTokenPrefix("pref1234");
-		when(aiclawDao.getByUid(AICLAW_UID)).thenReturn(self);
+		self.setTenantId(1L);
+		when(aiclawDao.getByUidForActivation(AICLAW_UID)).thenReturn(self);
 		return self;
 	}
 
@@ -845,7 +846,7 @@ class AiclawServiceImplTest {
 
 		aiclawService.restore(AICLAW_UID, OWNER_UID);
 
-		verify(aiclawDao).updateById(any());
+		verify(aiclawDao).update(any(LambdaUpdateWrapper.class));
 		verify(aiclawOwnerCache).refresh(AICLAW_UID);
 	}
 
@@ -858,7 +859,7 @@ class AiclawServiceImplTest {
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
 		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
 		assertTrue(ex.getMessage().contains("1440"), "缺行回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
-		verify(aiclawDao, never()).updateById(any());
+		verify(aiclawDao, never()).update(any(LambdaUpdateWrapper.class));
 	}
 
 	@Test
@@ -870,7 +871,7 @@ class AiclawServiceImplTest {
 
 		aiclawService.restore(AICLAW_UID, OWNER_UID);
 
-		verify(aiclawDao).updateById(any());
+		verify(aiclawDao).update(any(LambdaUpdateWrapper.class));
 		verify(aiclawOwnerCache).refresh(AICLAW_UID);
 	}
 
@@ -883,7 +884,7 @@ class AiclawServiceImplTest {
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
 		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
 		assertTrue(ex.getMessage().contains("1 分钟"), "配置 1 分钟应把分钟数带进文案，实际: " + ex.getMessage());
-		verify(aiclawDao, never()).updateById(any());
+		verify(aiclawDao, never()).update(any(LambdaUpdateWrapper.class));
 	}
 
 	@Test
@@ -906,6 +907,46 @@ class AiclawServiceImplTest {
 		BizException ex = assertThrows(BizException.class, () -> aiclawService.restore(AICLAW_UID, OWNER_UID));
 		assertTrue(ex.getMessage().contains("已超过停用恢复期"), "文案应含「已超过停用恢复期」，实际: " + ex.getMessage());
 		assertTrue(ex.getMessage().contains("1440"), "非正数回退默认应把 1440 分钟带进文案，实际: " + ex.getMessage());
+	}
+
+	@SuppressWarnings("unchecked")
+	private void assertRestoreWritesStateAndClearsDeactivatedAt(int expectedStatus) {
+		ArgumentCaptor<LambdaUpdateWrapper<Aiclaw>> captor = ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+		verify(aiclawDao).update(captor.capture());
+		LambdaUpdateWrapper<Aiclaw> wrapper = captor.getValue();
+		String sqlSet = wrapper.getSqlSet();
+		assertTrue(sqlSet.contains("auth_status=") && sqlSet.contains("deactivated_at="),
+				"restore 必须同时落库状态并显式清除停用时间: " + sqlSet);
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(expectedStatus));
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(null), "停用时间必须显式绑定 null");
+		assertTrue(wrapper.getTargetSql().contains("id"), "仅更新此 aiclaw 的主键");
+		assertTrue(wrapper.getParamNameValuePairs().containsValue(1L));
+	}
+
+	@Test
+	@DisplayName("restore(#297/#250): 从未激活（machineCode=null）的停用 aiclaw 恢复为 0，不得凭空获得已激活态")
+	void restore_neverActivated_restoresToZero() {
+		Aiclaw aiclaw = stubRestorePath(LocalDateTime.now().minusHours(1));
+		aiclaw.setMachineCode(null); // 未激活：无机器码绑定
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+		stubRedisTokenCache();
+
+		aiclawService.restore(AICLAW_UID, OWNER_UID);
+
+		assertRestoreWritesStateAndClearsDeactivatedAt(0);
+	}
+
+	@Test
+	@DisplayName("restore(#297): 曾激活（machineCode 非空）的停用 aiclaw 恢复为 1，恢复正常")
+	void restore_activatedBefore_restoresToOne() {
+		Aiclaw aiclaw = stubRestorePath(LocalDateTime.now().minusHours(1));
+		aiclaw.setMachineCode("machine-A"); // activate 绑定的机器码，停用不清除
+		when(sysConfigService.get(AiclawServiceImpl.CONFIG_KEY_DEACTIVATE_RETENTION_MINUTES)).thenReturn("");
+		stubRedisTokenCache();
+
+		aiclawService.restore(AICLAW_UID, OWNER_UID);
+
+		assertRestoreWritesStateAndClearsDeactivatedAt(1);
 	}
 
 	@Test

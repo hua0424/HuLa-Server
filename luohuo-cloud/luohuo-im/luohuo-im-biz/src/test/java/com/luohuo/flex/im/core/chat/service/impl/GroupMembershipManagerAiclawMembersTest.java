@@ -11,6 +11,7 @@ import com.luohuo.flex.im.domain.entity.GroupMember;
 import com.luohuo.flex.im.domain.entity.Room;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
+import com.luohuo.flex.im.domain.vo.request.member.MemberReq;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.model.entity.ws.ChatMemberResp;
 import org.junit.jupiter.api.DisplayName;
@@ -22,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -99,6 +102,7 @@ class GroupMembershipManagerAiclawMembersTest {
 		dto.setUid(uid);
 		dto.setName(name);
 		dto.setAccount(account);
+		dto.setLastOptTime(LocalDateTime.of(2026, 9, 28, 12, 0));
 		return dto;
 	}
 
@@ -155,6 +159,48 @@ class GroupMembershipManagerAiclawMembersTest {
 	}
 
 	// ==================== 成员列表 ====================
+
+	@Test
+	@DisplayName("#332: 删除用户仍有活跃成员行时，缺失摘要不返回 Rust 无法解码的 null 字段")
+	void deletedUserWithActiveMembership_doesNotBreakMemberList() {
+		Long deletedUid = 303L;
+		stubMemberFetch(
+				List.of(memberResp(ONLINE_UID, 3), memberResp(deletedUid, 3)),
+				Map.of(ONLINE_UID, summary(ONLINE_UID, "有效用户", "valid")),
+				Set.of(ONLINE_UID, deletedUid));
+
+		List<ChatMemberResp> list = membershipManager.listMember(MemberReq.builder().roomId(ROOM_ID).build());
+		assertEquals(1, list.size());
+		assertEquals(String.valueOf(ONLINE_UID), list.get(0).getUid());
+		assertEquals("有效用户", list.get(0).getName());
+		assertEquals(LocalDateTime.of(2026, 9, 28, 12, 0), list.get(0).getLastOptTime());
+	}
+
+	@Test
+	@DisplayName("#332: DB 已过滤删除用户时，残留的摘要缓存也不带入成员结果")
+	void staleSummaryCannotReviveDeletedMembership() {
+		Long deletedUid = 303L;
+		stubMemberFetch(List.of(memberResp(ONLINE_UID, 3)),
+				Map.of(ONLINE_UID, summary(ONLINE_UID, "有效用户", "valid"),
+						deletedUid, summary(deletedUid, "旧缓存", "stale")),
+				Set.of(ONLINE_UID));
+
+		assertEquals(List.of(String.valueOf(ONLINE_UID)), membershipManager.listMember(MemberReq.builder().roomId(ROOM_ID).build())
+				.stream().map(ChatMemberResp::getUid).toList());
+		verify(userSummaryCache).getBatch(List.of(ONLINE_UID));
+	}
+
+	@Test
+	@DisplayName("#332: aiclaw 成员复用同一缺失摘要过滤")
+	void aiclawListMembers_omitsDeletedUser() {
+		when(groupMemberDao.getMember(ROOM_ID, AICLAW_UID)).thenReturn(member());
+		stubMemberFetch(
+				List.of(memberResp(ONLINE_UID, 3), memberResp(303L, 3)),
+				Map.of(ONLINE_UID, summary(ONLINE_UID, "有效用户", "valid")),
+				Set.of(ONLINE_UID));
+		assertEquals(List.of(String.valueOf(ONLINE_UID)), membershipManager.aiclawListMembers(ROOM_ID, false, AICLAW_UID)
+				.stream().map(AiclawMemberResp::getUid).toList());
+	}
 
 	@Test
 	@DisplayName("群聊 + aiclaw 是成员 → 返回成员列表，正确映射 uid/name/account/online/roleId")

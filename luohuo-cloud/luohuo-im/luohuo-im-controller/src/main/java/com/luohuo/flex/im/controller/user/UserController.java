@@ -64,9 +64,19 @@ public class UserController {
 	}
 
 	@GetMapping("/getById/{id}")
-	@Operation(summary ="用户详情 [仅远程接口调用]")
+	@Operation(summary ="用户公开资料（私有字段仅本人可见）")
 	public R<UserInfoResp> getById(@PathVariable("id") Long id) {
-		return R.success(userService.getUserInfo(id));
+		UserInfoResp resp = userService.getUserInfo(id);
+		// #296: member-info 公开资料语义 —— 邮箱/改名机会/AI 上下文开关与调用次数是私有字段，
+		// 只对本人（caller == id）返回；跨用户（含 aiclaw 查询）一律裁剪，保留昵称/头像/简介等公开字段。
+		Long caller = ContextUtil.getUid();
+		if (caller == null || !caller.equals(id)) {
+			resp.setEmail(null);
+			resp.setModifyNameChance(null);
+			resp.setContext(null);
+			resp.setNum(null);
+		}
+		return R.success(resp);
 	}
 
 	@GetMapping("/findById")

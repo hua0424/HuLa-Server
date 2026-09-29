@@ -24,6 +24,9 @@ public class AiclawThinking extends SuperEntity<Long> {
 
 	private static final long serialVersionUID = 1L;
 
+	@TableField("tenant_id")
+	private Long tenantId;
+
 	/**
 	 * 产生 thinking 的 aiclaw uid
 	 */
@@ -41,6 +44,12 @@ public class AiclawThinking extends SuperEntity<Long> {
 	 */
 	@TableField("trigger_msg_id")
 	private Long triggerMsgId;
+
+	@TableField("client_run_id")
+	private String clientRunId;
+
+	@TableField("start_ready")
+	private Boolean startReady;
 
 	/**
 	 * 完整思考文本
