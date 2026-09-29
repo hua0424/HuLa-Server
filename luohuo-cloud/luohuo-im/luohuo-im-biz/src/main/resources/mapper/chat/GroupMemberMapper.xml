@@ -9,6 +9,9 @@
         </foreach>
     </select>
     <select id="getMemberListByGroupId" resultType="com.luohuo.flex.model.entity.ws.ChatMemberResp">
-        select id, group_id, uid, role_id, remark, my_name, de_friend from im_group_member g WHERE is_del = 0 and group_id = #{groupId}
+        select g.id, g.group_id, g.uid, g.role_id, g.remark, g.my_name, g.de_friend
+        from im_group_member g
+        join im_user u on u.id = g.uid and u.tenant_id = g.tenant_id and u.is_del = 0
+        where g.is_del = 0 and g.group_id = #{groupId}
     </select>
 </mapper>
