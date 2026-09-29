@@ -223,7 +223,11 @@ public class GroupMembershipManager {
 		// 5. 批量获取在线状态
 		Set<Long> onlineList = onlineService.getOnlineUsersList(new ArrayList<>(uids));
 
-		// 6. 填充用户信息和在线状态
+		// 6. 缺失/不完整的用户摘要不能形成客户端可解码的群成员（含缓存未命中的已删除用户）
+		chatMemberResps = chatMemberResps.stream().filter(item -> {
+			SummeryInfoDTO user = batch.get(Long.parseLong(item.getUid()));
+			return user != null && user.getName() != null && user.getLastOptTime() != null;
+		}).collect(Collectors.toList());
 		chatMemberResps.forEach(item -> {
 			Long uid = Long.parseLong(item.getUid());
 			SummeryInfoDTO user = batch.get(uid);
