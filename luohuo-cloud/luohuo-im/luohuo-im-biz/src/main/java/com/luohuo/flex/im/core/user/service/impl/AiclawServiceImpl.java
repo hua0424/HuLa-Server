@@ -146,7 +146,8 @@ public class AiclawServiceImpl implements AiclawService {
 		friendService.createFriend(roomFriend.getRoomId(), ownerUid, aiclawUid);
 
 		// 5. 写入 Redis 缓存（供 gateway 校验）
-		saveTokenCache(tokenPrefix, aiclawUid, ownerUid, tokenSha256, null, 0);
+		saveTokenCache(tokenPrefix, aiclawUid, ownerUid, tokenSha256, null, 0,
+				com.luohuo.basic.context.ContextUtil.getTenantId());
 
 		// 6. 加密生成激活 token
 		String activationToken = cryptoService.encryptActivationToken(aiclawUid, connectionToken);
@@ -168,9 +169,7 @@ public class AiclawServiceImpl implements AiclawService {
 	@Override
 	@Transactional(rollbackFor = Exception.class)
 	public AiclawActivateResp activate(AiclawActivateReq req) {
-		// anyTenant 路径无 tenant context，手动设置默认租户
-		com.luohuo.basic.context.ContextUtil.setTenantId(1L);
-
+		// anyTenant has no tenant context; discover it from the globally unique verified identity.
 		// 1. 解密激活 token
 		JSONObject payload = cryptoService.decryptActivationToken(req.getActivationToken());
 		Long uid = payload.getLong("uid");
@@ -180,8 +179,8 @@ public class AiclawServiceImpl implements AiclawService {
 		// 2. 校验过期
 		cryptoService.validateTimestamp(timestamp);
 
-		// 3. 查询 aiclaw 记录
-		Aiclaw aiclaw = aiclawDao.getByUid(uid);
+		// 3. 以全局唯一 uid 查找，鉴权后再绑定记录的真实 tenant。
+		Aiclaw aiclaw = aiclawDao.getByUidForActivation(uid);
 		if (aiclaw == null) {
 			throw new BizException("AI助理不存在");
 		}
@@ -196,6 +195,10 @@ public class AiclawServiceImpl implements AiclawService {
 		if (!BCrypt.checkpw(connectionToken, aiclaw.getTokenHash())) {
 			throw new BizException("激活码无效");
 		}
+		if (aiclaw.getTenantId() == null || aiclaw.getTenantId() <= 0) {
+			throw new BizException("AI助理租户缺失");
+		}
+		com.luohuo.basic.context.ContextUtil.setTenantId(aiclaw.getTenantId());
 
 		// 4.1 机器码查重（REQ-122）：machineCode 即 WS clientId，推送路由以 clientId→uid 建映射，
 		// 同一 clientId 被两个 uid 共用会静默覆盖、其中一方被永久踢出群推送。
@@ -225,7 +228,7 @@ public class AiclawServiceImpl implements AiclawService {
 		// 6. 更新 Redis 缓存
 		String tokenSha256 = SecureUtil.sha256(connectionToken);
 		saveTokenCache(aiclaw.getTokenPrefix(), uid, aiclaw.getOwnerUid(),
-				tokenSha256, req.getMachineCode(), 1);
+				tokenSha256, req.getMachineCode(), 1, aiclaw.getTenantId());
 
 		// 刷新主人关系缓存
 		aiclawOwnerCache.refresh(uid);
@@ -292,7 +295,8 @@ public class AiclawServiceImpl implements AiclawService {
 		aiclawDao.updateById(update);
 
 		// 写入新 Redis 缓存（authStatus=0）
-		saveTokenCache(tokenPrefix, aiclaw.getUid(), ownerUid, tokenSha256, null, 0);
+		saveTokenCache(tokenPrefix, aiclaw.getUid(), ownerUid, tokenSha256, null, 0,
+				aiclaw.getTenantId());
 
 		// 加密生成激活 token
 		String activationToken = cryptoService.encryptActivationToken(aiclawUid, connectionToken);
@@ -721,13 +725,20 @@ public class AiclawServiceImpl implements AiclawService {
 			throw new BizException("已超过停用恢复期（" + retentionMinutes + " 分钟）");
 		}
 
-		Aiclaw update = new Aiclaw();
-		update.setId(aiclaw.getId());
-		update.setAuthStatus(1);
-		update.setDeactivatedAt(null);
-		aiclawDao.updateById(update);
+		// #297（交叉核对 #250）：restore 必须恢复停用前状态，不能一律置 1——否则
+		// 未激活（authStatus=0）的 aiclaw 被停用再恢复会凭空获得已激活态（可写身份），
+		// 绕过凭据激活流程（#250 实测缺陷，属本票"禁用身份不能凭历史绑定取得能力"范围）。
+		// 推导依据（免加列）：activate 强制 machineCode @NotBlank，refresh 会同时清
+		// machineCode 并回到 0，故"曾经激活"⇔machineCode 非空；历史脏行（status=1 但
+		// 无 machineCode）按 0 恢复（fail-closed，需重新激活）。
+		int priorStatus = StrUtil.isNotBlank(aiclaw.getMachineCode()) ? 1 : 0;
 
-		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), 1);
+		aiclawDao.update(new LambdaUpdateWrapper<Aiclaw>()
+				.eq(Aiclaw::getId, aiclaw.getId())
+				.set(Aiclaw::getAuthStatus, priorStatus)
+				.set(Aiclaw::getDeactivatedAt, null));
+
+		updateTokenCacheAuthStatus(aiclaw.getTokenPrefix(), priorStatus);
 		aiclawOwnerCache.refresh(aiclawUid);
 
 		log.info("aiclaw restored: uid={}", aiclawUid);
@@ -797,9 +808,8 @@ public class AiclawServiceImpl implements AiclawService {
 
 	@Override
 	public AiclawTokenInfo verifyAndCacheToken(String connectionToken) {
-		// anyTenant 路径无 tenant context，手动设置默认租户（与 activate 一致；
-		// 缺则 im_aiclaw mapper 的租户拦截器取不到租户 → NPE: ContextUtil 不存在租户编号）
-		com.luohuo.basic.context.ContextUtil.setTenantId(1L);
+		// anyTenant has no trusted tenant; the globally unique token prefix is looked up without
+		// tenant filtering, then bcrypt and the row's tenant establish the connection identity.
 		if (StrUtil.isBlank(connectionToken) || connectionToken.length() < 8) {
 			log.warn("verify-token rejected: blank/short token");
 			return null;
@@ -827,9 +837,13 @@ public class AiclawServiceImpl implements AiclawService {
 		// 通过 → 重建缓存（形态与 saveTokenCache 完全一致）
 		Long uid = record.getUid();
 		Long ownerUid = record.getOwnerUid();
-		Long tenantId = record.getTenantId() != null ? record.getTenantId() : 1L;
+		Long tenantId = record.getTenantId();
+		if (tenantId == null || tenantId <= 0) {
+			log.warn("verify-token rejected: missing tenant, prefix={}", prefix);
+			return null;
+		}
 		saveTokenCache(prefix, uid, ownerUid, SecureUtil.sha256(connectionToken),
-				record.getMachineCode(), record.getAuthStatus());
+				record.getMachineCode(), record.getAuthStatus(), tenantId);
 		log.info("verify-token cache rebuilt, uid={}, prefix={}", uid, prefix);
 		return AiclawTokenInfo.builder()
 				.uid(uid)
@@ -876,11 +890,14 @@ public class AiclawServiceImpl implements AiclawService {
 	}
 
 	private void saveTokenCache(String tokenPrefix, Long uid, Long ownerUid,
-								String tokenSha256, String machineCode, Integer authStatus) {
+								String tokenSha256, String machineCode, Integer authStatus, Long tenantId) {
+		if (tenantId == null || tenantId <= 0) {
+			throw new BizException("AI助理租户缺失，拒绝签发连接凭据");
+		}
 		Map<String, Object> cache = new HashMap<>();
 		cache.put("uid", uid);
 		cache.put("ownerUid", ownerUid);
-		cache.put("tenantId", 1L);
+		cache.put("tenantId", tenantId);
 		cache.put("authStatus", authStatus);
 		if (tokenSha256 != null) {
 			cache.put("tokenSha256", tokenSha256);

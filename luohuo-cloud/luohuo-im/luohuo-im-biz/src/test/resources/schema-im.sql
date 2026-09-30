@@ -168,3 +168,40 @@ CREATE TABLE `im_aiclaw_thinking_msg_rel` (
   `create_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '关联建立时间',
   PRIMARY KEY (`thinking_id`, `msg_id`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'thinking 与回复消息关联表' ROW_FORMAT = Dynamic;
+
+-- #295: Minimal identity/member tables for isolated thinking mapper authorization tests.
+CREATE TABLE `im_user` (
+  `id` bigint NOT NULL,
+  `tenant_id` bigint NOT NULL,
+  `user_type` int NOT NULL,
+  `state` int NULL DEFAULT 0,
+  `is_del` tinyint NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`)
+) ENGINE = InnoDB;
+CREATE TABLE `im_aiclaw` (
+  `id` bigint NOT NULL,
+  `uid` bigint NOT NULL,
+  `owner_uid` bigint NOT NULL,
+  `token_hash` varchar(128) NOT NULL,
+  `token_prefix` varchar(8) NOT NULL,
+  `tenant_id` bigint NOT NULL,
+  `auth_status` tinyint NOT NULL DEFAULT 0,
+  `deactivated_at` datetime DEFAULT NULL,
+  `is_del` tinyint NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_uid` (`uid`),
+  UNIQUE KEY `uk_token_prefix` (`token_prefix`)
+) ENGINE = InnoDB;
+CREATE TABLE `im_group_member` (
+  `id` bigint NOT NULL,
+  `group_id` bigint NOT NULL,
+  `uid` bigint NOT NULL,
+  `role_id` int NOT NULL,
+  `remark` varchar(255) DEFAULT NULL,
+  `my_name` varchar(255) DEFAULT NULL,
+  `de_friend` tinyint DEFAULT NULL,
+  `tenant_id` bigint NOT NULL,
+  `is_del` tinyint NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_group_member_uid_isdel_groupid` (`uid`, `is_del`, `group_id`)
+) ENGINE = InnoDB;

@@ -6,6 +6,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.model.cache.CacheKey;
 import com.luohuo.basic.service.MQProducer;
+import com.luohuo.basic.jackson.JsonUtil;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.im.domain.DelayRetryTask;
@@ -18,6 +19,8 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -147,6 +150,43 @@ public class PushService {
 					log.error("批量推送失败", e);
 					return null;
 				});
+	}
+
+    /** Enter via this Spring bean proxy only after the RocketMQ DTO tenant context has been restored. */
+    @Transactional(rollbackFor = Exception.class)
+    public void withMessageTransaction(Runnable work) {
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || !TransactionSynchronizationManager.isSynchronizationActive()) {
+            throw new IllegalStateException("message consumer requires an active Spring DB transaction");
+        }
+        work.run();
+    }
+
+	/** Only the message consumer uses this transactional second hop; other push callers keep legacy semantics. */
+	public void sendReliablePushMsg(WsBaseResp<?> msg, List<Long> uids, Long msgId, Long cuid) {
+		// @SecureInvoke silently falls back to a direct MQ send outside a transaction.
+		if (!TransactionSynchronizationManager.isActualTransactionActive()
+				|| !TransactionSynchronizationManager.isSynchronizationActive()) {
+			throw new IllegalStateException("message push requires an active Spring DB transaction");
+		}
+		if (uids == null || uids.isEmpty()) return; // Offline recipients fetch their persisted message history.
+		Map<String, Map<String, Long>> routes = routerService.findNodeDeviceUser(uids);
+		if (routes == null) throw new IllegalStateException("message push routing unavailable");
+		if (routes.isEmpty()) {
+			// Redis still reports online recipients: a missing node route may be a Nacos outage.
+			throw new IllegalStateException("message push has no node route for online recipients: " + msgId);
+		}
+		for (Map.Entry<String, Map<String, Long>> route : routes.entrySet()) {
+			if (route.getKey() == null || route.getKey().isBlank()
+					|| route.getValue() == null || route.getValue().isEmpty()) {
+				throw new IllegalStateException("message push has invalid node/device route");
+			}
+			NodePushDTO intent = new NodePushDTO(msg, route.getValue(), msgId, cuid);
+			// JsonUtil returns "" rather than throwing on failed serialization; never persist an unusable intent.
+			if (JsonUtil.toJson(intent).isEmpty()) throw new IllegalStateException("message push is not serializable");
+			mqProducer.sendSecureMsg(MqConstant.PUSH_TOPIC + route.getKey(),
+					intent, msgId + ":" + route.getKey());
+		}
 	}
 
 	/**

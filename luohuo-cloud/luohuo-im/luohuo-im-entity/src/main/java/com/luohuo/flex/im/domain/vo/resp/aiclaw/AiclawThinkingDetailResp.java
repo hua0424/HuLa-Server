@@ -21,6 +21,21 @@ public class AiclawThinkingDetailResp implements Serializable {
 
 	private static final long serialVersionUID = 1L;
 
+	@Schema(description = "thinking ID（string 避免客户端大整数丢精度）")
+	private String thinkingId;
+
+	@Schema(description = "记录所属房间 ID")
+	private String roomId;
+
+	@Schema(description = "产生记录的助理 UID")
+	private String aiclawUid;
+
+	@Schema(description = "触发消息 ID；无触发时为 null")
+	private String triggerMsgId;
+
+	@Schema(description = "本轮执行关联 ID；旧记录为 null，不授予写入权限")
+	private String clientRunId;
+
 	@Schema(description = "完整思考文本")
 	private String content;
 

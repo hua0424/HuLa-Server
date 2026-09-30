@@ -45,7 +45,9 @@ public class SecureInvokeService {
     }
 
     public void save(SecureInvokeRecord record) {
-        secureInvokeRecordDao.save(record);
+        if (!secureInvokeRecordDao.save(record)) {
+            throw new IllegalStateException("SecureInvoke intent was not persisted");
+        }
     }
 
     private void retryRecord(SecureInvokeRecord record, String errorMsg) {
@@ -63,12 +65,15 @@ public class SecureInvokeService {
     }
 
     private LocalDateTime getNextRetryTime(Integer retryTimes) {//或者可以采用退避算法
-        double waitMinutes = Math.pow(RETRY_INTERVAL_MINUTES, retryTimes);//重试时间指数上升 2m 4m 8m 16m
-        return LocalDateTime.now().plusMinutes((int) waitMinutes);
+        // Cap at 64 minutes: an extended MQ outage must not overflow the delay and strand committed sends.
+        double waitMinutes = Math.pow(RETRY_INTERVAL_MINUTES, Math.min(retryTimes, 6));
+        return LocalDateTime.now().plusMinutes((long) waitMinutes);
     }
 
     private void removeRecord(Long id) {
-        secureInvokeRecordDao.removeById(id);
+        if (!secureInvokeRecordDao.removeById(id)) {
+            throw new IllegalStateException("SecureInvoke sent but intent removal failed: " + id);
+        }
     }
 
     public void invoke(SecureInvokeRecord record, boolean async) {
