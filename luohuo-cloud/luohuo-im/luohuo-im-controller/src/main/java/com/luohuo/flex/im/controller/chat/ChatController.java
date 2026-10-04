@@ -22,6 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.luohuo.basic.base.R;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
+import com.luohuo.flex.im.domain.vo.res.MsgWindowResp;
 import com.luohuo.flex.im.domain.dto.MsgReadInfoDTO;
 import com.luohuo.flex.im.domain.vo.response.ChatMessageReadResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
@@ -84,6 +85,12 @@ public class ChatController {
     @GetMapping("/msg/receipt-capability")
     public R<String> receiptCapability() {
         return R.success("requestId-v1;retention-min=7d");
+    }
+
+    @PostMapping("/msg/window")
+    @Operation(summary = "当前阅读窗口校准 [aichatoverview#350：有限窗口 envelope + 逐已知 ID 回执]")
+    public R<MsgWindowResp> getMsgWindow(@Valid @RequestBody MsgWindowReq request) {
+        return R.success(chatService.getMsgWindow(request, ContextUtil.getUid()));
     }
 
     @PostMapping("/msg")
