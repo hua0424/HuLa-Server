@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
@@ -32,7 +33,7 @@ public class MsgWindowResp {
     public static final String SCHEMA_VERSION = "msg-window-v1";
 
     /** 本 envelope 实际承载的能力集合。 */
-    public static final List<String> CAPABILITIES = List.of("messages", "known-receipts");
+    public static final List<String> CAPABILITIES = List.of("messages", "known-receipts", "thinking");
 
     @Schema(description = "协议版本")
     private String schemaVersion;
@@ -69,6 +70,31 @@ public class MsgWindowResp {
 
     @Schema(description = "合法读取路径已有的 messageMaxId 上限（lastMsgId；热点房无上限时为 null）")
     private Long messageMaxId;
+
+    /**
+     * aichatoverview#351：可选思考 envelope（与消息范围完整性独立）。
+     *
+     * <p>缺字段或 thinkingComplete=false 时调用方不得视为无思考、不得移除既有
+     * 元数据；thinkingAccess=false 时隐藏卡片与正文，不等同于消息失权；
+     * 网络/泛化错误保持失败语义（thinkingComplete=false），不伪装成功空。
+     */
+    @Schema(description = "调用方是否通过思考授权；false 时隐藏卡片与正文")
+    private boolean thinkingAccess;
+
+    @Schema(description = "本窗口实际查询的触发消息 id 集合（十进制字符串，固定集合）")
+    private List<String> thinkingTriggers;
+
+    @Schema(description = "当前窗可见触发消息的思考元数据集合（id 升序，同触发允许多助理）")
+    private List<AiclawThinkingListItemResp> thinkingItems;
+
+    @Schema(description = "思考集合是否完整；false 时不得按缺项移除既有元数据")
+    private boolean thinkingComplete;
+
+    @Schema(description = "逐已知思考 ID 回执，每个请求 ID 恰好一条")
+    private List<ThinkingKnownReceipt> thinkingKnownReceipts;
+
+    @Schema(description = "已知思考回执是否齐全，独立于思考集合 complete")
+    private boolean thinkingKnownComplete;
 
     @Data
     @Builder
@@ -111,5 +137,18 @@ public class MsgWindowResp {
         private boolean available;
         @Schema(description = "available=true 时的权威内容；available=false 时为 null")
         private ChatMessageResp message;
+    }
+
+    @Data
+    @Builder
+    @AllArgsConstructor
+    @NoArgsConstructor
+    public static class ThinkingKnownReceipt {
+        @Schema(description = "已知思考 id（十进制字符串）")
+        private String id;
+        @Schema(description = "当前快照下调用者是否可展示；false 为统一 unavailable，不透露原因")
+        private boolean available;
+        @Schema(description = "available=true 时的权威元数据（含 bodyETag）；available=false 时为 null")
+        private AiclawThinkingListItemResp metadata;
     }
 }

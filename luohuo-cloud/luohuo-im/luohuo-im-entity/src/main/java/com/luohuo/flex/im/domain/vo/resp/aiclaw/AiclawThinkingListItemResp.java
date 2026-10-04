@@ -43,6 +43,9 @@ public class AiclawThinkingListItemResp implements Serializable {
 	@Schema(description = "是否产生了回复消息：0=否，1=是")
 	private Integer hasResponse;
 
+	@Schema(description = "正文 bodyETag（SHA-256，UTF-8 字节；null 表示正文尚未存在、无从校验）")
+	private String bodyETag;
+
 	@Schema(description = "创建时间")
 	private LocalDateTime createTime;
 }
