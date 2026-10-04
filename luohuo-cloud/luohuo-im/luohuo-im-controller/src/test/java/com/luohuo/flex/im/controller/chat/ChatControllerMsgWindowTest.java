@@ -10,6 +10,7 @@ import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.controller.ThinkingInternalAuth;
 import com.luohuo.flex.im.domain.vo.request.MsgWindowReq;
 import com.luohuo.flex.im.domain.vo.res.MsgWindowResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -147,5 +148,68 @@ class ChatControllerMsgWindowTest {
         assertTrue(data.get("roomId").isTextual(), "roomId 保持字符串，实际=" + data.get("roomId"));
         assertTrue(data.get("messageMaxId").isTextual(),
                 "messageMaxId 保持字符串，实际=" + data.get("messageMaxId"));
+    }
+
+    @Test
+    @DisplayName("window#351：思考 envelope 透传——同触发多助理归属与顺序、逐已知思考 ID 回执、bodyETag")
+    void windowThinkingEnvelopePassthrough() throws Exception {
+        AiclawThinkingListItemResp first = AiclawThinkingListItemResp.builder()
+                .id(501L).aiclawUid(100L).triggerMsgId(7001L).status(1).durationMs(120)
+                .hasResponse(1).createTime(java.time.LocalDateTime.of(2026, 10, 4, 12, 0, 0))
+                .bodyETag("etag-body-501").build();
+        AiclawThinkingListItemResp second = AiclawThinkingListItemResp.builder()
+                .id(502L).aiclawUid(200L).triggerMsgId(7001L).status(1).durationMs(130)
+                .hasResponse(0).createTime(java.time.LocalDateTime.of(2026, 10, 4, 12, 0, 1))
+                .bodyETag("etag-body-502").build();
+        MsgWindowResp envelope = MsgWindowResp.builder()
+                .schemaVersion(MsgWindowResp.SCHEMA_VERSION)
+                .capabilities(MsgWindowResp.CAPABILITIES)
+                .requestId("req-thinking")
+                .roomId(ROOM_ID)
+                .items(List.of())
+                .coveredLower(null)
+                .coveredUpper(null)
+                .complete(true)
+                .knownReceipts(List.of())
+                .knownComplete(true)
+                .messagesAccess(true)
+                .messageMaxId(100L)
+                .thinkingAccess(true)
+                .thinkingTriggers(List.of("7001"))
+                .thinkingItems(List.of(first, second))
+                .thinkingComplete(true)
+                .thinkingKnownReceipts(List.of(
+                        MsgWindowResp.ThinkingKnownReceipt.builder()
+                                .id("501").available(true).metadata(first).build(),
+                        MsgWindowResp.ThinkingKnownReceipt.builder()
+                                .id("999").available(false).metadata(null).build()))
+                .thinkingKnownComplete(true)
+                .build();
+        when(chatService.getMsgWindow(any(), eq(UID))).thenReturn(envelope);
+
+        MsgWindowReq req = MsgWindowReq.builder()
+                .roomId(ROOM_ID).requestId("req-thinking").mode("tail")
+                .knownMsgIds(List.of()).knownThinkingIds(List.of("501", "999")).pageSize(20).build();
+        try (MockedStatic<ContextUtil> ctx = mockStatic(ContextUtil.class)) {
+            ctx.when(ContextUtil::getUid).thenReturn(UID);
+            mockMvc.perform(post("/chat/msg/window")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(req)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.capabilities[2]").value("thinking"))
+                    .andExpect(jsonPath("$.data.thinkingAccess").value(true))
+                    .andExpect(jsonPath("$.data.thinkingTriggers[0]").value("7001"))
+                    .andExpect(jsonPath("$.data.thinkingItems.length()").value(2))
+                    // 同触发多助理：归属不同 aiclawUid，id 升序。
+                    .andExpect(jsonPath("$.data.thinkingItems[0].aiclawUid").value("100"))
+                    .andExpect(jsonPath("$.data.thinkingItems[1].aiclawUid").value("200"))
+                    .andExpect(jsonPath("$.data.thinkingItems[0].bodyETag").value("etag-body-501"))
+                    .andExpect(jsonPath("$.data.thinkingComplete").value(true))
+                    .andExpect(jsonPath("$.data.thinkingKnownReceipts.length()").value(2))
+                    .andExpect(jsonPath("$.data.thinkingKnownReceipts[0].available").value(true))
+                    .andExpect(jsonPath("$.data.thinkingKnownReceipts[0].metadata.bodyETag").value("etag-body-501"))
+                    .andExpect(jsonPath("$.data.thinkingKnownReceipts[1].available").value(false))
+                    .andExpect(jsonPath("$.data.thinkingKnownComplete").value(true));
+        }
     }
 }

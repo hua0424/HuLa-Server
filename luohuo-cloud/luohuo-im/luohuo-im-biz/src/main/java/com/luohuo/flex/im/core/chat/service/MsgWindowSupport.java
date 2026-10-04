@@ -173,4 +173,30 @@ public final class MsgWindowSupport {
         }
         return m.getFromUid() == null || !blackUidSet.contains(m.getFromUid().toString());
     }
+
+    public static final class CappedTriggers {
+        public final List<Long> queried;
+        public final boolean complete;
+
+        public CappedTriggers(List<Long> queried, boolean complete) {
+            this.queried = queried;
+            this.complete = complete;
+        }
+    }
+
+    /**
+     * aichatoverview#351：思考触发集合封顶 100（与 known 上限同口径）。
+     *
+     * <p>溢出时只查前 100 并 complete=false——调用方在固定集合内续取，
+     * 不得把未返触发当无思考、不得移除既有元数据。
+     */
+    public static CappedTriggers capTriggers(List<Long> triggerIds) {
+        if (triggerIds == null || triggerIds.isEmpty()) {
+            return new CappedTriggers(new ArrayList<>(), true);
+        }
+        if (triggerIds.size() > MAX_KNOWN_IDS) {
+            return new CappedTriggers(new ArrayList<>(triggerIds.subList(0, MAX_KNOWN_IDS)), false);
+        }
+        return new CappedTriggers(triggerIds, true);
+    }
 }

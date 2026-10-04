@@ -134,16 +134,18 @@ public interface AiclawThinkingMapper extends BaseMapper<AiclawThinking> {
 	/**
 	 * 按触发消息 ID 批量反查指定房间的 thinking 元数据（metadata only）。
 	 *
-	 * <p>供客户端一次性反查一批已渲染消息各自对应的 thinking 元数据。<b>刻意不 select
-	 * content</b>（单行可达 200KB），只回元数据；全文由 {@code reviewThinking} 按需拉取。
+	 * <p>供客户端一次性反查一批已渲染消息各自对应的 thinking 元数据。<b>刻意不返回
+	 * content 给调用方</b>（单行可达 200KB），只回元数据；全文由 {@code reviewThinking} 按需拉取。
 	 * 结果按 id ASC 排序（雪花 ID 近似时间序，便于前端按消息顺序对齐）。
-	 * {@code idx_trigger_msg} 索引已存在，无需 DDL。</p>
+	 * {@code idx_trigger_msg} 索引已存在，无需 DDL。
+	 * aichatoverview#351：附带查出 content 仅用于服务端计算 bodyETag（SHA-256），
+	 * 不进入响应体；ETag 与 detail 由同一正文字节算出。</p>
 	 *
 	 * @param roomId        房间 ID
 	 * @param triggerMsgIds 触发消息 ID 列表（非空，service 层限制上限 100）
-	 * @return 元数据行（content 恒为 null），按 id 升序
+	 * @return 元数据行（content 仅供 ETag 计算，不外发），按 id 升序
 	 */
-	@Select("<script>SELECT id, aiclaw_uid, trigger_msg_id, duration_ms, has_response, status, create_time "
+	@Select("<script>SELECT id, aiclaw_uid, trigger_msg_id, duration_ms, has_response, status, create_time, content "
 			+ "FROM im_aiclaw_thinking WHERE room_id = #{roomId} AND is_del = 0 "
 			+ "AND trigger_msg_id IN "
 			+ "<foreach item='mid' collection='triggerMsgIds' open='(' separator=',' close=')'>#{mid}</foreach> "

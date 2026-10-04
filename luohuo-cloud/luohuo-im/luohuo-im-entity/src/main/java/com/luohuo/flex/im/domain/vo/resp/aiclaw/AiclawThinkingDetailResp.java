@@ -39,9 +39,18 @@ public class AiclawThinkingDetailResp implements Serializable {
 	@Schema(description = "完整思考文本")
 	private String content;
 
+	@Schema(description = "正文 bodyETag（SHA-256，UTF-8 字节；与元数据同一正文算出，只判相等）")
+	private String bodyETag;
+
 	@Schema(description = "状态：0=进行中 1=成功 2=错误 3=超时 4=超长截断")
 	private Integer status;
 
 	@Schema(description = "处理耗时（毫秒）")
 	private Integer durationMs;
+
+	@Schema(description = "是否产生了回复消息：0=否，1=是")
+	private Integer hasResponse;
+
+	@Schema(description = "创建时间")
+	private java.time.LocalDateTime createTime;
 }

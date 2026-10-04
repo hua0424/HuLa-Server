@@ -572,6 +572,15 @@ public class ChatServiceImpl implements ChatService {
             }
         }
 
+        // aichatoverview#351：思考 envelope 独立于消息范围完整性；失败不影响消息。
+        ThinkingWindow thinking = loadThinkingWindow(req, roomId, receiveUid, visible);
+        boolean thinkingAccess = thinking.access;
+        List<String> thinkingTriggerStrs = thinking.triggers;
+        List<com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp> thinkingItems = thinking.items;
+        boolean thinkingComplete = thinking.complete;
+        List<MsgWindowResp.ThinkingKnownReceipt> thinkingReceipts = thinking.receipts;
+        boolean thinkingKnownComplete = thinking.knownComplete;
+
         return MsgWindowResp.builder()
                 .schemaVersion(MsgWindowResp.SCHEMA_VERSION)
                 .capabilities(MsgWindowResp.CAPABILITIES)
@@ -585,7 +594,97 @@ public class ChatServiceImpl implements ChatService {
                 .knownComplete(true)
                 .messagesAccess(true)
                 .messageMaxId(lastMsgId)
+                .thinkingAccess(thinkingAccess)
+                .thinkingTriggers(thinkingTriggerStrs)
+                .thinkingItems(thinkingItems)
+                .thinkingComplete(thinkingComplete)
+                .thinkingKnownReceipts(thinkingReceipts)
+                .thinkingKnownComplete(thinkingKnownComplete)
                 .build();
+    }
+
+    /**
+     * aichatoverview#351：窗口思考 envelope（与消息范围完整性独立）。
+     *
+     * <p>触发集合固定为本窗口可见消息 id；思考授权独立于消息授权，
+     * 成员闸门失败仅 thinkingAccess=false（隐藏卡片与正文），不影响消息；
+     * 泛化错误仅 thinkingComplete/thinkingKnownComplete=false（失败语义），
+     * 不伪装成功空、不移除调用方既有元数据。</p>
+     */
+    private static final class ThinkingWindow {
+        boolean access = true;
+        boolean complete = true;
+        boolean knownComplete = true;
+        List<String> triggers = new ArrayList<>();
+        List<com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp> items = new ArrayList<>();
+        List<MsgWindowResp.ThinkingKnownReceipt> receipts = new ArrayList<>();
+    }
+
+    private ThinkingWindow loadThinkingWindow(MsgWindowReq req, Long roomId, Long receiveUid,
+                                             List<Message> visible) {
+        ThinkingWindow window = new ThinkingWindow();
+        List<Long> triggerIds = visible.stream()
+                .map(Message::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+        // 回显实际查询的固定集合（上限 100）；溢出时 complete=false，调用方在固定集合内续取。
+        MsgWindowSupport.CappedTriggers capped = MsgWindowSupport.capTriggers(triggerIds);
+        window.triggers = capped.queried.stream().map(String::valueOf).collect(Collectors.toList());
+        List<Long> queryTriggers = capped.queried;
+        if (!capped.complete) {
+            // 思考集合溢出：在固定 trigger 集合内续取，本次不按缺项移除。
+            window.complete = false;
+        }
+        if (!queryTriggers.isEmpty()) {
+            try {
+                window.items = thinkingService.listThinkingByTriggerMsgIds(roomId, receiveUid, queryTriggers);
+            } catch (BizException e) {
+                // 明确思考无权：隐藏卡片与正文，不等同于消息失权。
+                window.access = false;
+                window.items = new ArrayList<>();
+                window.complete = false;
+            } catch (RuntimeException e) {
+                log.warn("msgWindow thinking query failed, roomId={}", roomId, e);
+                window.items = new ArrayList<>();
+                window.complete = false;
+            }
+        }
+        if (req.getKnownThinkingIds() != null) {
+            for (String knownId : req.getKnownThinkingIds()) {
+                Long id = MsgWindowSupport.parseId(knownId, "knownThinkingIds");
+                boolean available = false;
+                com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp metadata = null;
+                try {
+                    com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp detail =
+                            thinkingService.reviewThinking(id, receiveUid);
+                    if (detail != null && roomId.toString().equals(detail.getRoomId())) {
+                        available = true;
+                        metadata = com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp.builder()
+                                .id(id)
+                                .aiclawUid(detail.getAiclawUid() == null ? null
+                                        : Long.valueOf(detail.getAiclawUid()))
+                                .triggerMsgId(detail.getTriggerMsgId() == null ? null
+                                        : Long.valueOf(detail.getTriggerMsgId()))
+                                .status(detail.getStatus())
+                                .durationMs(detail.getDurationMs())
+                                .hasResponse(detail.getHasResponse())
+                                .createTime(detail.getCreateTime())
+                                .bodyETag(detail.getBodyETag())
+                                .build();
+                    }
+                } catch (BizException e) {
+                    // 统一 unavailable，不透露物理不存在、跨房间或逻辑删除原因。
+                    available = false;
+                } catch (RuntimeException e) {
+                    log.warn("msgWindow thinking receipt failed, thinkingId={}", knownId, e);
+                    window.knownComplete = false;
+                }
+                window.receipts.add(MsgWindowResp.ThinkingKnownReceipt.builder()
+                        .id(knownId).available(available).metadata(available ? metadata : null).build());
+            }
+        }
+        return window;
     }
 
 	//	@Cacheable(value = "userRooms", key = "#uid", unless = "#result == null")

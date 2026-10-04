@@ -51,6 +51,10 @@ public class MsgWindowReq {
     @Schema(description = "已知消息 id（十进制字符串），每个恰好一条回执")
     private List<String> knownMsgIds;
 
+    @Size(max = 100, message = "已知思考 id 最多 100 个")
+    @Schema(description = "已知思考 id（十进制字符串），每个恰好一条思考回执；思考回执与消息范围完整性独立")
+    private List<String> knownThinkingIds;
+
     @Min(value = 1, message = "pageSize 最小为 1")
     @Max(value = 100, message = "pageSize 最大为 100")
     @Schema(description = "范围返回上限，缺省 20")

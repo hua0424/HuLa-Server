@@ -136,4 +136,30 @@ class MsgWindowSupportTest {
                 MessageStatusEnum.NORMAL.getStatus()), 10L, null, Set.of("200")));
         assertFalse(MsgWindowSupport.isVisible(null, 10L, null, Set.of()));
     }
+
+    @Test
+    @DisplayName("#351 capTriggers：空集完整、百内全查、溢出封顶 100 且 complete=false")
+    void capTriggers() {
+        MsgWindowSupport.CappedTriggers empty = MsgWindowSupport.capTriggers(new ArrayList<>());
+        assertTrue(empty.complete);
+        assertTrue(empty.queried.isEmpty());
+
+        List<Long> under = new ArrayList<>();
+        for (long i = 1; i <= 20; i++) {
+            under.add(i);
+        }
+        MsgWindowSupport.CappedTriggers full = MsgWindowSupport.capTriggers(under);
+        assertTrue(full.complete);
+        assertEquals(20, full.queried.size());
+
+        List<Long> over = new ArrayList<>();
+        for (long i = 1; i <= 101; i++) {
+            over.add(i);
+        }
+        MsgWindowSupport.CappedTriggers capped = MsgWindowSupport.capTriggers(over);
+        assertFalse(capped.complete);
+        assertEquals(100, capped.queried.size());
+        assertEquals(1L, capped.queried.get(0));
+        assertEquals(100L, capped.queried.get(99));
+    }
 }
