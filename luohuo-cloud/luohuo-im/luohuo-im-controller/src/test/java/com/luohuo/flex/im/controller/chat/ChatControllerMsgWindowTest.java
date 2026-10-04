@@ -1,7 +1,9 @@
 package com.luohuo.flex.im.controller.chat;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.luohuo.basic.context.ContextUtil;
+import com.luohuo.basic.jackson.LuohuoJacksonModule;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
@@ -23,6 +25,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -108,5 +112,40 @@ class ChatControllerMsgWindowTest {
                             .content("{\"mode\":\"tail\",\"pageSize\":20}"))
                     .andExpect(status().isBadRequest());
         }
+    }
+
+    @Test
+    @DisplayName("window#350 wire-compat：非空 bounds 经全局 Long→String 模块后 timeMs 仍为数字")
+    void windowNonEmptyBoundsTimeMsIsNumeric() throws Exception {
+        // 真实包体值（verify wire3.json）：此前 coveredLower/Upper 全为 null，从未覆盖；
+        // 全局 LuohuoJacksonModule 把 Long（含 timeMs）转字符串，导致 Rust Option<i64> 解码失败。
+        MsgWindowResp envelope = MsgWindowResp.builder()
+                .schemaVersion(MsgWindowResp.SCHEMA_VERSION)
+                .capabilities(MsgWindowResp.CAPABILITIES)
+                .requestId("wcal-wire3")
+                .roomId(175988626166784L)
+                .items(List.of())
+                .coveredLower(MsgWindowResp.WindowBound.builder()
+                        .timeMs(1791070187188L).id("212834869724672").build())
+                .coveredUpper(MsgWindowResp.WindowBound.builder()
+                        .timeMs(1791112189184L).id("213011038881280").build())
+                .complete(false)
+                .knownReceipts(List.of())
+                .knownComplete(true)
+                .messagesAccess(true)
+                .messageMaxId(213062402328064L)
+                .build();
+        ObjectMapper wireMapper = new ObjectMapper().registerModule(new LuohuoJacksonModule());
+        JsonNode data = wireMapper.valueToTree(envelope);
+        // timeMs 必须数字（与 send_time 同源）；ID 类保持字符串（JS 精度保护）。
+        assertTrue(data.get("coveredLower").get("timeMs").isNumber(),
+                "coveredLower.timeMs 应为数字，实际=" + data.get("coveredLower").get("timeMs"));
+        assertTrue(data.get("coveredUpper").get("timeMs").isNumber(),
+                "coveredUpper.timeMs 应为数字，实际=" + data.get("coveredUpper").get("timeMs"));
+        assertEquals(1791070187188L, data.get("coveredLower").get("timeMs").asLong());
+        assertEquals(1791112189184L, data.get("coveredUpper").get("timeMs").asLong());
+        assertTrue(data.get("roomId").isTextual(), "roomId 保持字符串，实际=" + data.get("roomId"));
+        assertTrue(data.get("messageMaxId").isTextual(),
+                "messageMaxId 保持字符串，实际=" + data.get("messageMaxId"));
     }
 }

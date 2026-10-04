@@ -1,5 +1,9 @@
 package com.luohuo.flex.im.domain.vo.res;
 
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.JsonSerializer;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.AllArgsConstructor;
@@ -7,6 +11,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.io.IOException;
 import java.util.List;
 
 /**
@@ -70,7 +75,26 @@ public class MsgWindowResp {
     @AllArgsConstructor
     @NoArgsConstructor
     public static class WindowBound {
-        @Schema(description = "呈现时间（毫秒 epoch，与客户端 send_time 同源）")
+        /**
+         * aichatoverview#350 wire-compat：全局 LuohuoJacksonModule 把 Long 转字符串
+         *（JS 精度保护，ID 保持字符串正确），但 timeMs 是时间（与 send_time 同源，
+         *毫秒值远小于 2^53），必须输出数字；客户端 Rust Option&lt;i64&gt; 只认数字。
+         *显式按字段覆盖为数字；messageMaxId/roomId 等 ID 保持全局字符串，不动。
+         */
+        public static class LongAsNumberSerializer extends JsonSerializer<Long> {
+            @Override
+            public void serialize(Long value, JsonGenerator gen, SerializerProvider serializers)
+                    throws IOException {
+                if (value == null) {
+                    gen.writeNull();
+                } else {
+                    gen.writeNumber(value.longValue());
+                }
+            }
+        }
+
+        @Schema(description = "呈现时间（毫秒 epoch，与客户端 send_time 同源，数字）")
+        @JsonSerialize(using = LongAsNumberSerializer.class)
         private Long timeMs;
         @Schema(description = "消息 id（十进制字符串）")
         private String id;
