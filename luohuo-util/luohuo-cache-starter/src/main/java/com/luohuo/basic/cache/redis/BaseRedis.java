@@ -761,7 +761,33 @@ public abstract class BaseRedis {
 		Map<String, T> collect = map.entrySet().stream().collect(Collectors.toMap(entry -> entry.getKey(), (e) -> e.getValue()));
 		valueOps.multiSet(collect);
 		if (time > 0) {
-			map.forEach((key, value) -> expire(key, time));
+			expireBatch(new ArrayList<>(map.keySet()), time);
+		}
+	}
+
+	/**
+	 * MSET 成功后分批 pipeline 提交 TTL，每批同步等待确认后返回（非 fire-and-forget）。
+	 * pipeline 非事务：MSET 失败不进入本阶段；某批失败/超时原样抛给调用方，不重放 MSET；
+	 * 已提交命令可能已生效的残留与旧逐 key fail-fast 前缀不保证一致，见 huaaichat/aichatoverview#367。
+	 */
+	private void expireBatch(List<String> keys, long seconds) {
+		if (keys.isEmpty()) {
+			return;
+		}
+		RedisSerializer<String> keySerializer = (RedisSerializer<String>) redisTemplate.getKeySerializer();
+		for (List<String> batch : Lists.partition(keys, BATCH_SIZE)) {
+			try {
+				redisTemplate.executePipelined((RedisCallback<Object>) conn -> {
+					for (String key : batch) {
+						conn.expire(keySerializer.serialize(key), seconds);
+					}
+					return null;
+				});
+			} catch (RuntimeException e) {
+				// ponytail: 脱敏计数日志，不记 key/value 明文
+				log.warn("mSet ttl pipeline failed: batchSize={} expireSeconds={}", batch.size(), seconds, e);
+				throw e;
+			}
 		}
 	}
 
