@@ -344,6 +344,8 @@ class ThinkingServiceTest {
 			assertEquals("完整的思考内容", resp.getContent());
 			assertEquals(1, resp.getStatus());
 			assertEquals(1234, resp.getDurationMs());
+			// aichatoverview#351：detail ETag 与元数据同一正文字节算出。
+			assertEquals(ThinkingBodyHash.sha256Hex("完整的思考内容"), resp.getBodyETag());
 		}
 
 		@Test
@@ -552,7 +554,7 @@ class ThinkingServiceTest {
 			when(groupMemberCache.getMemberUidList(ROOM_ID)).thenReturn(List.of(100L, CALLER_UID, 999L));
 		}
 
-		/** 构造一行 thinking（元数据）；mapper 实际不 select content，这里 content 留空即可。 */
+		/** 构造一行 thinking（元数据）；content 仅 mapper 附带查出供服务端算 ETag，不进入响应体。 */
 		private AiclawThinking row(long id, long aiclawUid, long triggerMsgId) {
 			AiclawThinking t = AiclawThinking.builder()
 					.aiclawUid(aiclawUid)
@@ -588,8 +590,32 @@ class ThinkingServiceTest {
 			assertEquals(1, first.getHasResponse());
 			assertNotNull(first.getCreateTime());
 			// 元数据 only：resp 项没有 content 字段（AiclawThinkingListItemResp 本身不含 content）——
-			// mapper 也刻意不 select content，此处以 mapper 契约 + resp 类型双重保证。
+			// mapper 附带查出的 content 只用于服务端算 bodyETag，此处以 mapper 契约 + resp 类型双重保证。
 			verify(thinkingMapper).selectThinkingListByTriggerMsgIds(ROOM_ID, triggerIds);
+		}
+
+		@Test
+		@DisplayName("#351：元数据 bodyETag 与同一正文的 detail ETag 一致（只判相等）")
+		void member_bodyETagMatchesDetailBytes() {
+			stubMember();
+			List<Long> triggerIds = List.of(7001L);
+			AiclawThinking withBody = row(7L, 100L, 7001L);
+			withBody.setContent("完整的思考内容");
+			AiclawThinking emptyBody = row(8L, 200L, 7001L);
+			emptyBody.setContent("");
+			AiclawThinking noBody = row(9L, 300L, 7001L);
+			noBody.setContent(null);
+			when(thinkingMapper.selectThinkingListByTriggerMsgIds(ROOM_ID, triggerIds))
+					.thenReturn(List.of(withBody, emptyBody, noBody));
+
+			List<AiclawThinkingListItemResp> resp =
+					thinkingService.listThinkingByTriggerMsgIds(ROOM_ID, CALLER_UID, triggerIds);
+
+			assertEquals(3, resp.size());
+			assertEquals(ThinkingBodyHash.sha256Hex("完整的思考内容"), resp.get(0).getBodyETag());
+			// 成功空正文有效：空串有确定 ETag；null 正文无 ETag。
+			assertEquals(ThinkingBodyHash.sha256Hex(""), resp.get(1).getBodyETag());
+			assertNull(resp.get(2).getBodyETag());
 		}
 
 		@Test

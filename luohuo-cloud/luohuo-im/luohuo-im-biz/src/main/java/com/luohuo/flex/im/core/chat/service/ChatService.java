@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.chat.service;
 
 import com.luohuo.flex.im.domain.vo.request.*;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
+import com.luohuo.flex.im.domain.vo.res.MsgWindowResp;
 import com.luohuo.flex.im.domain.dto.MsgReadInfoDTO;
 import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.vo.response.ChatMessageReadResp;
@@ -49,6 +50,14 @@ public interface ChatService {
      * @param request
      */
     CursorPageBaseResp<ChatMessageResp> getMsgPage(ChatMessagePageReq request, @Nullable Long receiveUid);
+
+    /**
+     * aichatoverview#350：当前阅读窗口校准。
+     *
+     * <p>范围成员 + 逐已知 ID 回执在同一短 RR 一致性读内完成；只读权威库，
+     * 不经可能滞后的消息缓存判断存在或权限；不新增 DDL。
+     */
+    MsgWindowResp getMsgWindow(MsgWindowReq request, Long receiveUid);
 
     void setMsgMark(Long uid, ChatMessageMarkReq request);
 

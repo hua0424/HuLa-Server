@@ -30,11 +30,13 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.basic.validator.utils.AssertUtil;
 import com.luohuo.flex.model.redis.annotation.RedissonLock;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
+import com.luohuo.flex.im.domain.vo.res.MsgWindowResp;
 import com.luohuo.flex.im.common.event.MessageSendEvent;
 import com.luohuo.flex.im.domain.dto.ChatMsgSendDto;
 import com.luohuo.flex.im.domain.dto.MsgReadInfoDTO;
@@ -42,6 +44,7 @@ import com.luohuo.flex.im.domain.vo.response.ChatMessageReadResp;
 import com.luohuo.flex.model.entity.ws.ChatMessageResp;
 import com.luohuo.flex.im.core.chat.service.ChatService;
 import com.luohuo.flex.im.core.chat.service.ContactService;
+import com.luohuo.flex.im.core.chat.service.MsgWindowSupport;
 import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.adapter.RoomAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
@@ -482,6 +485,206 @@ public class ChatServiceImpl implements ChatService {
             return CursorPageBaseResp.empty();
         }
         return CursorPageBaseResp.init(cursorPage, getMsgRespBatch(cursorPage.getList(), receiveUid), cursorPage.getTotal());
+    }
+
+    /**
+     * aichatoverview#350：当前阅读窗口校准。
+     *
+     * <p>权限与历史上限直接复用 {@code check}/{@code getLastMsgId}，不扩大；
+     * 范围与已知项在同一短 RR 只读事务内读权威库（messageDao 直查，不经 msgCache），
+     * 展示昵称等辅助字段仍走既有批量回填，仅做显示，不做可见性证据。
+     */
+    @Override
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public MsgWindowResp getMsgWindow(MsgWindowReq req, Long receiveUid) {
+        AssertUtil.isNotEmpty(receiveUid, "请先登录");
+        Long roomId = req.getRoomId();
+        AssertUtil.isNotEmpty(roomId, "房间号有误");
+        check(false, false, false, roomId, receiveUid);
+        Long lastMsgId = getLastMsgId(roomId, receiveUid);
+
+        String mode = MsgWindowSupport.normalizeMode(req.getMode());
+        int pageSize = MsgWindowSupport.normalizePageSize(req.getPageSize());
+        LocalDateTime fromTime = MsgWindowSupport.floorToSecond(MsgWindowSupport.toDateTime(req.getFromTimeMs()));
+        Long fromId = MsgWindowSupport.parseId(req.getFromId(), "fromId");
+        LocalDateTime toTime = MsgWindowSupport.floorToSecond(MsgWindowSupport.toDateTime(req.getToTimeMs()));
+        Long toId = MsgWindowSupport.parseId(req.getToId(), "toId");
+        Set<String> blackMembers = userSummaryCache.getBlackMap()
+                .getOrDefault(BlackTypeEnum.UID.getType(), new HashSet<>());
+
+        List<Message> rows;
+        if (MsgWindowSupport.MODE_TAIL.equals(mode) && fromTime == null && fromId == null) {
+            rows = messageDao.lambdaQuery()
+                    .eq(Message::getRoomId, roomId)
+                    .eq(Message::getStatus, MessageStatusEnum.NORMAL.getStatus())
+                    .le(toTime != null, Message::getCreateTime, toTime)
+                    .le(toId != null && toTime == null, Message::getId, toId)
+                    .le(lastMsgId != null, Message::getId, lastMsgId)
+                    .orderByDesc(Message::getCreateTime).orderByDesc(Message::getId)
+                    .last("LIMIT " + (pageSize + 1)).list();
+            Collections.reverse(rows);
+        } else {
+            rows = messageDao.lambdaQuery()
+                    .eq(Message::getRoomId, roomId)
+                    .eq(Message::getStatus, MessageStatusEnum.NORMAL.getStatus())
+                    .ge(fromTime != null && fromId == null, Message::getCreateTime, fromTime)
+                    .ge(fromId != null && fromTime == null, Message::getId, fromId)
+                    .and(fromTime != null && fromId != null,
+                            w -> w.gt(Message::getCreateTime, fromTime).or(
+                                    or -> or.eq(Message::getCreateTime, fromTime).ge(Message::getId, fromId)))
+                    .le(toTime != null, Message::getCreateTime, toTime)
+                    .le(toId != null && toTime == null, Message::getId, toId)
+                    .le(lastMsgId != null, Message::getId, lastMsgId)
+                    .orderByAsc(Message::getCreateTime).orderByAsc(Message::getId)
+                    .last("LIMIT " + (pageSize + 1)).list();
+        }
+
+        MsgWindowSupport.RangedMessages ranged =
+                MsgWindowSupport.clip(rows, fromTime, fromId, toTime, toId, lastMsgId, pageSize);
+        List<Message> visible = ranged.items.stream()
+                .filter(m -> MsgWindowSupport.isVisible(m, roomId, lastMsgId, blackMembers))
+                .collect(Collectors.toList());
+        List<ChatMessageResp> items = getMsgRespBatch(visible, receiveUid);
+
+        MsgWindowResp.WindowBound lower = null;
+        MsgWindowResp.WindowBound upper = null;
+        if (!visible.isEmpty()) {
+            Message first = visible.get(0);
+            Message last = visible.get(visible.size() - 1);
+            lower = MsgWindowResp.WindowBound.builder()
+                    .timeMs(MsgWindowSupport.toTimeMs(first.getCreateTime())).id(first.getId().toString()).build();
+            upper = MsgWindowResp.WindowBound.builder()
+                    .timeMs(MsgWindowSupport.toTimeMs(last.getCreateTime())).id(last.getId().toString()).build();
+        }
+
+        List<MsgWindowResp.KnownReceipt> receipts = new ArrayList<>();
+        if (req.getKnownMsgIds() != null) {
+            for (String knownId : req.getKnownMsgIds()) {
+                Long id = MsgWindowSupport.parseId(knownId, "knownMsgIds");
+                Message row = id == null ? null : messageDao.getById(id);
+                boolean available = MsgWindowSupport.isVisible(row, roomId, lastMsgId, blackMembers);
+                ChatMessageResp content = null;
+                if (available) {
+                    content = getMsgRespBatch(Collections.singletonList(row), receiveUid).get(0);
+                }
+                receipts.add(MsgWindowResp.KnownReceipt.builder()
+                        .id(knownId).available(available).message(content).build());
+            }
+        }
+
+        // aichatoverview#351：思考 envelope 独立于消息范围完整性；失败不影响消息。
+        ThinkingWindow thinking = loadThinkingWindow(req, roomId, receiveUid, visible);
+        boolean thinkingAccess = thinking.access;
+        List<String> thinkingTriggerStrs = thinking.triggers;
+        List<com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp> thinkingItems = thinking.items;
+        boolean thinkingComplete = thinking.complete;
+        List<MsgWindowResp.ThinkingKnownReceipt> thinkingReceipts = thinking.receipts;
+        boolean thinkingKnownComplete = thinking.knownComplete;
+
+        return MsgWindowResp.builder()
+                .schemaVersion(MsgWindowResp.SCHEMA_VERSION)
+                .capabilities(MsgWindowResp.CAPABILITIES)
+                .requestId(req.getRequestId())
+                .roomId(roomId)
+                .items(items)
+                .coveredLower(lower)
+                .coveredUpper(upper)
+                .complete(ranged.complete)
+                .knownReceipts(receipts)
+                .knownComplete(true)
+                .messagesAccess(true)
+                .messageMaxId(lastMsgId)
+                .thinkingAccess(thinkingAccess)
+                .thinkingTriggers(thinkingTriggerStrs)
+                .thinkingItems(thinkingItems)
+                .thinkingComplete(thinkingComplete)
+                .thinkingKnownReceipts(thinkingReceipts)
+                .thinkingKnownComplete(thinkingKnownComplete)
+                .build();
+    }
+
+    /**
+     * aichatoverview#351：窗口思考 envelope（与消息范围完整性独立）。
+     *
+     * <p>触发集合固定为本窗口可见消息 id；思考授权独立于消息授权，
+     * 成员闸门失败仅 thinkingAccess=false（隐藏卡片与正文），不影响消息；
+     * 泛化错误仅 thinkingComplete/thinkingKnownComplete=false（失败语义），
+     * 不伪装成功空、不移除调用方既有元数据。</p>
+     */
+    private static final class ThinkingWindow {
+        boolean access = true;
+        boolean complete = true;
+        boolean knownComplete = true;
+        List<String> triggers = new ArrayList<>();
+        List<com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp> items = new ArrayList<>();
+        List<MsgWindowResp.ThinkingKnownReceipt> receipts = new ArrayList<>();
+    }
+
+    private ThinkingWindow loadThinkingWindow(MsgWindowReq req, Long roomId, Long receiveUid,
+                                             List<Message> visible) {
+        ThinkingWindow window = new ThinkingWindow();
+        List<Long> triggerIds = visible.stream()
+                .map(Message::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+        // 回显实际查询的固定集合（上限 100）；溢出时 complete=false，调用方在固定集合内续取。
+        MsgWindowSupport.CappedTriggers capped = MsgWindowSupport.capTriggers(triggerIds);
+        window.triggers = capped.queried.stream().map(String::valueOf).collect(Collectors.toList());
+        List<Long> queryTriggers = capped.queried;
+        if (!capped.complete) {
+            // 思考集合溢出：在固定 trigger 集合内续取，本次不按缺项移除。
+            window.complete = false;
+        }
+        if (!queryTriggers.isEmpty()) {
+            try {
+                window.items = thinkingService.listThinkingByTriggerMsgIds(roomId, receiveUid, queryTriggers);
+            } catch (BizException e) {
+                // 明确思考无权：隐藏卡片与正文，不等同于消息失权。
+                window.access = false;
+                window.items = new ArrayList<>();
+                window.complete = false;
+            } catch (RuntimeException e) {
+                log.warn("msgWindow thinking query failed, roomId={}", roomId, e);
+                window.items = new ArrayList<>();
+                window.complete = false;
+            }
+        }
+        if (req.getKnownThinkingIds() != null) {
+            for (String knownId : req.getKnownThinkingIds()) {
+                Long id = MsgWindowSupport.parseId(knownId, "knownThinkingIds");
+                boolean available = false;
+                com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp metadata = null;
+                try {
+                    com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp detail =
+                            thinkingService.reviewThinking(id, receiveUid);
+                    if (detail != null && roomId.toString().equals(detail.getRoomId())) {
+                        available = true;
+                        metadata = com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp.builder()
+                                .id(id)
+                                .aiclawUid(detail.getAiclawUid() == null ? null
+                                        : Long.valueOf(detail.getAiclawUid()))
+                                .triggerMsgId(detail.getTriggerMsgId() == null ? null
+                                        : Long.valueOf(detail.getTriggerMsgId()))
+                                .status(detail.getStatus())
+                                .durationMs(detail.getDurationMs())
+                                .hasResponse(detail.getHasResponse())
+                                .createTime(detail.getCreateTime())
+                                .bodyETag(detail.getBodyETag())
+                                .build();
+                    }
+                } catch (BizException e) {
+                    // 统一 unavailable，不透露物理不存在、跨房间或逻辑删除原因。
+                    available = false;
+                } catch (RuntimeException e) {
+                    log.warn("msgWindow thinking receipt failed, thinkingId={}", knownId, e);
+                    window.knownComplete = false;
+                }
+                window.receipts.add(MsgWindowResp.ThinkingKnownReceipt.builder()
+                        .id(knownId).available(available).metadata(available ? metadata : null).build());
+            }
+        }
+        return window;
     }
 
 	//	@Cacheable(value = "userRooms", key = "#uid", unless = "#result == null")

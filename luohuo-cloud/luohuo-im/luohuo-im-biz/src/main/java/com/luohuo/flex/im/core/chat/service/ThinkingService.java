@@ -371,8 +371,12 @@ public class ThinkingService {
 				.triggerMsgId(thinking.getTriggerMsgId() == null ? null : String.valueOf(thinking.getTriggerMsgId()))
 				.clientRunId(thinking.getClientRunId())
 				.content(thinking.getContent())
+				// aichatoverview#351：与元数据同一正文字节算出，只判相等，不做时序或权限推断。
+				.bodyETag(ThinkingBodyHash.sha256Hex(thinking.getContent()))
 				.status(thinking.getStatus())
 				.durationMs(thinking.getDurationMs())
+				.hasResponse(thinking.getHasResponse())
+				.createTime(thinking.getCreateTime())
 				.build();
 	}
 
@@ -384,7 +388,8 @@ public class ThinkingService {
 	 *   <li><b>成员闸门</b>：复用 {@link #checkCurrentUserMembership(Long, Long)}，非成员抛统一
 	 *       {@code BizException}，与 {@code reviewThinking} 同一 IDOR 防护；授权在查询之前。</li>
 	 *   <li><b>元数据 only</b>：不返回全文 content（单行可达 200KB），只回 id/aiclawUid/triggerMsgId/
-	 *       status/durationMs/hasResponse/createTime；全文由 {@link #reviewThinking} 按需拉取。</li>
+	 *       status/durationMs/hasResponse/createTime/bodyETag；全文由 {@link #reviewThinking} 按需拉取。
+	 *       bodyETag 与 detail 由同一正文字节算出，只判相等。</li>
 	 *   <li><b>id 升序</b>：mapper 按 id ASC 返回（雪花 ID 近似时间序）；同一 triggerMsgId 可有多条
 	 *       （多 aiclaw），均返回。</li>
 	 * </ul>
@@ -409,6 +414,7 @@ public class ThinkingService {
 						.durationMs(t.getDurationMs())
 						.hasResponse(t.getHasResponse())
 						.createTime(t.getCreateTime())
+						.bodyETag(ThinkingBodyHash.sha256Hex(t.getContent()))
 						.build())
 				.collect(java.util.stream.Collectors.toList());
 	}
