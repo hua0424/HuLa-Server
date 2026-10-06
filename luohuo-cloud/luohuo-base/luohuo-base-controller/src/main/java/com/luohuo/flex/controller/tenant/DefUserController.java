@@ -168,7 +168,7 @@ public class DefUserController extends SuperExcelController<DefUserService, Long
 		if (userId != null) {
 			try {
 				for (String tv : StpUtil.getTokenValueListByLoginId(userId)) {
-					SaSession sess = StpUtil.getTokenSessionByToken(tv);
+					SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(tv, false);
                     clearSessionRefreshTokens(sess);
 				}
                 deleteTempTokensByLoginId(userId);
@@ -179,7 +179,7 @@ public class DefUserController extends SuperExcelController<DefUserService, Long
 		}
 		if (StrUtil.isNotEmpty(token)) {
 			try {
-				SaSession sess = StpUtil.getTokenSessionByToken(token);
+				SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(token, false);
 				Object loginId = sess != null ? sess.getLoginId() : null;
                 clearSessionRefreshTokens(sess);
                 deleteTempTokensByLoginId(loginId);
@@ -239,7 +239,7 @@ public class DefUserController extends SuperExcelController<DefUserService, Long
 		if (userId != null) {
 			try {
 				for (String tv : StpUtil.getTokenValueListByLoginId(userId)) {
-					SaSession sess = StpUtil.getTokenSessionByToken(tv);
+					SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(tv, false);
                     clearSessionRefreshTokens(sess);
 				}
                 deleteTempTokensByLoginId(userId);
@@ -250,7 +250,7 @@ public class DefUserController extends SuperExcelController<DefUserService, Long
 		}
 		if (StrUtil.isNotEmpty(token)) {
 			try {
-				SaSession sess = StpUtil.getTokenSessionByToken(token);
+				SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(token, false);
 				Object loginId = sess != null ? sess.getLoginId() : null;
                 clearSessionRefreshTokens(sess);
                 deleteTempTokensByLoginId(loginId);
@@ -317,7 +317,12 @@ public class DefUserController extends SuperExcelController<DefUserService, Long
 		for (SaTerminalInfo tokenSign : tokenSignList) {
 			OnlineTokenResultVO bean = BeanUtil.toBean(tokenSign, OnlineTokenResultVO.class);
 			try {
-				SaSession tokenSession = StpUtil.getTokenSessionByToken(tokenSign.getTokenValue());
+				// #368：只读不断言存在，不自动创建空会话（防迟到空对象覆盖基础字段）
+				SaSession tokenSession = StpUtil.stpLogic.getTokenSessionByToken(tokenSign.getTokenValue(), false);
+				if (tokenSession == null) {
+					loginUserList.add(bean);
+					continue;
+				}
 
 				bean.setSessionTime(DateUtils.getDateTimeOfTimestamp(tokenSession.getCreateTime()));
 				bean.setExpireTime(DateUtils.getDateTimeOfTimestamp(System.currentTimeMillis() + tokenSession.timeout() * 1000));
