@@ -191,7 +191,12 @@ public class RefreshTokenGranter {
         if (CollUtil.isNotEmpty(sameDeviceTokens)) {
             for (String token : sameDeviceTokens) {
                 try {
-                    String clientId = StpUtil.getTokenSessionByToken(token).getString(CLIENT_ID);
+                    // #368：只读枚举到的会话，不自动创建空会话（防迟到空对象覆盖基础字段）
+                    SaSession kickSession = StpUtil.stpLogic.getTokenSessionByToken(token, false);
+                    if (kickSession == null) {
+                        continue;
+                    }
+                    String clientId = kickSession.getString(CLIENT_ID);
                     if (currentClientId == null || !currentClientId.equals(clientId)) {
                         StpUtil.kickoutByTokenValue(token);
                         log.info("刷新token时已踢出旧会话: token={}", token);

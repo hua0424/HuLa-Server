@@ -507,7 +507,12 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 		if (CollUtil.isNotEmpty(sameDeviceTokens)) {
 			for (String token : sameDeviceTokens) {
 				try {
-					String clientId = StpUtil.getTokenSessionByToken(token).getString(CLIENT_ID);
+					// #368：只读枚举到的会话，不自动创建空会话（防迟到空对象覆盖基础字段）
+					SaSession kickSession = StpUtil.stpLogic.getTokenSessionByToken(token, false);
+					if (kickSession == null) {
+						continue;
+					}
+					String clientId = kickSession.getString(CLIENT_ID);
 					StpUtil.kickout(token);
 					log.info("已踢出会话: token={}", token);
 
@@ -546,7 +551,10 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 				}
 				List<String> tokenValuesAll = StpUtil.getTokenValueListByLoginId(loginId);
 				for (String tv : tokenValuesAll) {
-					SaSession sess = StpUtil.getTokenSessionByToken(tv);
+					SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(tv, false);
+					if (sess == null) {
+						continue;
+					}
 					Object obj = sess.get("refreshTokens");
 					if (obj instanceof List) {
 						for (Object rto : (List<?>) obj) {
@@ -572,7 +580,8 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 			// 3. 清理同设备类型的其他 Token（确保互斥）
 			List<String> tokens = StpUtil.getTokenValueListByLoginId(loginId);
 			tokens.forEach(token -> {
-				if (deviceType.equals(StpUtil.getTokenSessionByToken(token).get(JWT_KEY_DEVICE))) {
+				SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(token, false);
+				if (sess != null && deviceType.equals(sess.get(JWT_KEY_DEVICE))) {
 					StpUtil.kickoutByTokenValue(token);
 				}
 			});
