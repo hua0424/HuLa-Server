@@ -73,7 +73,9 @@ import org.jetbrains.annotations.Nullable;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static com.luohuo.basic.context.ContextConstants.*;
 
@@ -394,37 +396,40 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 		String loginId = userInfo.getId().toString();
 		StpUtil.login(loginId, combinedDeviceType);
 
-		// 2. 配置登录设备、租户信息等等
+		// 2. 配置登录设备、租户信息等等：基础字段一次提交（快照副本 + refreshDataMap，
+		// 1次持久化代替8次逐字段update；未知扩展字段随快照保留；副本入参避免clear误伤live Map）
 		SaSession tokenSession = StpUtil.getTokenSession();
 		tokenSession.setLoginId(userInfo.getId());
-		tokenSession.set(JWT_KEY_SYSTEM_TYPE, userInfo.getSystemType());
-		tokenSession.set(JWT_KEY_DEVICE, deviceType);
-		tokenSession.set(CLIENT_ID, clientId);
+		Map<String, Object> baseFields = new HashMap<>(tokenSession.getDataMap());
+		baseFields.put(JWT_KEY_SYSTEM_TYPE, userInfo.getSystemType());
+		baseFields.put(JWT_KEY_DEVICE, deviceType);
+		baseFields.put(CLIENT_ID, clientId);
 		if (org.getCurrentTopCompanyId() != null) {
-			tokenSession.set(JWT_KEY_TOP_COMPANY_ID, org.getCurrentTopCompanyId());
+			baseFields.put(JWT_KEY_TOP_COMPANY_ID, org.getCurrentTopCompanyId());
 		} else {
-			tokenSession.delete(JWT_KEY_TOP_COMPANY_ID);
+			baseFields.remove(JWT_KEY_TOP_COMPANY_ID);
 		}
 		if (org.getCurrentCompanyId() != null) {
-			tokenSession.set(JWT_KEY_COMPANY_ID, org.getCurrentCompanyId());
+			baseFields.put(JWT_KEY_COMPANY_ID, org.getCurrentCompanyId());
 		} else {
-			tokenSession.delete(JWT_KEY_COMPANY_ID);
+			baseFields.remove(JWT_KEY_COMPANY_ID);
 		}
 		if (org.getCurrentDeptId() != null) {
-			tokenSession.set(JWT_KEY_DEPT_ID, org.getCurrentDeptId());
+			baseFields.put(JWT_KEY_DEPT_ID, org.getCurrentDeptId());
 		} else {
-			tokenSession.delete(JWT_KEY_DEPT_ID);
+			baseFields.remove(JWT_KEY_DEPT_ID);
 		}
 		if (userInfo.getId() != null) {
-			tokenSession.set(JWT_KEY_U_ID, uid);
+			baseFields.put(JWT_KEY_U_ID, uid);
 		} else {
-			tokenSession.delete(JWT_KEY_U_ID);
+			baseFields.remove(JWT_KEY_U_ID);
 		}
 		if (userInfo.getTenantId() != null) {
-			tokenSession.set(HEADER_TENANT_ID, userInfo.getTenantId());
+			baseFields.put(HEADER_TENANT_ID, userInfo.getTenantId());
 		} else {
-			tokenSession.delete(HEADER_TENANT_ID);
+			baseFields.remove(HEADER_TENANT_ID);
 		}
+		tokenSession.refreshDataMap(baseFields);
 
 		// 3. 保存权限列表和角色列表到 Session; Gateway 是响应式的，不能直接查询数据库，所以从 Session 中读取
 		if(userInfo.getSystemType().equals(LoginEnum.MANAGER.getVal())){
@@ -502,7 +507,12 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 		if (CollUtil.isNotEmpty(sameDeviceTokens)) {
 			for (String token : sameDeviceTokens) {
 				try {
-					String clientId = StpUtil.getTokenSessionByToken(token).getString(CLIENT_ID);
+					// #368：只读枚举到的会话，不自动创建空会话（防迟到空对象覆盖基础字段）
+					SaSession kickSession = StpUtil.stpLogic.getTokenSessionByToken(token, false);
+					if (kickSession == null) {
+						continue;
+					}
+					String clientId = kickSession.getString(CLIENT_ID);
 					StpUtil.kickout(token);
 					log.info("已踢出会话: token={}", token);
 
@@ -541,7 +551,10 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 				}
 				List<String> tokenValuesAll = StpUtil.getTokenValueListByLoginId(loginId);
 				for (String tv : tokenValuesAll) {
-					SaSession sess = StpUtil.getTokenSessionByToken(tv);
+					SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(tv, false);
+					if (sess == null) {
+						continue;
+					}
 					Object obj = sess.get("refreshTokens");
 					if (obj instanceof List) {
 						for (Object rto : (List<?>) obj) {
@@ -567,7 +580,8 @@ public abstract class AbstractTokenGranter implements TokenGranter {
 			// 3. 清理同设备类型的其他 Token（确保互斥）
 			List<String> tokens = StpUtil.getTokenValueListByLoginId(loginId);
 			tokens.forEach(token -> {
-				if (deviceType.equals(StpUtil.getTokenSessionByToken(token).get(JWT_KEY_DEVICE))) {
+				SaSession sess = StpUtil.stpLogic.getTokenSessionByToken(token, false);
+				if (sess != null && deviceType.equals(sess.get(JWT_KEY_DEVICE))) {
 					StpUtil.kickoutByTokenValue(token);
 				}
 			});
