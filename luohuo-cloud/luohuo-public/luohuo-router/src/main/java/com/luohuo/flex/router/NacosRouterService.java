@@ -66,12 +66,11 @@ public class NacosRouterService {
 	 */
 	public String getDeviceNode(Long uid, String clientId) {
 		// 1. 直接从全局Hash中获取设备对应的节点
+		// #345: 非 String 值（NullVal 残留）视为无路由，不强转（残留清理由 findNodeDeviceUser 全量扫描承担）
 		String deviceField = uid + ":" + clientId;
 		CacheHashKey deviceNodeMap = RouterCacheKeyBuilder.buildDeviceNodeMap(deviceField);
-		String nodeId = (String) redisTemplate.opsForHash().get(deviceNodeMap.getKey(), deviceField);
-
-		// 2. 如果节点不存在，直接返回null
-		if (nodeId == null) {
+		Object rawNode = redisTemplate.opsForHash().get(deviceNodeMap.getKey(), deviceField);
+		if (!(rawNode instanceof String nodeId)) {
 			return null;
 		}
 
@@ -150,11 +149,20 @@ public class NacosRouterService {
 				Map.Entry<Object, Object> entry = cursor.next();
 
 				// 5.1 直接使用字符串类型
-				String field = (String) entry.getKey();
-				String nodeId = (String) entry.getValue();
+				// #345: 非 String 值（历史 hGet 默认空值缓存写入的 NullVal 残留，无 TTL）——
+				// 强转会 CCE 中断整次路由解析（WS 推送整链路失败）。即时删除该残留 field，
+				// 等同无路由；全量 HSCAN 保证存量残留最多存活到本次扫描
+				Object rawNode = entry.getValue();
+				if (!(rawNode instanceof String nodeId)) {
+					log.warn("清除路由 hash 非 String 残留值: field={}, valueType={}", entry.getKey(),
+							rawNode == null ? "null" : rawNode.getClass().getName());
+					redisTemplate.opsForHash().delete(deviceNodeMap.getKey(), entry.getKey());
+					continue;
+				}
 				if (activeNodes != null && !activeNodes.contains(nodeId)) continue;
 
 				// 5.2 按uid过滤目标用户
+				String field = (String) entry.getKey();
 				String[] parts = field.split(":");
 				if (parts.length != 2) continue;
 

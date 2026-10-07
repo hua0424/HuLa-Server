@@ -169,7 +169,7 @@ class NacosSessionRegistryTest {
 		// given: 本节点两个活跃设备，Redis 路由均缺失
 		when(sessionManager.getActiveDevices())
 				.thenReturn(Map.of(100L, Set.of("clientA"), 200L, Set.of("clientB")));
-		when(cachePlusOps.hGet(any()))
+		when(cachePlusOps.hGet(any(), eq(false)))
 				.thenReturn(new CacheResult<>(RouterCacheKeyBuilder.buildDeviceNodeMap("100:clientA"), null));
 
 		// when
@@ -185,7 +185,7 @@ class NacosSessionRegistryTest {
 	void selfHealRoutes_skipsWhenAlreadyOnThisNode() {
 		// given: 活跃设备路由已指向本节点
 		when(sessionManager.getActiveDevices()).thenReturn(Map.of(100L, Set.of("clientA")));
-		when(cachePlusOps.hGet(any()))
+		when(cachePlusOps.hGet(any(), eq(false)))
 				.thenReturn(new CacheResult<>(RouterCacheKeyBuilder.buildDeviceNodeMap("100:clientA"), NODE_ID));
 
 		// when
@@ -200,7 +200,7 @@ class NacosSessionRegistryTest {
 	void selfHealRoutes_doesNotStealWhenPointingToOtherNode() {
 		// given: 活跃设备路由指向其他节点（可能已迁移到新节点）
 		when(sessionManager.getActiveDevices()).thenReturn(Map.of(100L, Set.of("clientA")));
-		when(cachePlusOps.hGet(any()))
+		when(cachePlusOps.hGet(any(), eq(false)))
 				.thenReturn(new CacheResult<>(RouterCacheKeyBuilder.buildDeviceNodeMap("100:clientA"), "node-other"));
 
 		// when
