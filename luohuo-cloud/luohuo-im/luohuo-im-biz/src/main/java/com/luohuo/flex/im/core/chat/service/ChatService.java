@@ -45,6 +45,14 @@ public interface ChatService {
     ChatMessageResp getMsgResp(Long msgId, Long receiveUid);
 
     /**
+     * 批量把消息实体转为前端展示物料（只读回填，不碰联系人/已读状态）。
+     *
+     * @param messages 消息实体
+     * @param receiveUid 接受消息的uid，可null
+     */
+    List<ChatMessageResp> getMsgRespBatch(List<Message> messages, Long receiveUid);
+
+    /**
      * 获取消息列表
      *
      * @param request

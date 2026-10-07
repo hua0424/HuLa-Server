@@ -792,6 +792,11 @@ public class ChatServiceImpl implements ChatService {
         }
         AssertUtil.isNotEmpty(receiveUid, "请先登录");
         Contact contact = contactDao.get(receiveUid, roomId);
+        // aichatoverview#344：无联系人行（如主人管理读取他人私聊房间）时不 NPE，
+        // 返回 null = 不设历史上限；成员权限仍由后续 check() 判定，不放宽。
+        if (contact == null) {
+            return null;
+        }
         return contact.getLastMsgId();
     }
 
@@ -917,6 +922,7 @@ public class ChatServiceImpl implements ChatService {
         AssertUtil.isTrue(between < 2, "超过2分钟的消息不能撤回");
     }
 
+    @Override
     public List<ChatMessageResp> getMsgRespBatch(List<Message> messages, Long receiveUid) {
         if (CollectionUtil.isEmpty(messages)) {
             return new ArrayList<>();
