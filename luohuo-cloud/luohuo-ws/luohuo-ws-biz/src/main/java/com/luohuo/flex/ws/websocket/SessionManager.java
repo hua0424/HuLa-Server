@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.map.MapUtil;
 import cn.hutool.json.JSONUtil;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.luohuo.basic.cache.redis2.CacheResult;
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.model.cache.CacheKey;
 import com.luohuo.basic.utils.TimeUtils;
@@ -13,6 +14,7 @@ import com.luohuo.flex.model.entity.WSRespTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSOnlineNotify;
 import com.luohuo.flex.model.redis.annotation.RedissonLock;
+import com.luohuo.flex.router.RouterCacheKeyBuilder;
 import com.luohuo.flex.ws.config.ThreadPoolProperties;
 import com.luohuo.flex.ws.service.PushService;
 import com.luohuo.flex.ws.websocket.nacos.NacosSessionRegistry;
@@ -21,6 +23,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.socket.CloseStatus;
 import org.springframework.web.reactive.socket.WebSocketSession;
@@ -70,6 +73,17 @@ public class SessionManager {
 	public final ConcurrentHashMap<String, Long> SESSION_USER_MAP = new ConcurrentHashMap<>();
 	// uid → (clientId → 会话集合) 管理的是单个用户在此服务上所有ws链接，CopyOnWriteArrayList 频繁写入性能较差 所以用Set
 	private final ConcurrentHashMap<Long, Map<String, Set<WebSocketSession>>> USER_DEVICE_SESSION_MAP = new ConcurrentHashMap<>();
+
+	/**
+	 * 存活触达节流（aichatoverview#345）：deviceKey → 上次 Redis 刷新毫秒时间戳（本节点内存）。
+	 * 同设备消息高频时两次 Redis 写入至少间隔 {@link #TOUCH_THROTTLE_MILLIS}，该间隔远小于残留阈值，
+	 * 不影响收敛判定。设备本地会话清零时同步移除条目。
+	 */
+	private static final long TOUCH_THROTTLE_MILLIS = 10_000;
+	private final ConcurrentHashMap<String, Long> TOUCH_THROTTLE_MAP = new ConcurrentHashMap<>();
+
+	private static final int RECLAIM_SCAN_PAGE = 200;
+	private static final int RECLAIM_SCAN_MAX_PAGES = 10;
 
 	public void setAcceptingNewConnections(boolean accepting) {
 		acceptingNewConnections.set(accepting);
@@ -154,6 +168,35 @@ public class SessionManager {
 		} else {
 			log.info("新增会话: clientId={}, uid={}, 当前客户端映射会话数={}, 用户会话={}", clientId, uid, getClientNum(uid, clientId), getUserSessions(uid).size());
 		}
+	}
+
+	/**
+	 * 存活触达刷新（aichatoverview#345）：任意 WS 消息到达即刷新该设备与用户的最后活跃 score。
+	 * <p>网关 30s 无消息即断连（见 ReactiveWebSocketHandler#HEARTBEAT_TIMEOUT），因此存活连接的 score
+	 * 必然新鲜；健康长连接靠此持续续约，不会被残留回收误伤。已从本地映射移除的会话不再刷新，
+	 * 避免排队中的迟到消息复活残留。
+	 */
+	public void touchPresence(WebSocketSession session, Long uid) {
+		if (session == null || uid == null) {
+			return;
+		}
+		String sessionId = session.getId();
+		if (!SESSION_USER_MAP.containsKey(sessionId)) {
+			return;
+		}
+		String clientId = SESSION_CLIENT_MAP.get(sessionId);
+		if (clientId == null) {
+			return;
+		}
+		String deviceKey = uid + ":" + clientId;
+		long now = System.currentTimeMillis();
+		Long last = TOUCH_THROTTLE_MAP.get(deviceKey);
+		if (last != null && now - last < TOUCH_THROTTLE_MILLIS) {
+			return;
+		}
+		TOUCH_THROTTLE_MAP.put(deviceKey, now);
+		cachePlusOps.zAdd(PresenceCacheKeyBuilder.globalOnlineDevicesKey().getKey(), deviceKey, now);
+		cachePlusOps.zAdd(PresenceCacheKeyBuilder.globalOnlineUsersKey().getKey(), uid, now);
 	}
 
 	private int getClientNum(Long uid, String clientId) {
@@ -245,9 +288,10 @@ public class SessionManager {
 	 *
 	 * @param uid    用户id
 	 * @param online 在线状态
+	 * @return 下线分支中实际执行清理返回 true；因下线信号过期被跳过返回 false（上线分支恒 true）
 	 */
 	@RedissonLock(prefixKey = "syncOnline:", key = "#uid")
-	public void syncOnline(Long uid, String clientId, boolean online) {
+	public boolean syncOnline(Long uid, String clientId, boolean online) {
 		// 1. 生成用户设备key、全局在线状态key
 		String deviceKey = uid + ":" + clientId;
 		String onlineDevicesKey = PresenceCacheKeyBuilder.globalOnlineDevicesKey().getKey();
@@ -269,8 +313,13 @@ public class SessionManager {
 				updateGroupPresence(roomIds, uid, true);
 				pushDeviceStatusChange(roomIds, uid, clientId, WSRespTypeEnum.ONLINE.getType(), onlineUsersKey);
 			}
+			return true;
 		} else {
-			// 4. 下线逻辑
+			// 4. 下线逻辑：迟到/失活节点的下线信号不得清掉已迁移到存活节点的重连设备（#345）
+			if (isOfflineSuperseded(uid, clientId, deviceKey)) {
+				log.info("跳过过期下线信号: uid={}, clientId={}", uid, clientId);
+				return false;
+			}
 			cachePlusOps.zRemove(onlineDevicesKey, deviceKey);
 
 			// 所有设备都下线之后移除用户的在线状态
@@ -279,7 +328,54 @@ public class SessionManager {
 				updateGroupPresence(roomIds, uid, false);
 				pushDeviceStatusChange(roomIds, uid, clientId, WSRespTypeEnum.OFFLINE.getType(), onlineUsersKey);
 			}
+			return true;
 		}
+	}
+
+	/**
+	 * 下线守卫（aichatoverview#345）：判断本次下线信号是否已被更新的有效连接取代。
+	 * <p>以下任一成立即跳过清理（返回 true），保守优先——宁可残留等回收器，不可误删在线：
+	 * <ul>
+	 *   <li>本节点本地仍有该设备的会话（同节点快速重连/多会话）；</li>
+	 *   <li>设备路由已指向其他存活节点（跨节点重连迁移）；</li>
+	 *   <li>路由或活跃节点集不可判定（基础设施抖动，沿用 #214 fail-safe）。</li>
+	 * </ul>
+	 * 正常本节点下线（路由指向本节点或已清理、本地无会话）与指向已死节点的残留返回 false。
+	 */
+	private boolean isOfflineSuperseded(Long uid, String clientId, String deviceKey) {
+		// 1. 本地仍有该设备会话 → 连接有效
+		Map<String, Set<WebSocketSession>> deviceMap = USER_DEVICE_SESSION_MAP.get(uid);
+		if (deviceMap != null && deviceMap.containsKey(clientId)) {
+			return true;
+		}
+
+		// 2. 路由归属检查
+		String routedNode;
+		try {
+			CacheResult<String> result = cachePlusOps.hGet(RouterCacheKeyBuilder.buildDeviceNodeMap(deviceKey));
+			routedNode = result == null ? null : result.getValue();
+		} catch (Exception e) {
+			log.warn("下线守卫路由查询失败，保守跳过: device={}", deviceKey, e);
+			return true;
+		}
+		if (routedNode == null || routedNode.equals(nacosSessionRegistry.getNodeId())) {
+			return false;
+		}
+
+		// 3. 路由指向他节点：存活（或活跃集不可判定：null/空）则跳过——前者是已迁移的重连，
+		//    后者沿用 #214 fail-safe，抖动时不误删；明确已死节点（活跃集非空且不含它）则放行清理，
+		//    判定口径与 NacosSessionRegistry#cleanStaleRoutes 一致
+		Set<String> activeNodes;
+		try {
+			activeNodes = nacosSessionRegistry.getAllActiveNodeIds();
+		} catch (Exception e) {
+			log.warn("下线守卫活跃节点查询失败，保守跳过: device={}", deviceKey, e);
+			return true;
+		}
+		if (activeNodes == null || activeNodes.isEmpty() || activeNodes.contains(routedNode)) {
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -400,13 +496,15 @@ public class SessionManager {
 
 		Mono.when(closeTasks).block(Duration.ofSeconds(10)); // 阻塞等待最多10秒
 
-		// 3. 同步清理所有设备状态
-		offlineDevices.forEach((uid, clientIds) -> clientIds.forEach(clientId -> syncOnline(uid, clientId, false)));
-
-		// 5. 清空本地映射
+		// 3. 先清空本地映射（#345：下线守卫以本地映射判有效连接，优雅停机时本地已无有效连接，
+		//    先清再同步，避免守卫把待下线的本节点设备误判为有效而跳过）
 		SESSION_USER_MAP.clear();
 		SESSION_CLIENT_MAP.clear();
 		USER_DEVICE_SESSION_MAP.clear();
+		TOUCH_THROTTLE_MAP.clear();
+
+		// 4. 同步清理所有设备状态
+		offlineDevices.forEach((uid, clientIds) -> clientIds.forEach(clientId -> syncOnline(uid, clientId, false)));
 
 		// 6. 清理路由与节点
 		nacosSessionRegistry.cleanupNodeRoutes("");
@@ -465,10 +563,12 @@ public class SessionManager {
 						// 2. 原子化清理设备指纹级核心映射
 						boolean isLastSession = cleanDeviceSession(uid, clientId, sessionId);
 
-						// 3. 若设备无会话，清理路由
+						// 3. 若设备无会话，清理路由（#345：先同步在线状态再删路由，
+						//    使下线守卫能看到路由仍归属本节点而正常放行）
 						if (isLastSession) {
-							nacosSessionRegistry.removeDeviceRoute(uid, clientId);
 							syncOnline(uid, clientId, false); // 通知下线
+							nacosSessionRegistry.removeDeviceRoute(uid, clientId);
+							TOUCH_THROTTLE_MAP.remove(uid + ":" + clientId);
 						}
 
 						Set<WebSocketSession> clientSessions = Optional.ofNullable(USER_DEVICE_SESSION_MAP.get(uid)).map(deviceMap -> deviceMap.get(clientId)).orElse(Collections.emptySet());
@@ -478,6 +578,83 @@ public class SessionManager {
 				})
 				.doOnSuccess(v -> log.debug("会话关闭成功: {}", session.getId()))
 				.doOnError(e -> log.error("会话关闭失败", e)).subscribe();
+	}
+
+	/**
+	 * 在线残留回收器（aichatoverview#345，每 60s）：收敛异常断连、节点崩溃（NodeDown 丢失时兜底）、
+	 * 历史永久残留与失活节点设备。只处理 score 老于 {@link PresenceCacheKeyBuilder#PRESENCE_STALE_AFTER_MILLIS}
+	 * 的设备成员；健康长连接因 touchPresence 持续刷新不会落入本范围。Nacos 活跃节点集不可用或为空时
+	 * 整轮跳过（沿用 #214 fail-safe，抖动时不误删）。回收走 {@link #syncOnline}，含群组状态与离线推送，
+	 * 使已打开列表同步收敛；迟到迁移导致的误删由下线守卫拦截。
+	 */
+	@Scheduled(fixedDelay = 60000)
+	public void reclaimStalePresence() {
+		Set<String> activeNodes;
+		try {
+			activeNodes = nacosSessionRegistry.getAllActiveNodeIds();
+		} catch (Exception e) {
+			log.warn("残留回收跳过：活跃节点查询失败", e);
+			return;
+		}
+		if (activeNodes == null || activeNodes.isEmpty()) {
+			log.warn("残留回收跳过：活跃节点集为空或查询失败，不执行任何清理");
+			return;
+		}
+
+		String onlineDevicesKey = PresenceCacheKeyBuilder.globalOnlineDevicesKey().getKey();
+		double cutoff = (double) (System.currentTimeMillis() - PresenceCacheKeyBuilder.PRESENCE_STALE_AFTER_MILLIS);
+
+		// 1. 先收集、后清理：扫描期间不变更集合，避免 offset 分页跳过
+		List<String> staleDevices = new ArrayList<>();
+		long offset = 0;
+		for (int page = 0; page < RECLAIM_SCAN_MAX_PAGES; page++) {
+			Set<ZSetOperations.TypedTuple<Object>> batch;
+			try {
+				batch = cachePlusOps.zRangeByScoreWithScores(onlineDevicesKey, 0.0, cutoff, offset, RECLAIM_SCAN_PAGE);
+			} catch (Exception e) {
+				log.warn("残留回收跳过：设备扫描失败", e);
+				return;
+			}
+			if (CollUtil.isEmpty(batch)) {
+				break;
+			}
+			batch.stream()
+					.filter(Objects::nonNull)
+					.map(ZSetOperations.TypedTuple::getValue)
+					.filter(Objects::nonNull)
+					.map(Object::toString)
+					.forEach(staleDevices::add);
+			if (batch.size() < RECLAIM_SCAN_PAGE) {
+				break;
+			}
+			offset += batch.size();
+		}
+
+		// 2. 逐设备经下线守卫后清理（含群组状态与离线推送）
+		int reclaimed = 0;
+		for (String deviceField : staleDevices) {
+			int sep = deviceField.indexOf(':');
+			if (sep <= 0) {
+				continue;
+			}
+			long uid;
+			try {
+				uid = Long.parseLong(deviceField.substring(0, sep));
+			} catch (NumberFormatException e) {
+				continue;
+			}
+			String clientId = deviceField.substring(sep + 1);
+			try {
+				if (syncOnline(uid, clientId, false)) {
+					reclaimed++;
+				}
+			} catch (Exception e) {
+				log.warn("残留回收单个设备失败: device={}", deviceField, e);
+			}
+		}
+		if (!staleDevices.isEmpty() || reclaimed > 0) {
+			log.info("残留回收完成: 陈旧设备数={}, 已清理数={}", staleDevices.size(), reclaimed);
+		}
 	}
 
 	@PostConstruct

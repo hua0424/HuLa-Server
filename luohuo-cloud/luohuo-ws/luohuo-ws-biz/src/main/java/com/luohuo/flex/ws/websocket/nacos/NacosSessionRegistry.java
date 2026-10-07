@@ -129,6 +129,13 @@ public class NacosSessionRegistry {
 	}
 
 	/**
+	 * 当前节点唯一标识（供 SessionManager 下线守卫判断路由归属）。
+	 */
+	public String getNodeId() {
+		return nodeId;
+	}
+
+	/**
 	 * 添加用户路由信息
 	 * @param uid 用户id
 	 */
