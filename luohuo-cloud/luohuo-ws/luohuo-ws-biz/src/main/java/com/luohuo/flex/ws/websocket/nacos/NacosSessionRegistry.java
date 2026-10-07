@@ -317,7 +317,8 @@ public class NacosSessionRegistry {
 				String deviceField = uid + ":" + clientId;
 				String routedNode = null;
 				try {
-					CacheResult<String> cacheResult = cachePlusOps.hGet(RouterCacheKeyBuilder.buildDeviceNodeMap(deviceField));
+					// #345: cacheNullValues=false —— 路由 hash 禁写 NullVal 占位（缺失时直接走补挂）
+					CacheResult<String> cacheResult = cachePlusOps.hGet(RouterCacheKeyBuilder.buildDeviceNodeMap(deviceField), false);
 					routedNode = cacheResult == null ? null : cacheResult.getValue();
 				} catch (Exception e) {
 					log.warn("路由自愈检查失败: uid={}, clientId={}", uid, clientId, e);

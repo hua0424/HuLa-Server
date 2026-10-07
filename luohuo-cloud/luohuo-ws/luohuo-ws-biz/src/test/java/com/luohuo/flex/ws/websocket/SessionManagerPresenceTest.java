@@ -79,7 +79,9 @@ class SessionManagerPresenceTest {
 	}
 
 	private void routeTo(String nodeId) {
-		when(cachePlusOps.hGet(eq(RouterCacheKeyBuilder.buildDeviceNodeMap(DEVICE))))
+		// #345: eq(false) 断言路由查询禁用空值缓存——生产代码若丢掉 cacheNullValues=false，
+		// 该 stub 失配（hGet 视为 miss）且 NullVal 会写回路由 hash，下面守卫用例即失败
+		when(cachePlusOps.hGet(eq(RouterCacheKeyBuilder.buildDeviceNodeMap(DEVICE)), eq(false)))
 				.thenReturn(new CacheResult<>(RouterCacheKeyBuilder.buildDeviceNodeMap(DEVICE), nodeId));
 	}
 
@@ -98,6 +100,20 @@ class SessionManagerPresenceTest {
 
 		verify(cachePlusOps).zRemove(eq(devicesKey), eq(DEVICE));
 		verify(cachePlusOps).zRemove(eq(usersKey), eq(UID));
+	}
+
+	@Test
+	@DisplayName("#345 回归：路由查询显式禁用空值缓存（hGet(key,false)），miss 不向路由 hash 写 NullVal")
+	void offlineRouteLookupDisablesNullCaching() {
+		// given: 路由缺失（stub 仅匹配 cacheNullValues=false 的调用）
+		when(cachePlusOps.hGet(eq(RouterCacheKeyBuilder.buildDeviceNodeMap(DEVICE)), eq(false)))
+				.thenReturn(new CacheResult<>(RouterCacheKeyBuilder.buildDeviceNodeMap(DEVICE), null));
+
+		// when: 路由 miss 视为指向本节点/已清理，正常执行下线
+		assertTrue(manager.syncOnline(UID, CLIENT, false));
+
+		// then: 查询必须带 false —— 若回退为默认空值缓存，RedisOps 会在 miss 时写 NullVal 残留
+		verify(cachePlusOps).hGet(eq(RouterCacheKeyBuilder.buildDeviceNodeMap(DEVICE)), eq(false));
 	}
 
 	@Test
@@ -186,7 +202,7 @@ class SessionManagerPresenceTest {
 		when(staleTuple.getValue()).thenReturn("9:c9");
 		when(cachePlusOps.zRangeByScoreWithScores(eq(devicesKey), anyDouble(), anyDouble(), anyLong(), anyLong()))
 				.thenReturn((Set) Set.of(staleTuple));
-		when(cachePlusOps.hGet(eq(RouterCacheKeyBuilder.buildDeviceNodeMap("9:c9"))))
+		when(cachePlusOps.hGet(eq(RouterCacheKeyBuilder.buildDeviceNodeMap("9:c9")), eq(false)))
 				.thenReturn(new CacheResult<>(RouterCacheKeyBuilder.buildDeviceNodeMap("9:c9"), "node-dead"));
 
 		manager.reclaimStalePresence();

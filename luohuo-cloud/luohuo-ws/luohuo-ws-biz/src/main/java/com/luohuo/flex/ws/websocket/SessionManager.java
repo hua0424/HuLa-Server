@@ -352,7 +352,9 @@ public class SessionManager {
 		// 2. 路由归属检查
 		String routedNode;
 		try {
-			CacheResult<String> result = cachePlusOps.hGet(RouterCacheKeyBuilder.buildDeviceNodeMap(deviceKey));
+			// #345: cacheNullValues=false —— 路由 hash 禁写 NullVal 占位（默认空值缓存会在 field
+			// 缺失时写 NullVal 残留，NacosRouterService 读侧强转 String 即 CCE，WS 推送整链路中断）
+			CacheResult<String> result = cachePlusOps.hGet(RouterCacheKeyBuilder.buildDeviceNodeMap(deviceKey), false);
 			routedNode = result == null ? null : result.getValue();
 		} catch (Exception e) {
 			log.warn("下线守卫路由查询失败，保守跳过: device={}", deviceKey, e);
