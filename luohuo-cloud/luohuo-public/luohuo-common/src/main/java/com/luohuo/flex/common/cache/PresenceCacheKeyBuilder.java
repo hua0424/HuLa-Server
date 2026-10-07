@@ -14,6 +14,14 @@ import java.time.Duration;
 public class PresenceCacheKeyBuilder implements CacheKeyBuilder {
 
 	/**
+	 * 在线残留收敛阈值（毫秒，aichatoverview#345）：用户/设备 ZSET 的 score 为最后活跃毫秒时间戳，
+	 * 由 ws 侧任意消息触达刷新（见 SessionManager#touchPresence）。存活连接受网关 30s 接收超时约束，
+	 * 必然在 30s 内产生消息，因此 score 老于此阈值即视为失效连接，可安全回收；持续刷新的健康长连接
+	 * 不受影响。读路径（OnlineService）与回收器（SessionManager#reclaimStalePresence）共用此值。
+	 */
+	public static final long PRESENCE_STALE_AFTER_MILLIS = 120_000;
+
+	/**
 	 * 全局在线用户ZSet键
 	 */
 	public static CacheKey globalOnlineUsersKey() {

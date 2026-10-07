@@ -34,7 +34,6 @@ import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawReportHostInfoReq;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
 import com.luohuo.flex.im.domain.vo.res.CursorPageBaseResp;
-import com.luohuo.flex.im.domain.vo.request.ChatMessagePageReq;
 import com.luohuo.flex.im.domain.entity.AiclawFriendExt;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawActivateResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawConversationResp;
@@ -598,14 +597,17 @@ public class AiclawServiceImpl implements AiclawService {
 			throw new BizException("该用户不是AI助理的好友");
 		}
 
-		// 复用现有消息分页查询（skip=true 跳过权限检查，传 ownerUid 避免 getLastMsgId 的空检查）
-		ChatMessagePageReq msgReq = ChatMessagePageReq.builder()
-				.roomId(rf.getRoomId())
-				.skip(true)
-				.build();
-		msgReq.setPageSize(pageReq.getPageSize());
-		msgReq.setCursor(pageReq.getCursor());
-		return chatService.getMsgPage(msgReq, ownerUid);
+		// aichatoverview#344：主人管理读取，不走参与者语义的 chatService.getMsgPage。
+		// getMsgPage 会以调用方 uid 查联系人 lastMsgId 做上限，而主人不是该私聊房间的参与者，
+		// 联系人为空即 NPE→500。管理读取已在上方校验 owner 拥有该 aiclaw + 房间存在，
+		// 此处直接按房间查全量 NORMAL 消息（lastMsgId=null 不设上限），分页行为保持不变。
+		// 只读：不创建联系人、不改已读游标/未读计数（getMsgRespBatch 仅做展示回填）。
+		CursorPageBaseResp<Message> cursorPage = messageDao.getCursorPage(rf.getRoomId(), pageReq, null);
+		if (cursorPage.isEmpty()) {
+			return CursorPageBaseResp.empty();
+		}
+		return CursorPageBaseResp.init(cursorPage,
+				chatService.getMsgRespBatch(cursorPage.getList(), ownerUid), cursorPage.getTotal());
 	}
 
 	// ==================== 好友管理 ====================

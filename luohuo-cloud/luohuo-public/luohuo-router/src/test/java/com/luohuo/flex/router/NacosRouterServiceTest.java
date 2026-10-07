@@ -24,17 +24,20 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * aichatoverview#214: {@link NacosRouterService} 路由查询 Nacos 失败降级 回归测试。
  *
- * <p>覆盖两点：
+ * <p>覆盖：
  * <ul>
  *   <li><b>降级</b>——{@link #findNodeDeviceUser(List)} 在 {@code getAllActiveNodes()} 抛 BizException
  *       （Nacos 查询失败）时不过滤活跃节点（保守投递，宁可发到死节点也不静默丢）；</li>
  *   <li><b>降级</b>——{@link #getDeviceNode(Long, String)} 同样跳过活跃性检查，返回 nodeId 本身；</li>
  *   <li><b>对照</b>——Nacos 正常时仍按活跃节点过滤（防回归）。</li>
+ *   <li><b>#345 NullVal 残留</b>——路由 hash 非 String 值（历史 hGet 空值缓存写入的 NullVal，
+ *       无 TTL）不再强转 CCE：findNodeDeviceUser 即时清除该 field，getDeviceNode 视为无路由。</li>
  * </ul>
  */
 class NacosRouterServiceTest {
@@ -67,7 +70,7 @@ class NacosRouterServiceTest {
 		return i;
 	}
 
-	private Map.Entry<Object, Object> hashEntry(String field, String nodeId) {
+	private Map.Entry<Object, Object> hashEntry(String field, Object nodeId) {
 		Map.Entry<Object, Object> entry = mock(Map.Entry.class);
 		when(entry.getKey()).thenReturn(field);
 		when(entry.getValue()).thenReturn(nodeId);
@@ -80,10 +83,11 @@ class NacosRouterServiceTest {
 		if (entries.length == 0) {
 			when(cursor.hasNext()).thenReturn(false);
 		} else {
+			// 恰好 N 个 true + 1 个 false（多一个 true 会让最后一个 entry 被 next() 重复返回）
 			Boolean[] flags = new Boolean[entries.length + 1];
 			java.util.Arrays.fill(flags, 0, entries.length, true);
 			flags[entries.length] = false;
-			when(cursor.hasNext()).thenReturn(true, flags);
+			when(cursor.hasNext()).thenReturn(flags[0], java.util.Arrays.copyOfRange(flags, 1, flags.length));
 			when(cursor.next()).thenReturn(entries[0], java.util.Arrays.copyOfRange(entries, 1, entries.length));
 		}
 		return cursor;
@@ -158,5 +162,36 @@ class NacosRouterServiceTest {
 
 		// then: 降级返回 nodeId，不抛异常
 		assertThat(node).isEqualTo("node-1");
+	}
+
+	@Test
+	@DisplayName("#345：findNodeDeviceUser 遇 NullVal 残留即时清除且不进结果，String 条目正常返回")
+	void findNodeDeviceUser_purgesNonStringResidue() throws Exception {
+		// given: 路由 hash 含正常条目 + 一条 NullVal 残留（历史 hGet 空值缓存写入，非 String 值）
+		Instance activeNode = instance("node-1", true);
+		when(namingService.getAllInstances(anyString(), anyString()))
+				.thenReturn(List.of(activeNode));
+		Cursor<Map.Entry<Object, Object>> cursor = mockHashCursor(
+				hashEntry("100:clientA", "node-1"),
+				hashEntry("100:badClient", new Object()));
+		when(hashOps.scan(anyString(), any(ScanOptions.class))).thenReturn(cursor);
+
+		// when
+		Map<String, Map<String, Long>> result = routerService.findNodeDeviceUser(List.of(100L));
+
+		// then: 残留 field 被删除、不进路由结果；正常条目不受影响，也不抛 CCE
+		verify(hashOps).delete(anyString(), eq("100:badClient"));
+		assertThat(result).containsOnlyKeys("node-1");
+		assertThat(result.get("node-1")).containsOnlyKeys("clientA");
+	}
+
+	@Test
+	@DisplayName("#345：getDeviceNode 遇 NullVal 残留返回 null（无路由），不强转 CCE")
+	void getDeviceNode_returnsNullOnNonStringValue() {
+		// given: 路由 field 的值是 NullVal 残留（非 String）
+		when(hashOps.get(anyString(), eq("100:clientA"))).thenReturn(new Object());
+
+		// when / then: 视为无路由，不抛 ClassCastException
+		assertThat(routerService.getDeviceNode(100L, "clientA")).isNull();
 	}
 }
