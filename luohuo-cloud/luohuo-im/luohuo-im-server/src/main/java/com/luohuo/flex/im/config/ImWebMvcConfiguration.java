@@ -1,5 +1,6 @@
 package com.luohuo.flex.im.config;
 
+import com.luohuo.flex.common.controller.HealthController;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
@@ -14,6 +15,7 @@ public class ImWebMvcConfiguration implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         String[] commonExclude = new String[] {
+                HealthController.PATH, // Process liveness must not query the blacklist database.
                 "/doc.html",
                 "/swagger-ui.html",
                 "/swagger-resources/**",

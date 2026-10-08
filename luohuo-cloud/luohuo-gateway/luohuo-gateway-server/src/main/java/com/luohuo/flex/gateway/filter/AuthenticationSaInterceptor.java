@@ -12,6 +12,7 @@ import cn.dev33.satoken.spring.pathmatch.SaPathPatternParserUtil;
 import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.StrUtil;
 import com.luohuo.basic.exception.code.ResponseEnum;
+import com.luohuo.flex.common.controller.HealthController;
 import com.luohuo.flex.im.facade.DefResourceFacade;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -55,6 +56,11 @@ public class AuthenticationSaInterceptor implements WebFilter, Ordered {
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+        // Liveness must not query permissions, even with an admin system-type header.
+        if (org.springframework.http.HttpMethod.GET.equals(exchange.getRequest().getMethod())
+                && HealthController.GATEWAY_PATHS.contains(exchange.getRequest().getPath().value())) {
+            return chain.filter(exchange);
+        }
         // 写入WebFilterChain对象
         exchange.getAttributes().put(SaReactorHolder.EXCHANGE_KEY, chain);
 
