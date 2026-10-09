@@ -207,7 +207,7 @@ public class RootController {
 	public R<SaSession> verify(@RequestParam("token") String token) throws BizException {
 		// #373：纯读判别（isCreate=false），不存在返回 data=null（200），不创建空会话；
 		// 全仓无调用方（grep /anyTenant/verify 仅本定义），空 token 仍抛 11073。
-		return R.success(StpUtil.getTokenSessionByToken(token, false));
+		return R.success(StpUtil.stpLogic.getTokenSessionByToken(token, false));
 	}
 
 	@Operation(summary = "根据手机号注册", description = "根据手机号注册")

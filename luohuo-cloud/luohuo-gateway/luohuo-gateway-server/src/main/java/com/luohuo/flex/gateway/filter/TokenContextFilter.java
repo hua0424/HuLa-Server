@@ -103,7 +103,7 @@ public class TokenContextFilter implements WebFilter, Ordered {
         this.webClient = webClientBuilder.build();
         // 生产默认：StpUtil 真实实现（#373：只读判别，不自动创建空会话；
         // 缺失返回 null → 落 im 回源，空 token 的 11073 抛仍由外层 catch 处理）
-        this.tokenSessionSupplier = token -> StpUtil.getTokenSessionByToken(token, false);
+        this.tokenSessionSupplier = token -> StpUtil.stpLogic.getTokenSessionByToken(token, false);
     }
 
     /**
@@ -317,7 +317,7 @@ public class TokenContextFilter implements WebFilter, Ordered {
         // --- 原有 SaToken 逻辑（非 UUID token）---
         // #373：纯读判别（isCreate=false），不存在返回 null（不创建空会话垃圾）；
         // 未注册旧行为抛 11074→网关 406，现为 null→无身份头→下游鉴权 fail-closed。
-        SaSession tokenSession = StpUtil.getTokenSessionByToken(token, false);
+        SaSession tokenSession = StpUtil.stpLogic.getTokenSessionByToken(token, false);
         log.info("{}", tokenSession);
 
         if (tokenSession != null) {
