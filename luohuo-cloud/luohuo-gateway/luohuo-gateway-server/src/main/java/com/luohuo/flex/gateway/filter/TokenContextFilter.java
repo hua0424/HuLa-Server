@@ -101,8 +101,9 @@ public class TokenContextFilter implements WebFilter, Ordered {
         this.saTokenConfig = saTokenConfig;
         this.stringRedisTemplate = stringRedisTemplate;
         this.webClient = webClientBuilder.build();
-        // 生产默认：StpUtil 真实实现
-        this.tokenSessionSupplier = StpUtil::getTokenSessionByToken;
+        // 生产默认：StpUtil 真实实现（#373：只读判别，不自动创建空会话；
+        // 缺失返回 null → 落 im 回源，空 token 的 11073 抛仍由外层 catch 处理）
+        this.tokenSessionSupplier = token -> StpUtil.stpLogic.getTokenSessionByToken(token, false);
     }
 
     /**
@@ -314,7 +315,9 @@ public class TokenContextFilter implements WebFilter, Ordered {
         }
 
         // --- 原有 SaToken 逻辑（非 UUID token）---
-        SaSession tokenSession = StpUtil.getTokenSessionByToken(token);
+        // #373：纯读判别（isCreate=false），不存在返回 null（不创建空会话垃圾）；
+        // 未注册旧行为抛 11074→网关 406，现为 null→无身份头→下游鉴权 fail-closed。
+        SaSession tokenSession = StpUtil.stpLogic.getTokenSessionByToken(token, false);
         log.info("{}", tokenSession);
 
         if (tokenSession != null) {
@@ -333,12 +336,13 @@ public class TokenContextFilter implements WebFilter, Ordered {
             // #184a P0：isAiclawToken 只是 UUID 格式判别，而 sa-token token-style:uuid 也是 UUID。
             // 缓存缺失时不能直接落 im（会把正常用户误判为 aiclaw → im 404 → 406 全锁死）。
             // SaToken-first：先查 SaToken 会话；非空 → 正常用户路径（与原逻辑完全一致）；
-            // sa-token 1.42 对非已注册 token 抛 SaTokenException(11074) → 视作 aiclaw，落 im 回源。
+            // 缺失 → 视作 aiclaw，落 im 回源。#373 后 supplier 为 (token,false) 只读：
+            // 缺失直接返回 null；空 token 的 11073 抛 SaTokenException 仍在此兜底为 null。
             SaSession tokenSession;
             try {
                 tokenSession = tokenSessionSupplier.apply(token);
             } catch (SaTokenException e) {
-                // sa-token 1.42: tokenSessionCheckLogin=true（默认）下，未注册 token 取 Token-Session 抛 11074
+                // sa-token 1.42：空 token 取 Token-Session 抛 11073；兜底为 null 落 im 回源
                 tokenSession = null;
             }
             if (tokenSession != null) {

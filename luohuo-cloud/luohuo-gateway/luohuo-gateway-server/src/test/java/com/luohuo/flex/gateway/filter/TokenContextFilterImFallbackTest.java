@@ -41,6 +41,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.luohuo.basic.context.ContextConstants.JWT_KEY_SYSTEM_TYPE;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -72,6 +74,10 @@ import static org.mockito.Mockito.*;
  * <p>sa-token 1.42：对未注册 token 调 {@code StpUtil.getTokenSessionByToken(token)} 抛
  * {@link SaTokenException}（code 11074）—— 这正是 aiclaw connectionToken 的真实行为。
  * 故凡走 im 回源分支的用例，都经注入 {@code tokenSessionSupplier} 抛 11074（不用 mockStatic——其 inline maker registry 是 ThreadLocal 绑定，boundedElastic 上桩失效）。
+ *
+ * <p>#373：生产 supplier 已改为 {@code (token,false)} 只读——缺失返回 null（不再抛 11074，
+ * 空 token 的 11073 照抛）。im 回源分支＝null 或抛两种形态；既有 11074 抛桩用例覆盖抛形态，
+ * 新增 null 形态与窄窗口对照用例覆盖 null/建空形态。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -511,5 +517,62 @@ class TokenContextFilterImFallbackTest {
 				})
 				.verifyComplete();
 		verify(chain, never()).filter(any());
+	}
+
+	// ===== #373：只读 supplier（(token,false)）的 null 形态 + 窄窗口对照 =====
+
+	@Test
+	@DisplayName("#373-1: supplier 返回 null（只读 miss）+ im 返回 404 → body code=406（永久拒绝），chain 不继续")
+	void saTokenSupplierReturnsNull_imReturns404_returns406Permanent() {
+		IgnoreProperties ignoreProps = mock(IgnoreProperties.class);
+		SaTokenConfig saConfig = mock(SaTokenConfig.class);
+		StringRedisTemplate redis = mock(StringRedisTemplate.class);
+
+		ExchangeFunction xf = mock(ExchangeFunction.class);
+		lenient().when(xf.exchange(any(ClientRequest.class))).thenReturn(
+				Mono.just(ClientResponse.create(HttpStatus.NOT_FOUND)
+						.header("Content-Type", "application/json")
+						.body("{\"code\":-10,\"msg\":\"aiclaw token无效\"}")
+						.build()));
+
+		WebFilterChain chain = mock(WebFilterChain.class);
+		lenient().when(chain.filter(any())).thenReturn(Mono.empty());
+		ServerWebExchange exchange = newExchange();
+
+		// #373：(token,false) 只读 miss 直接返回 null（不再抛 11074）→ 同样落 im 回源 → 404 → 406
+		lenient().doReturn(false).when(redis).hasKey(CACHE_KEY);
+		TokenContextFilter filter = newFilter(ignoreProps, saConfig, redis, xf, token -> null);
+		StepVerifier.create(filter.filter(exchange, chain)
+				.then(Mono.defer(() -> ((MockServerWebExchange) exchange).getResponse().getBodyAsString())))
+				.assertNext(body -> assertTrue(body.contains("\"code\":406"),
+						"只读 null 同样应映射为永久拒绝 body code=406"))
+				.verifyComplete();
+
+		verify(chain, never()).filter(any());
+	}
+
+	@Test
+	@DisplayName("#373-2 对照：token 有效但会话键缺失时，单参创建空会话而 (token,false) 返回 null")
+	void narrowWindow_singleParamCreatesEmpty_falseReturnsNull() {
+		// 内存 DAO（SaTokenDaoDefaultImpl）即最彻底的隔离：不碰任何共享 Redis，
+		// key 缺失语义在 DAO 层与 Redis 一致，对照结论与存储后端无关。
+		cn.dev33.satoken.SaManager.setConfig(new SaTokenConfig());
+		cn.dev33.satoken.SaManager.setSaTokenDao(new cn.dev33.satoken.dao.SaTokenDaoDefaultImpl());
+		cn.dev33.satoken.stp.StpLogic logic = new cn.dev33.satoken.stp.StpLogic("login373");
+		String token = "373-narrow-window-token";
+		// token→loginId 映射有效（等价于 account-session terminal 已登记），但 token-session 键缺失
+		logic.saveTokenToIdMapping(token, 1001L, 3600L);
+		try {
+			assertTrue(logic.isValidToken(token), "对照前提：token 映射有效");
+			// (token,false)：纯读，不创建
+			assertNull(logic.getTokenSessionByToken(token, false), "(token,false) 不应创建空会话");
+			// 单参：自动创建空会话（#373 要消除的写残留）
+			assertNotNull(logic.getTokenSessionByToken(token), "单参会创建空会话（待消除行为）");
+			// 对照可重复：删掉刚建的空会话，false 仍返回 null（无残留写入）
+			cn.dev33.satoken.SaManager.getSaTokenDao().deleteSession(logic.splicingKeyTokenSession(token));
+			assertNull(logic.getTokenSessionByToken(token, false), "删会话后 (token,false) 仍为 null");
+		} finally {
+			cn.dev33.satoken.SaManager.getSaTokenDao().delete(logic.splicingKeyTokenValue(token));
+		}
 	}
 }
