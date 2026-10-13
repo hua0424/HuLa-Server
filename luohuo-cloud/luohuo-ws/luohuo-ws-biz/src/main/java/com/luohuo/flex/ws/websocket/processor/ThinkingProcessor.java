@@ -236,8 +236,16 @@ public class ThinkingProcessor implements MessageProcessor {
 		}
 		rateLimitChecker.record(actor, room);
 		List<Long> members = queryRoomMembers(room, actor, tenant);
+		if (members == null) {
+			log.warn("thinking start members unknown: id={}", thinkingId);
+			if (req.getClientRunId() == null || markError(thinkingId, actor, tenant, room,
+					"thinking_members_unavailable", false)) {
+				pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), "thinking_members_unavailable");
+			} else pushError(actor, req.getRoomId(), null, req.getClientRunId(), "thinking_start_unknown");
+			return;
+		}
 		if (members.isEmpty()) {
-			log.warn("thinking start persisted but members unavailable: id={}", thinkingId);
+			log.warn("thinking start persisted but members empty: id={}", thinkingId);
 			if (req.getClientRunId() == null || markError(thinkingId, actor, tenant, room,
 					"thinking_members_unavailable", false)) {
 				pushError(actor, req.getRoomId(), thinkingId, req.getClientRunId(), "thinking_members_unavailable");
@@ -282,11 +290,26 @@ public class ThinkingProcessor implements MessageProcessor {
 			return;
 		}
 		if (!Boolean.TRUE.equals(result.getBool("data"))) {
-			if (req.getClientRunId() != null) pushToMembers("thinkingEnd", WSThinkingEnd.builder()
-					.thinkingId(thinkingId).roomId(req.getRoomId()).clientRunId(req.getClientRunId())
+			// Identical terminal replay: DB already won once, but room delivery is at-least-once.
+			// Redeliver to the CURRENT authorized members, never to a stale recipient snapshot.
+			String run = req.getClientRunId();
+			List<Long> members = queryRoomMembers(room, actor, tenant, true);
+			if (members == null) {
+				log.warn("thinking END replay members unknown: tenant={} actor={} room={} thinkingId={} run={}",
+						tenant, actor, room, thinkingId, run);
+				if (run != null) pushRejected(actor, req.getRoomId(), thinkingId, run, "thinking_end_unknown");
+				return;
+			}
+			WSThinkingEnd redelivery = WSThinkingEnd.builder()
+					.thinkingId(thinkingId).roomId(req.getRoomId()).clientRunId(run)
 					.fromUid(String.valueOf(actor)).durationMs(req.getDurationMs()).status(req.getStatus())
-					.error(req.getError()).build(), List.of(actor), actor);
-			return; // Verified identical terminal retry, ACK caller only.
+					.error(req.getError()).build();
+			log.info("thinking END replay redeliver: tenant={} actor={} room={} thinkingId={} run={} members={}",
+					tenant, actor, room, thinkingId, run, members.size());
+			pushToMembers("thinkingEnd", redelivery, members, actor);
+			if (run != null && !members.contains(actor)) pushToMembers("thinkingEnd", redelivery,
+					List.of(actor), actor);
+			return;
 		}
 		ThinkingContext ctx = activeThinkings.get(thinkingId);
 		if (ctx != null && Objects.equals(ctx.getFromUid(), actor) && Objects.equals(ctx.getTenantId(), tenant)
@@ -295,7 +318,20 @@ public class ThinkingProcessor implements MessageProcessor {
 				.status(req.getStatus()).error(req.getError()).roomId(String.valueOf(room))
 				.clientRunId(req.getClientRunId()).fromUid(String.valueOf(actor)).build();
 		// CAS already committed; a concurrent kick cannot suppress notification to remaining live members.
-		pushToMembers("thinkingEnd", end, queryRoomMembers(room, actor, tenant, true), actor);
+		// Unknown members must not read as handled: keep the persisted fact, keep the plugin retry alive.
+		List<Long> members = queryRoomMembers(room, actor, tenant, true);
+		if (members == null) {
+			log.warn("thinking END members unknown: tenant={} actor={} room={} thinkingId={} run={}",
+					tenant, actor, room, thinkingId, req.getClientRunId());
+			if (req.getClientRunId() != null) pushRejected(actor, req.getRoomId(), thinkingId,
+					req.getClientRunId(), "thinking_end_unknown");
+			return;
+		}
+		log.info("thinking END deliver: tenant={} actor={} room={} thinkingId={} run={} members={}",
+				tenant, actor, room, thinkingId, req.getClientRunId(), members.size());
+		pushToMembers("thinkingEnd", end, members, actor);
+		if (req.getClientRunId() != null && !members.contains(actor)) pushToMembers("thinkingEnd", end,
+				List.of(actor), actor);
 	}
 
 	@Scheduled(fixedRate = 60000)
@@ -316,8 +352,13 @@ public class ThinkingProcessor implements MessageProcessor {
 			activeThinkings.remove(id, ctx);
 			WSThinkingEnd end = WSThinkingEnd.builder().thinkingId(id).status("error")
 					.error("thinking timeout").roomId(String.valueOf(ctx.getRoomId())).build();
-			pushToMembers("thinkingEnd", end,
-					queryRoomMembers(ctx.getRoomId(), ctx.getFromUid(), ctx.getTenantId(), true), ctx.getFromUid());
+			List<Long> members = queryRoomMembers(ctx.getRoomId(), ctx.getFromUid(), ctx.getTenantId(), true);
+			if (members == null) {
+				log.warn("thinking timeout members unknown: tenant={} actor={} room={} thinkingId={}",
+						ctx.getTenantId(), ctx.getFromUid(), ctx.getRoomId(), id);
+				continue;
+			}
+			pushToMembers("thinkingEnd", end, members, ctx.getFromUid());
 		}
 	}
 
@@ -333,23 +374,25 @@ public class ThinkingProcessor implements MessageProcessor {
 		return result != null && Boolean.TRUE.equals(result.getBool("data"));
 	}
 
-	/** IM checks live AICLAW membership before returning recipient IDs. */
+	/** IM checks live AICLAW membership before returning recipient IDs. Unknown stays fail-closed. */
 	public List<Long> authorizedMembers(Long room, Long actor, Long tenant) {
-		return queryRoomMembers(room, actor, tenant, false);
+		List<Long> members = queryRoomMembers(room, actor, tenant, false);
+		return members == null ? List.of() : members;
 	}
 
 	private List<Long> queryRoomMembers(Long room, Long actor, Long tenant) {
 		return queryRoomMembers(room, actor, tenant, false);
 	}
 
+	/** @return current members, an empty list for a known-empty room, or null when unknown/failed. */
 	private List<Long> queryRoomMembers(Long room, Long actor, Long tenant, boolean timeout) {
 		JSONObject result = callIm("GET", "/thinking/room/" + room + "/members", null, actor, tenant, timeout);
-		if (result == null || !Boolean.TRUE.equals(result.getBool("success"))) return List.of();
+		if (result == null || !Boolean.TRUE.equals(result.getBool("success"))) return null;
 		try {
 			List<Long> members = result.getBeanList("data", Long.class);
 			return members == null ? List.of() : members;
 		} catch (RuntimeException e) {
-			return List.of();
+			return null;
 		}
 	}
 
