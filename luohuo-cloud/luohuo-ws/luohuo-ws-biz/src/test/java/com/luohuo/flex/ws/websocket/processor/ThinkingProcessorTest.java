@@ -340,13 +340,14 @@ class ThinkingProcessorTest {
 			assertEquals("thinkingRejected", events.getValue().getType());
 			assertEquals("thinking_end_unknown", ((WSThinkingEnd) events.getValue().getData()).getError());
 			processor.process(session, 42L, end);
+			org.mockito.ArgumentCaptor<WsBaseResp> redeliveries = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
 			org.mockito.ArgumentCaptor<List> members = org.mockito.ArgumentCaptor.forClass(List.class);
-			verify(push, timeout(3000).times(2)).sendPushMsg(events.capture(), members.capture(), eq(42L));
+			verify(push, timeout(3000).times(2)).sendPushMsg(redeliveries.capture(), members.capture(), eq(42L));
 			assertEquals(2, ends.get());
 			assertEquals(2, memberReads.get());
-			assertEquals("thinkingEnd", events.getAllValues().get(1).getType());
+			assertEquals("thinkingEnd", redeliveries.getAllValues().get(1).getType());
 			assertEquals(List.of(42L, 43L), members.getAllValues().get(1));
-			assertEquals("run-a", ((WSThinkingEnd) events.getAllValues().get(1).getData()).getClientRunId());
+			assertEquals("run-a", ((WSThinkingEnd) redeliveries.getAllValues().get(1).getData()).getClientRunId());
 		} finally { im.stop(0); }
 	}
 
