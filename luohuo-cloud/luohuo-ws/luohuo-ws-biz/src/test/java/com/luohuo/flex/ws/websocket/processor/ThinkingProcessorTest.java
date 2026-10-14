@@ -303,6 +303,163 @@ class ThinkingProcessorTest {
 	}
 
 	@Test
+	void endReplayRedeliversToRecoveredMembersInsteadOfActorOnlyAck() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		AtomicInteger ends = new AtomicInteger();
+		AtomicInteger memberReads = new AtomicInteger();
+		im.createContext("/thinking/", exchange -> {
+			String path = exchange.getRequestURI().getPath();
+			String body;
+			if (path.endsWith("/end")) {
+				body = "{\"code\":200,\"success\":true,\"data\":" + (ends.incrementAndGet() == 1) + "}";
+			} else if (path.endsWith("/members")) {
+				body = memberReads.incrementAndGet() == 1
+						? "{\"code\":500,\"success\":false}"
+						: "{\"code\":200,\"success\":true,\"data\":[42,43]}";
+			} else body = "{\"code\":404,\"success\":false}";
+			byte[] data = body.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, data.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(data); }
+		});
+		im.start();
+		try {
+			ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+			PushService push = mock(PushService.class);
+			ReflectionTestUtils.setField(processor, "pushService", push);
+			WSBaseReq end = reqOfType(WSReqTypeEnum.THINKING_END.getType());
+			end.setData("{\"roomId\":\"10\",\"thinkingId\":\"777\",\"clientRunId\":\"run-a\",\"status\":\"complete\"}");
+			WebSocketSession session = session(trustedHeaders());
+			processor.process(session, 42L, end);
+			org.mockito.ArgumentCaptor<WsBaseResp> events = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(push, timeout(3000)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+			assertEquals("thinkingRejected", events.getValue().getType());
+			assertEquals("thinking_end_unknown", ((WSThinkingEnd) events.getValue().getData()).getError());
+			processor.process(session, 42L, end);
+			org.mockito.ArgumentCaptor<WsBaseResp> redeliveries = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			org.mockito.ArgumentCaptor<List> members = org.mockito.ArgumentCaptor.forClass(List.class);
+			verify(push, timeout(3000).times(2)).sendPushMsg(redeliveries.capture(), members.capture(), eq(42L));
+			assertEquals(2, ends.get());
+			assertEquals(2, memberReads.get());
+			assertEquals("thinkingEnd", redeliveries.getAllValues().get(1).getType());
+			assertEquals(List.of(42L, 43L), members.getAllValues().get(1));
+			assertEquals("run-a", ((WSThinkingEnd) redeliveries.getAllValues().get(1).getData()).getClientRunId());
+		} finally { im.stop(0); }
+	}
+
+	@Test
+	void permanentMembersUnknownNeverConfirmsTerminal() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		im.createContext("/thinking/", exchange -> {
+			String path = exchange.getRequestURI().getPath();
+			String body = path.endsWith("/end")
+					? "{\"code\":200,\"success\":true,\"data\":true}"
+					: "{\"code\":500,\"success\":false}";
+			byte[] data = body.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, data.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(data); }
+		});
+		im.start();
+		try {
+			ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+			PushService push = mock(PushService.class);
+			ReflectionTestUtils.setField(processor, "pushService", push);
+			WSBaseReq end = reqOfType(WSReqTypeEnum.THINKING_END.getType());
+			end.setData("{\"roomId\":\"10\",\"thinkingId\":\"777\",\"clientRunId\":\"run-a\",\"status\":\"complete\"}");
+			processor.process(session(trustedHeaders()), 42L, end);
+			org.mockito.ArgumentCaptor<WsBaseResp> events = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(push, timeout(3000)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+			assertEquals("thinkingRejected", events.getValue().getType());
+			assertEquals("thinking_end_unknown", ((WSThinkingEnd) events.getValue().getData()).getError());
+			Thread.sleep(300);
+			verify(push, times(1)).sendPushMsg(any(), anyList(), eq(42L));
+		} finally { im.stop(0); }
+	}
+
+	@Test
+	void successEmptyMembersIsDefinitiveAndDistinctFromUnknown() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		im.createContext("/thinking/", exchange -> {
+			String path = exchange.getRequestURI().getPath();
+			String body = path.endsWith("/end")
+					? "{\"code\":200,\"success\":true,\"data\":true}"
+					: "{\"code\":200,\"success\":true,\"data\":[]}";
+			byte[] data = body.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, data.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(data); }
+		});
+		im.start();
+		try {
+			ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+			PushService push = mock(PushService.class);
+			ReflectionTestUtils.setField(processor, "pushService", push);
+			WSBaseReq end = reqOfType(WSReqTypeEnum.THINKING_END.getType());
+			end.setData("{\"roomId\":\"10\",\"thinkingId\":\"777\",\"clientRunId\":\"run-a\",\"status\":\"complete\"}");
+			processor.process(session(trustedHeaders()), 42L, end);
+			org.mockito.ArgumentCaptor<WsBaseResp> events = org.mockito.ArgumentCaptor.forClass(WsBaseResp.class);
+			verify(push, timeout(3000)).sendPushMsg(events.capture(), eq(List.of(42L)), eq(42L));
+			assertEquals("thinkingEnd", events.getValue().getType());
+			assertEquals("run-a", ((WSThinkingEnd) events.getValue().getData()).getClientRunId());
+		} finally { im.stop(0); }
+	}
+
+	@Test
+	void replayUsesFreshMembersNotStaleSnapshot() throws Exception {
+		HttpServer im = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+		AtomicInteger ends = new AtomicInteger();
+		AtomicInteger memberReads = new AtomicInteger();
+		im.createContext("/thinking/", exchange -> {
+			String path = exchange.getRequestURI().getPath();
+			String body;
+			if (path.endsWith("/end")) {
+				body = "{\"code\":200,\"success\":true,\"data\":" + (ends.incrementAndGet() == 1) + "}";
+			} else if (path.endsWith("/members")) {
+				body = memberReads.incrementAndGet() == 1
+						? "{\"code\":200,\"success\":true,\"data\":[42,43,99]}"
+						: "{\"code\":200,\"success\":true,\"data\":[42,43]}";
+			} else body = "{\"code\":404,\"success\":false}";
+			byte[] data = body.getBytes(StandardCharsets.UTF_8);
+			exchange.sendResponseHeaders(200, data.length);
+			try (var stream = exchange.getResponseBody()) { stream.write(data); }
+		});
+		im.start();
+		try {
+			ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
+			DiscoveryClient discovery = mock(DiscoveryClient.class);
+			ServiceInstance instance = mock(ServiceInstance.class);
+			when(discovery.getInstances("luohuo-im-server")).thenReturn(List.of(instance));
+			when(instance.getUri()).thenReturn(URI.create("http://127.0.0.1:" + im.getAddress().getPort()));
+			ReflectionTestUtils.setField(processor, "discoveryClient", discovery);
+			PushService push = mock(PushService.class);
+			ReflectionTestUtils.setField(processor, "pushService", push);
+			WSBaseReq end = reqOfType(WSReqTypeEnum.THINKING_END.getType());
+			end.setData("{\"roomId\":\"10\",\"thinkingId\":\"777\",\"clientRunId\":\"run-a\",\"status\":\"complete\"}");
+			WebSocketSession session = session(trustedHeaders());
+			processor.process(session, 42L, end);
+			processor.process(session, 42L, end);
+			org.mockito.ArgumentCaptor<List> members = org.mockito.ArgumentCaptor.forClass(List.class);
+			verify(push, timeout(3000).times(2)).sendPushMsg(any(), members.capture(), eq(42L));
+			assertEquals(2, ends.get());
+			assertEquals(List.of(42L, 43L, 99L), members.getAllValues().get(0));
+			assertEquals(List.of(42L, 43L), members.getAllValues().get(1));
+		} finally { im.stop(0); }
+	}
+
+	@Test
 	void unknownStartTransportDoesNotClaimDefiniteFailure() {
 		ReflectionTestUtils.setField(processor, "internalSecret", "test-internal-secret");
 		DiscoveryClient discovery = mock(DiscoveryClient.class);
