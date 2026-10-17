@@ -383,7 +383,7 @@ CREATE TABLE `im_message`  (
   `id` bigint UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'id',
   `room_id` bigint NOT NULL COMMENT '会话表id',
   `from_uid` bigint NOT NULL COMMENT '消息发送者uid',
-  `content` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '消息内容',
+  `content` MEDIUMTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL DEFAULT NULL COMMENT '消息内容',
   `reply_msg_id` bigint NULL DEFAULT NULL COMMENT '回复的消息内容',
   `status` int NOT NULL COMMENT '消息状态 0正常 1删除',
   `gap_count` int NULL DEFAULT NULL COMMENT '与回复的消息间隔多少条',
