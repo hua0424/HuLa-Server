@@ -21,7 +21,7 @@ import java.util.List;
 public class TextMsgReq {
 
     @NotBlank(message = "内容不能为空")
-    @Size(max = 1024, message = "消息内容过长")
+    @Size(max = 32768, message = "消息内容过长")
     @Schema(description ="消息内容")
     private String content;
 
