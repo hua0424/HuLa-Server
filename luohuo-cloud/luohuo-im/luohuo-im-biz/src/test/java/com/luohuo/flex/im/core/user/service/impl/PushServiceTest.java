@@ -43,17 +43,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * aichatoverview#220: {@link PushService#sendAsync} MQ 发送失败延迟重试 回归测试。
+ * huaaichat/aichatoverview#451: {@link PushService} 有限排空生命周期测试。
  *
- * <p>覆盖两点：
- * <ul>
- *   <li><b>重试</b>——{@code mqProducer.sendMsg}（PUSH_TOPIC 正常推送）抛异常时，内部捕获并升级
- *       log.warn + 调用 {@code scheduleDelayRetry} 复用 PUSH_DELAY_TOPIC 延迟重试机制；</li>
- *   <li><b>防递归</b>——retry=true（PUSH_DELAY_TOPIC 延迟发送本身）失败时抛回异常交由上层
- *       {@code executeRetry} 的 whenComplete 按 retryCount 递增重试（受 maxRetryCount 上限约束），
- *       不在内部自调 scheduleDelayRetry，避免无限递归；</li>
- *   <li><b>对照</b>——MQ 发送成功时不触发延迟重试。</li>
- * </ul>
+ * <p>覆盖既有回归（MQ 失败延迟重试、防递归）与 #451 新增语义：
+ * 停止期准入拒绝、在途任务排空等待、超截止未执行/结果不确定结算、
+ * 延迟重试经 PUSH_DELAY_TOPIC（retry=true）与 maxRetryCount 上限边界。
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -288,5 +282,59 @@ class PushServiceTest {
 			released.set(true);
 			real.shutdownNow();
 		}
+	}
+
+	// R1 回归：延迟重试走 PUSH_DELAY_TOPIC（retry=true），经 RetryPushConsumer ACK/去重
+	@Test
+	@DisplayName("R1：executeRetry 经 PUSH_DELAY_TOPIC 重发（retry=true），成功即完成")
+	void executeRetry_routesThroughDelayTopic() {
+		// given: 路由命中 node-1；延迟发送成功
+		when(routerService.findNodeDeviceUser(anyList()))
+				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
+
+		// when
+		pushService.executeRetry(msg(), List.of(100L), 0L, 100L, 1, "r1").join();
+
+		// then: 走延迟通道而非直发
+		verify(mqProducer).sendMsgWithDelay(eq(MqConstant.PUSH_DELAY_TOPIC), any(), anyInt());
+		verify(mqProducer, never()).sendMsg(anyString(), any());
+		verify(retryScheduler, never()).schedule(ArgumentMatchers.<Runnable>any(), anyLong(), any());
+	}
+
+	@Test
+	@DisplayName("R1：executeRetry 延迟通道失败时按 retryCount+1 续链（受 maxRetryCount 约束）")
+	void executeRetry_delayFailureChainsWithIncrementedCount() {
+		// given: 路由命中 node-1；延迟发送持续失败；调度器 mock 不执行任务
+		when(routerService.findNodeDeviceUser(anyList()))
+				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
+		doThrow(new RuntimeException("delay send timeout"))
+				.when(mqProducer).sendMsgWithDelay(anyString(), any(), anyInt());
+
+		// when
+		pushService.executeRetry(msg(), List.of(100L), 0L, 100L, 1, "r1-chain");
+
+		// then: 失败续期 retryCount=2 调度（mock 未执行故 future 悬挂属预期，只验调度）
+		verify(mqProducer).sendMsgWithDelay(eq(MqConstant.PUSH_DELAY_TOPIC), any(), anyInt());
+		verify(retryScheduler).schedule(ArgumentMatchers.<Runnable>any(), eq(1L), eq(TimeUnit.SECONDS));
+	}
+
+	// R2 回归：上限语义为 >（retryCount == maxRetryCount 仍可调度，超限才停）
+	@Test
+	@DisplayName("R2：scheduleDelayRetry 在 retryCount==maxRetryCount 时仍调度，超限才停")
+	void scheduleDelayRetry_boundaryIsStrictlyGreater() {
+		// when: 恰达上限
+		CompletableFuture<Void> atLimit =
+				pushService.scheduleDelayRetry(msg(), List.of(100L), 0L, 100L, 3, "boundary");
+
+		// then: 仍调度（未完成、未拒绝）
+		verify(retryScheduler).schedule(ArgumentMatchers.<Runnable>any(), eq(1L), eq(TimeUnit.SECONDS));
+		assertTrue(!atLimit.isDone());
+
+		// when: 超限
+		CompletableFuture<Void> overLimit =
+				pushService.scheduleDelayRetry(msg(), List.of(100L), 0L, 100L, 4, "over");
+
+		// then: 直接完成不再调度
+		assertTrue(overLimit.isDone() && !overLimit.isCompletedExceptionally());
 	}
 }

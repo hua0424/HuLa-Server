@@ -9,7 +9,6 @@ import com.luohuo.basic.service.MQProducer;
 import com.luohuo.basic.jackson.JsonUtil;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.common.constant.MqConstant;
-import com.luohuo.flex.im.domain.DelayRetryTask;
 import com.luohuo.flex.model.entity.dto.NodePushDTO;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.router.NacosRouterService;
@@ -34,7 +33,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -556,7 +554,7 @@ public class PushService {
 			refused.completeExceptionally(e);
 			return refused;
 		}
-		if (retryCount >= maxRetryCount) {
+		if (retryCount > maxRetryCount) {
 			log.error("消息重试次数超过最大限制，不再进行延迟重试: type={}, uids={}, retryCount={}", msg.getType(), uids, retryCount);
 			return CompletableFuture.completedFuture(null);
 		}
@@ -641,8 +639,10 @@ public class PushService {
 			return refused;
 		}
 
-        // 保留外部布尔语义；不再需要将列表拷贝成字符串做“未指定”哨兵
-        return sendAsyncInternal(msg, uids, hashId, cuid, false).handle((sendResult, throwable) -> {
+        // R1：恢复 base 语义 retry=true，重入 PUSH_DELAY_TOPIC 经 RetryPushConsumer
+        // ACK/in-flight 去重；统一截止门保留在前。
+        try {
+            return sendAsync(msg, uids, hashId, cuid, true).handle((sendResult, throwable) -> {
 			if (throwable == null) {
 				return CompletableFuture.<Void>completedFuture(null);
 			}
@@ -654,6 +654,11 @@ public class PushService {
 			return scheduleDelayRetry(msg, uids, hashId, cuid, nextRetry,
 					"MQ推送延迟重试续期: " + (reason == null ? "" : reason));
 		}).thenCompose(stage -> stage);
+        } catch (Exception e) {
+            // 同步段路由异常不被调度器吞：记一次失败并按重试链继续（受门槛与截止约束）。
+            log.error("推送延迟重试同步段异常，转重试链: type={}, retryCount={}", msg.getType(), nextRetry, e);
+            return scheduleDelayRetry(msg, uids, hashId, cuid, nextRetry, "执行异常: " + e.getMessage());
+        }
     }
 
 	/**
