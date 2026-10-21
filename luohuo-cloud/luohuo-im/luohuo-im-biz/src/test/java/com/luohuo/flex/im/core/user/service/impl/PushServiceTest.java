@@ -20,11 +20,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -69,9 +73,8 @@ class PushServiceTest {
 		ReflectionTestUtils.setField(pushService, "mqProducer", mqProducer);
 		ReflectionTestUtils.setField(pushService, "routerService", routerService);
 		ReflectionTestUtils.setField(pushService, "cachePlusOps", cachePlusOps);
-		// @Value 配置（Nacos 配置默认值同源）
-		ReflectionTestUtils.setField(pushService, "threadMultiplier", 2);
-		ReflectionTestUtils.setField(pushService, "minThreads", 4);
+		// @Value 配置（Nacos 配置默认值同源；shutdown-budget-seconds 为 #451 占位预算，见 #450 §2）
+		ReflectionTestUtils.setField(pushService, "shutdownBudgetSeconds", 30L);
 		ReflectionTestUtils.setField(pushService, "maxRetryCount", 3);
 		ReflectionTestUtils.setField(pushService, "delaySeconds", 1);
 		pushService.init();
@@ -159,5 +162,131 @@ class PushServiceTest {
 		// then: 无延迟重试调度
 		verify(mqProducer).sendMsg(eq(MqConstant.PUSH_TOPIC + "node-1"), any());
 		verify(retryScheduler, never()).schedule(ArgumentMatchers.<Runnable>any(), anyLong(), any());
+	}
+
+	@Test
+	@DisplayName("#451：停止期外部发送被准入拒绝——失败 Future，不阻塞、不假成功")
+	void sendAsync_refusedAfterDestroy() {
+		// given: 已停止（空排空，直接完成）
+		pushService.destroy();
+
+		// when
+		CompletableFuture<Void> future = pushService.sendAsync(msg(), List.of(100L), 0L, 100L, false);
+
+		// then: 明确失败，不投递 MQ
+		CompletionException e = assertThrows(CompletionException.class, future::join);
+		assertTrue(e.getCause() instanceof PushService.PushDrainException);
+		verify(mqProducer, never()).sendMsg(anyString(), any());
+	}
+
+	@Test
+	@DisplayName("#451：排空不丢已接纳——在途任务完成后再退出，Future 正常结束")
+	void destroy_waitsForInFlight() throws Exception {
+		// given: 真实单线程池 + 阻塞型 MQ，任务已开始但未完成
+		ExecutorService real = Executors.newSingleThreadExecutor();
+		@SuppressWarnings("unchecked")
+		Map<String, ExecutorService> pools =
+				(Map<String, ExecutorService>) ReflectionTestUtils.getField(pushService, "nodeExecutors");
+		pools.put("node-block", real);
+		when(routerService.findNodeDeviceUser(anyList()))
+				.thenReturn(Map.of("node-block", Map.of("client-1", 100L)));
+		CountDownLatch entered = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		doAnswer(inv -> {
+			entered.countDown();
+			release.await();
+			return null;
+		}).when(mqProducer).sendMsg(eq(MqConstant.PUSH_TOPIC + "node-block"), any());
+
+		CompletableFuture<Void> future = pushService.sendAsync(msg(), List.of(100L), 0L, 100L, false);
+		assertTrue(entered.await(5, TimeUnit.SECONDS));
+
+		// when: 另一线程 destroy，排空应等待而非丢弃；在途完成后 destroy 返回
+		CompletableFuture<Void> draining = CompletableFuture.runAsync(pushService::destroy);
+		Thread.sleep(200);
+		assertTrue(!draining.isDone());
+		release.countDown();
+		draining.get(10, TimeUnit.SECONDS);
+
+		// then: 在途正常完成，恰发送一次
+		future.join();
+		verify(mqProducer).sendMsg(eq(MqConstant.PUSH_TOPIC + "node-block"), any());
+	}
+
+	@Test
+	@DisplayName("#451：截止后未开始任务记未执行——shutdownNow 丢弃的排队任务明确失败")
+	void destroy_unstartedTaskSettledAsUnexecuted() throws Exception {
+		// given: 预算 0，单线程池被占位任务卡住，节点发送排队未开始
+		ReflectionTestUtils.setField(pushService, "shutdownBudgetSeconds", 0L);
+		ExecutorService real = Executors.newSingleThreadExecutor();
+		@SuppressWarnings("unchecked")
+		Map<String, ExecutorService> pools =
+				(Map<String, ExecutorService>) ReflectionTestUtils.getField(pushService, "nodeExecutors");
+		pools.put("node-q", real);
+		when(routerService.findNodeDeviceUser(anyList()))
+				.thenReturn(Map.of("node-q", Map.of("client-1", 100L)));
+		CountDownLatch occupantRunning = new CountDownLatch(1);
+		real.execute(() -> {
+			occupantRunning.countDown();
+			try {
+				Thread.sleep(30_000);
+			} catch (InterruptedException expected) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		assertTrue(occupantRunning.await(5, TimeUnit.SECONDS));
+		CompletableFuture<Void> future = pushService.sendAsync(msg(), List.of(100L), 0L, 100L, false);
+
+		// when
+		pushService.destroy();
+
+		// then: 未执行，且从未投递 MQ
+		CompletionException e = assertThrows(CompletionException.class, future::join);
+		assertTrue(e.getCause() instanceof PushService.PushDrainException);
+		assertTrue(e.getCause().getMessage().contains("未执行"));
+		verify(mqProducer, never()).sendMsg(anyString(), any());
+	}
+
+	@Test
+	@DisplayName("#451：截止时已开始未获结果记结果不确定——不响应中断的调用停等后明示")
+	void destroy_startedButUnresponsiveTaskSettledAsUncertain() throws Exception {
+		// given: 预算 0；MQ 调用吞中断、永不返回（released 兜底放行防泄漏）
+		ReflectionTestUtils.setField(pushService, "shutdownBudgetSeconds", 0L);
+		ExecutorService real = Executors.newSingleThreadExecutor();
+		@SuppressWarnings("unchecked")
+		Map<String, ExecutorService> pools =
+				(Map<String, ExecutorService>) ReflectionTestUtils.getField(pushService, "nodeExecutors");
+		pools.put("node-r", real);
+		when(routerService.findNodeDeviceUser(anyList()))
+				.thenReturn(Map.of("node-r", Map.of("client-1", 100L)));
+		AtomicBoolean released = new AtomicBoolean(false);
+		CountDownLatch entered = new CountDownLatch(1);
+		doAnswer(inv -> {
+			entered.countDown();
+			while (!released.get()) {
+				try {
+					Thread.sleep(50);
+				} catch (InterruptedException ignored) {
+					// 吞中断：模拟不响应中断的底层调用
+				}
+			}
+			return null;
+		}).when(mqProducer).sendMsg(eq(MqConstant.PUSH_TOPIC + "node-r"), any());
+
+		CompletableFuture<Void> future = pushService.sendAsync(msg(), List.of(100L), 0L, 100L, false);
+		assertTrue(entered.await(5, TimeUnit.SECONDS));
+
+		// when
+		try {
+			pushService.destroy();
+
+			// then
+			CompletionException e = assertThrows(CompletionException.class, future::join);
+			assertTrue(e.getCause() instanceof PushService.PushDrainException);
+			assertTrue(e.getCause().getMessage().contains("结果不确定"));
+		} finally {
+			released.set(true);
+			real.shutdownNow();
+		}
 	}
 }
