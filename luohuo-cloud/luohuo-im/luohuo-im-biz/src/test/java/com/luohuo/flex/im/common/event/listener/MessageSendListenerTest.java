@@ -34,7 +34,8 @@ class MessageSendListenerTest {
     private void boot() {
         producer = mock(MQProducer.class);
         ctx = new AnnotationConfigApplicationContext();
-        ctx.registerBean("mqProducer", MQProducer.class, () -> producer);
+        // 手动单例不经过注解后处理，避免 Mockito 子类继承 @Resource 被误注入
+        ctx.getBeanFactory().registerSingleton("mqProducer", producer);
         ctx.register(MessageSendListener.class);
         ctx.refresh();
     }
