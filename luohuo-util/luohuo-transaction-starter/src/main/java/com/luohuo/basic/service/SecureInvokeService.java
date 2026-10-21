@@ -15,6 +15,7 @@ import com.luohuo.basic.dao.SecureInvokeRecordDao;
 import com.luohuo.basic.domain.dto.SecureInvokeDTO;
 import com.luohuo.basic.domain.entity.SecureInvokeRecord;
 import com.luohuo.basic.jackson.JsonUtil;
+import com.luohuo.basic.utils.ShutdownDrainClock;
 
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
@@ -39,6 +40,15 @@ public class SecureInvokeService {
     @Scheduled(cron = "*/5 * * * * ?")
     public void retry() {
         List<SecureInvokeRecord> secureInvokeRecords = secureInvokeRecordDao.getWaitRetryRecords();
+        if (ShutdownDrainClock.isDraining()) {
+            // #461：排空期不再新启重放。记录保持待重试状态，下次启动继续重放；
+            // 调度器通常已在 SmartLifecycle 阶段停止，此门拦截残余竞态调用。
+            for (SecureInvokeRecord secureInvokeRecord : secureInvokeRecords) {
+                ShutdownDrainClock.replaySkipped();
+                log.warn("排空截止：跳过重放（未执行，记录保留待下次启动重放）: id={}", secureInvokeRecord.getId());
+            }
+            return;
+        }
         for (SecureInvokeRecord secureInvokeRecord : secureInvokeRecords) {
             doAsyncInvoke(secureInvokeRecord);
         }
@@ -89,6 +99,12 @@ public class SecureInvokeService {
             @Override
             public void afterCommit() {
                 //事务后执行
+                if (ShutdownDrainClock.isDraining()) {
+                    // #461：排空期不再新启重放；意图记录已持久化，下次启动由 retry() 重放
+                    ShutdownDrainClock.replaySkipped();
+                    log.warn("排空截止：事务提交后跳过重放（未执行，记录保留待下次启动重放）: id={}", record.getId());
+                    return;
+                }
                 if (async) {
                     doAsyncInvoke(record);
                 } else {
@@ -99,6 +115,12 @@ public class SecureInvokeService {
     }
 
     public void doAsyncInvoke(SecureInvokeRecord record) {
+        if (ShutdownDrainClock.isDraining()) {
+            // #461：doAsyncInvoke 是 retry()/afterCommit 之外的最后入口，再查一次截止
+            ShutdownDrainClock.replaySkipped();
+            log.warn("排空截止：跳过异步重放（未执行，记录保留待下次启动重放）: id={}", record.getId());
+            return;
+        }
         executor.execute(() -> {
 			log.info("消息同步执行 线程：{}", Thread.currentThread().getName());
             doInvoke(record);
@@ -107,6 +129,8 @@ public class SecureInvokeService {
 
     public void doInvoke(SecureInvokeRecord record) {
         SecureInvokeDTO secureInvokeDTO = record.getSecureInvokeDTO();
+        // #461：在途重放允许跑完（不加执行门），仅计数供关停结算区分"结果不确定"
+        ShutdownDrainClock.replayStarted();
         try {
             SecureInvokeHolder.setInvoking();
             Class<?> beanClass = Class.forName(secureInvokeDTO.getClassName());
@@ -124,6 +148,7 @@ public class SecureInvokeService {
             //执行失败，等待下次执行
             retryRecord(record, e.getMessage());
         } finally {
+            ShutdownDrainClock.replayFinished();
             SecureInvokeHolder.invoked();
         }
     }
