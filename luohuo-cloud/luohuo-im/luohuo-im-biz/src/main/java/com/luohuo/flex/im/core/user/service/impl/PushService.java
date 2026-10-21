@@ -320,6 +320,57 @@ public class PushService {
 				});
 	}
 
+	/**
+	 * 将消息推送给跟我相关的所有房间
+	 * @param uid 推送给这个uid相关的所有人员
+	 * @param type 前端监听的类型
+	 * @param data 推送的数据
+	 */
+	public void pushRoom(Long uid, String type, Object data) {
+		// #451：停止期拒绝新提交（void 签名无法失败 Future，记数 + 明示，不静默丢弃）。
+		if (!admissionOpen.get()) {
+			rejectedSubmits.incrementAndGet();
+			log.warn("MQ推送拒绝房间推送新提交: uid={}, type={}（#451 有限排空）", uid, type);
+			return;
+		}
+		// 1. 获取用户所在群聊ID列表
+		CacheKey ugKey = PresenceCacheKeyBuilder.userGroupsKey(uid);
+		Set<Long> roomIds = cachePlusOps.sMembers(ugKey).parallelStream().map(obj -> Long.parseLong(obj.toString())).collect(Collectors.toSet());
+
+		if (roomIds.isEmpty()) {
+			return;
+		}
+
+		// 2. 创建通用响应对象
+		WsBaseResp commonResp = new WsBaseResp();
+		commonResp.setType(type);
+		commonResp.setData(data);
+
+		// 3. 获取所有群聊的在线成员并去重
+		Set<Long> allMemberIds = new ConcurrentHashSet<>();
+
+		// 并行处理每个群聊的在线成员
+		roomIds.parallelStream().forEach(roomId -> {
+			CacheKey groupKey = PresenceCacheKeyBuilder.onlineGroupMembersKey(roomId);
+			// 检查群是否在线
+			if (cachePlusOps.sCard(groupKey) < 1L) return;
+
+			// 获取群成员并添加到总集合中
+			cachePlusOps.sMembers(groupKey).stream()
+					.map(obj -> Long.parseLong(obj.toString()))
+					.forEach(allMemberIds::add);
+		});
+
+		// 4. 移除自己，避免给自己发送消息
+//		allMemberIds.remove(uid);
+
+		// 5. 分批推送
+		int pageSize = 200;
+		List<Long> memberIdList = new ArrayList<>(allMemberIds);
+
+		Lists.partition(memberIdList, pageSize).forEach(batch -> sendPushMsg(commonResp, batch, uid));
+	}
+
     /** Enter via this Spring bean proxy only after the RocketMQ DTO tenant context has been restored. */
     @Transactional(rollbackFor = Exception.class)
     public void withMessageTransaction(Runnable work) {
@@ -454,6 +505,38 @@ public class PushService {
 	}
 
 	// ============ 重试 (统一截止) ============
+
+	/**
+	 * 批量推送方法 [重试专用]
+	 */
+	public void sendPushMsgWithRetry(WsBaseResp<?> msg, List<Long> uidList, Long hashId, Long cuid) {
+		sendAsyncWithRetry(msg, uidList, hashId, cuid)
+				.exceptionally(e -> {
+					log.error("重试的批量推送最终失败", e);
+					return null;
+				});
+	}
+
+	/**
+	 * 单用户推送方法 [重试专用]
+	 */
+	public void sendPushMsgWithRetry(WsBaseResp<?> msg, Long uid, Long hashId, Long cuid) {
+		sendPushMsgWithRetry(msg, Arrays.asList(uid), hashId, cuid);
+	}
+
+	/**
+	 * 发送带重试机制的推送消息。
+	 * #451：首次失败的延迟重试经 scheduleDelayRetry 统一截止门（截止后拒绝、不续期）。
+	 */
+	public CompletableFuture<Void> sendAsyncWithRetry(WsBaseResp<?> msg, List<Long> uids, Long hashId, Long cuid) {
+		return sendAsync(msg, uids, hashId, cuid, true)
+				.exceptionally(throwable -> {
+					// 首次推送失败，触发延迟重试
+					log.warn("消息首次推送失败，触发延迟重试。uidList: {}, Reason: {}", uids, throwable.getMessage());
+					scheduleDelayRetry(msg, uids, hashId, cuid, 1, "首次推送失败: " + throwable.getMessage());
+					return null;
+				});
+	}
 
 	/**
 	 * 无差别重试：延迟再次推送
