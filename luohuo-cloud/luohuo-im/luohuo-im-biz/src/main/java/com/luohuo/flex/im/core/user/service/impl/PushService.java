@@ -7,6 +7,7 @@ import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.model.cache.CacheKey;
 import com.luohuo.basic.service.MQProducer;
 import com.luohuo.basic.jackson.JsonUtil;
+import com.luohuo.basic.utils.ShutdownDrainClock;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.model.entity.dto.NodePushDTO;
@@ -421,9 +422,10 @@ public class PushService {
 			log.info("推送有限排空已在进行，跳过重复关闭");
 			return;
 		}
-		long budgetNanos = Math.max(0, TimeUnit.SECONDS.toNanos(shutdownBudgetSeconds));
-		drainDeadlineNanos = System.nanoTime() + budgetNanos;
-		log.info("开始推送有限排空：已停止外部准入，统一截止预算={}s", TimeUnit.NANOSECONDS.toSeconds(budgetNanos));
+		// #461：共享截止时钟幂等首启（本 JVM 其他关停参与者沿用同一截止）；本地截止与之一致。
+		ShutdownDrainClock.beginDrain(shutdownBudgetSeconds);
+		drainDeadlineNanos = ShutdownDrainClock.deadlineNanos();
+		log.info("开始推送有限排空：已停止外部准入，统一截止预算={}s", shutdownBudgetSeconds);
 
 		// 截止前：在途任务与内部重试继续（受原 maxRetryCount 上限与同一截止约束，不续期）。
 		// 事件驱动等待在途 Future 集合排空，避免固定 sleep 探知完成。
@@ -490,6 +492,15 @@ public class PushService {
 		}
 		inFlight.clear();
 		pendingRetries.clear();
+
+		// #461：@SecureInvoke 重放结算（共享时钟计数；重放跑在 ForkJoinPool.commonPool，不在本类池内，
+		// 此处仅如实汇报，无法也不尝试收池——记录已持久化，下次启动由 retry() 重放）
+		long replaysSkipped = ShutdownDrainClock.skippedReplays();
+		long replaysActive = ShutdownDrainClock.activeReplays();
+		if (replaysSkipped > 0 || replaysActive > 0) {
+			log.warn("@SecureInvoke 排空结算：跳过重放（未执行）={}，在途（结果不确定）={}；记录保留待下次启动重放",
+					replaysSkipped, replaysActive);
+		}
 
 		if (unexecuted == 0 && uncertain == 0) {
 			log.info("推送有限排空完成：接收={}，完成={}，拒绝={}，资源已完全退出",

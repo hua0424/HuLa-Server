@@ -2,9 +2,11 @@ package com.luohuo.flex.im.core.user.service.impl;
 
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.service.MQProducer;
+import com.luohuo.basic.utils.ShutdownDrainClock;
 import com.luohuo.flex.common.constant.MqConstant;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.router.NacosRouterService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -63,6 +65,8 @@ class PushServiceTest {
 
 	@BeforeEach
 	void setUp() {
+		// #461：destroy 会开启 JVM 级共享排空时钟，前后复位防静态状态跨用例污染
+		ShutdownDrainClock.reset();
 		pushService = new PushService();
 		ReflectionTestUtils.setField(pushService, "mqProducer", mqProducer);
 		ReflectionTestUtils.setField(pushService, "routerService", routerService);
@@ -89,6 +93,11 @@ class PushServiceTest {
 		WsBaseResp<?> msg = new WsBaseResp<>();
 		msg.setType("test-type");
 		return msg;
+	}
+
+	@AfterEach
+	void tearDown() {
+		ShutdownDrainClock.reset();
 	}
 
 	@Test
