@@ -3,7 +3,6 @@ package com.luohuo.flex.ws.websocket;
 import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.map.MapUtil;
 import cn.hutool.json.JSONUtil;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.luohuo.basic.cache.redis2.CacheResult;
 import com.luohuo.basic.cache.repository.CachePlusOps;
 import com.luohuo.basic.model.cache.CacheKey;
@@ -15,11 +14,8 @@ import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSOnlineNotify;
 import com.luohuo.flex.model.redis.annotation.RedissonLock;
 import com.luohuo.flex.router.RouterCacheKeyBuilder;
-import com.luohuo.flex.ws.config.ThreadPoolProperties;
 import com.luohuo.flex.ws.service.PushService;
 import com.luohuo.flex.ws.websocket.nacos.NacosSessionRegistry;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.ZSetOperations;
@@ -34,9 +30,6 @@ import reactor.core.scheduler.Schedulers;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
@@ -58,12 +51,8 @@ public class SessionManager {
 	private NacosSessionRegistry nacosSessionRegistry;
 
 	@Resource
-	private ThreadPoolProperties threadPoolProperties;
-	@Resource
 	private PushService pushService;
 
-	// 线程池实例数组（按节点分片）
-	private ThreadPoolExecutor[] sessionExecutors;
 	// 服务状态 -> 默认可用
 	private final AtomicBoolean acceptingNewConnections = new AtomicBoolean(true);
 
@@ -657,39 +646,5 @@ public class SessionManager {
 		if (!staleDevices.isEmpty() || reclaimed > 0) {
 			log.info("残留回收完成: 陈旧设备数={}, 已清理数={}", staleDevices.size(), reclaimed);
 		}
-	}
-
-	@PostConstruct
-	public void init() {
-		int poolSize = Math.min(32, Math.max(1, Runtime.getRuntime().availableProcessors() * 2));
-		sessionExecutors = new ThreadPoolExecutor[poolSize];
-
-		for (int i = 0; i < poolSize; i++) {
-			sessionExecutors[i] = new ThreadPoolExecutor(
-					threadPoolProperties.getCoreSize(),  // 核心线程数
-					threadPoolProperties.getMaxSize(),    // 最大线程数
-					threadPoolProperties.getKeepAlive(), TimeUnit.SECONDS,
-					new LinkedBlockingQueue<>(threadPoolProperties.getQueueCapacity()),
-					new ThreadFactoryBuilder().setNameFormat("session-pool-" + i + "-%d").build(),
-					new ThreadPoolExecutor.CallerRunsPolicy()  // 队列满时由调用线程执行
-			);
-		}
-	}
-
-	@PreDestroy
-	public void destroy() {
-		log.info("关闭会话管理线程池...");
-		Arrays.stream(sessionExecutors).forEach(executor -> {
-			executor.shutdown();
-			try {
-				if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-					List<Runnable> dropped = executor.shutdownNow();
-					log.warn("强制关闭线程池, 丢弃任务数: {}", dropped.size());
-				}
-			} catch (InterruptedException e) {
-				executor.shutdownNow();
-				Thread.currentThread().interrupt();
-			}
-		});
 	}
 }
