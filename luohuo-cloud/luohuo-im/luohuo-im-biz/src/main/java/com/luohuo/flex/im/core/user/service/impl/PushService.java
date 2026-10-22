@@ -179,13 +179,14 @@ public class PushService {
 			settleRejected(future, nodeId, msg, e);
 			return future;
 		}
-		NodeSendTask task = new NodeSendTask(future, nodeId,
+		NodeSendTask task = new NodeSendTask(future, nodeId, msg.getType(),
 				() -> doNodeSend(msg, deviceUserMap, hashId, cuid, retry, nodeId));
 		inFlight.put(future, new TrackedTask(task, "send", nodeId));
 		future.whenComplete((r, t) -> inFlight.remove(future));
-		admittedSends.incrementAndGet();
 		try {
 			exec.execute(task);
+			// #468：接收计数只在提交成功后累加，被拒提交仅计入「拒绝」，汇总口径互斥。
+			admittedSends.incrementAndGet();
 		} catch (RejectedExecutionException e) {
 			// 与 destroy 并发：执行器已关闭，该提交明确属于未接收被拒绝，不悬挂。
 			settleRejected(future, nodeId, msg, e);
@@ -228,11 +229,13 @@ public class PushService {
 	private final class NodeSendTask implements Runnable {
 		private final CompletableFuture<Void> future;
 		private final String nodeId;
+		private final String msgType;
 		private final Runnable body;
 
-		NodeSendTask(CompletableFuture<Void> future, String nodeId, Runnable body) {
+		NodeSendTask(CompletableFuture<Void> future, String nodeId, String msgType, Runnable body) {
 			this.future = future;
 			this.nodeId = nodeId;
+			this.msgType = msgType;
 			this.body = body;
 		}
 
@@ -252,6 +255,8 @@ public class PushService {
 					completedSends.incrementAndGet();
 				}
 			} catch (Throwable t) {
+				// #468：fire-and-forget 路径无人接 Future，兜底异常原本零痕迹；留 warn 便于定位。
+				log.warn("IM推送节点任务异常: nodeId={}, type={}", nodeId, msgType, t);
 				future.completeExceptionally(t);
 			}
 		}
