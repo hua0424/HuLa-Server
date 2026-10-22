@@ -174,9 +174,10 @@ public class PushService {
 				() -> doNodeSend(msg, deviceUserMap, cuid, targetNode));
 		inFlight.put(future, new TrackedTask(task, "send", targetNode));
 		future.whenComplete((r, t) -> inFlight.remove(future));
-		admittedSends.incrementAndGet();
 		try {
 			exec.execute(task);
+			// #466：接收计数只在提交成功后累加，被拒提交仅计入「拒绝」，汇总口径互斥。
+			admittedSends.incrementAndGet();
 		} catch (RejectedExecutionException e) {
 			// 与 destroy 并发：执行器已关闭，该提交明确属于未接收被拒绝，不悬挂。
 			settleRejected(future, targetNode, msg, e);
@@ -317,6 +318,8 @@ public class PushService {
 					completedSends.incrementAndGet();
 				}
 			} catch (Throwable t) {
+				// #466：fire-and-forget 路径无人接 Future，兜底异常原本零痕迹；留 warn 便于定位。
+				log.warn("WS推送节点任务异常: nodeId={}", targetNode, t);
 				future.completeExceptionally(t);
 			}
 		}
