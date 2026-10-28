@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.chat.service;
 
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawGroupConfigUpdateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigStateResp;
 
 import java.util.List;
 
@@ -19,6 +20,28 @@ public interface AiclawGroupConfigService {
 	 * @return 群配置
 	 */
 	AiclawGroupConfigResp getConfig(Long aiclawUid, Long roomId, Long uid);
+
+	/**
+	 * aichatoverview#484 (T3)：aiclaw 群配置的「当前事实」窄读。
+	 *
+	 * <p>绕开 Redis 配置缓存（{@code getConfig} 会把「无配置行」的默认值也写入缓存，
+	 * 一条迟到的旧快照会让消费者长期看不到新批准的 approved / workspaceDir），
+	 * 在短只读事务内直查事实表，并显式区分：</p>
+	 * <ul>
+	 *   <li>{@code PRESENT} —— 读取成立；{@code configured=false} 表示「无配置行」这一合法状态
+	 *       （带既有默认 approved=0），不是「被删除」；</li>
+	 *   <li>{@code NOT_ACCESSIBLE} —— 群不存在/已解散、读取者不在群、目标 aiclaw 不在群，
+	 *       一律同形返回，不额外披露群或助理是否存在。</li>
+	 * </ul>
+	 *
+	 * <p>网络/超时/DB 异常照常抛出（typed 传输错误），调用方不得把异常当 {@code NOT_ACCESSIBLE}。
+	 * 本快照只证明一次读取，不是执行授权凭据。</p>
+	 *
+	 * @param aiclawUid aiclaw 的 uid
+	 * @param roomId    群聊 room_id
+	 * @param uid       当前登录用户 uid（= ContextUtil.getUid()）
+	 */
+	AiclawGroupConfigStateResp readCurrentGroupConfig(Long aiclawUid, Long roomId, Long uid);
 
 	/**
 	 * 列出「该 aiclaw 自己」已存在的全部群配置（用于插件启动/重连预热）。

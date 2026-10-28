@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.common.constant.AiclawRedisKeys;
+import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
@@ -19,11 +20,13 @@ import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawGroupConfigUpdateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigStateResp;
 import com.luohuo.flex.model.entity.ws.WSGroupConfigChange;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
@@ -51,6 +54,85 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	private final StringRedisTemplate stringRedisTemplate;
 	private final RoomGroupCache roomGroupCache;
 	private final AiclawDao aiclawDao;
+	private final GroupMemberDao groupMemberDao;
+
+	/**
+	 * aichatoverview#484 (T3)：aiclaw 群配置的「当前事实」窄读。
+	 *
+	 * <p>与 {@link #getConfig} 的差别（为什么不能直接复用它来校准）：</p>
+	 * <ul>
+	 *   <li>{@code getConfig} 先查 Redis（TTL 以分钟计），并把「无配置行」构造出的默认值也写进缓存——
+	 *       一条迟到的旧缓存会让消费者长期看不到新批准的 approved / workspaceDir；</li>
+	 *   <li>membership 走 {@code groupMemberCache}，与事实表可能不同源；</li>
+	 *   <li>返回裸 Resp，无配置与「无权访问」在调用方看来都像「有值」，
+	 *       客户端无法区分「未配置的合法默认」与「不可信」。 </li>
+	 * </ul>
+	 *
+	 * <p>本入口绕开上述缓存，在短只读事务内直查事实表，返回显式 {@code configured}
+	 * 与 PRESENT / NOT_ACCESSIBLE 两种结论。它只证明本次读取，不是执行授权凭据。</p>
+	 */
+	@Override
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+	public AiclawGroupConfigStateResp readCurrentGroupConfig(Long aiclawUid, Long roomId, Long uid) {
+		if (aiclawUid == null || roomId == null || uid == null) {
+			return notAccessibleConfig(roomId);
+		}
+		// 1. 群存在：getByRoomIdFromDb 本身就是直查 DB（roomId 维度没有 Redis 失效 wiring），
+		//    受 @TableLogic 过滤，已解散/已删除的群在此即不可访问。
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(roomId);
+		if (roomGroup == null) {
+			return notAccessibleConfig(roomId);
+		}
+
+		// 2. 读取者必须是群成员（直查 im_group_member，不经 groupMemberCache）
+		if (groupMemberDao.getMemberByGroupId(roomGroup.getId(), uid) == null) {
+			return notAccessibleConfig(roomId);
+		}
+
+		// 3. 目标 aiclaw 仍在群：退群后残留的配置行不是当前事实，不能继续被消费者当作生效配置。
+		//    读取者边界与既有 getConfig 保持一致（本人在群即可读），本入口不扩大也不收紧。
+		if (groupMemberDao.getMemberByGroupId(roomGroup.getId(), aiclawUid) == null) {
+			return notAccessibleConfig(roomId);
+		}
+
+		// 4. 配置行：直查事实表，绝不复用 Redis 中的旧快照
+		AiclawGroupConfig config = aiclawGroupConfigMapper.selectOne(
+				new LambdaQueryWrapper<AiclawGroupConfig>()
+						.eq(AiclawGroupConfig::getAiclawUid, aiclawUid)
+						.eq(AiclawGroupConfig::getRoomId, roomId));
+
+		AiclawGroupConfigResp resp;
+		boolean configured = config != null;
+		if (!configured) {
+			// 无配置行是合法状态：configured=false + 既有默认（approved=0 未批准），不是「已删除」
+			resp = AiclawGroupConfigResp.builder()
+					.aiclawUid(aiclawUid)
+					.roomId(roomId)
+					.rateLimitPerMinute(aiclawProperties.getRate().getDefaultPerMinute())
+					.mentionRequired(1)
+					.dailyLimit(aiclawProperties.getRate().getDefaultDaily())
+					.respondToAi(1)
+					.approved(0)
+					.build();
+		} else {
+			resp = BeanUtil.copyProperties(config, AiclawGroupConfigResp.class);
+		}
+		resp.setAccount(roomGroup.getAccount());
+
+		return AiclawGroupConfigStateResp.builder()
+				.outcome(AiclawGroupConfigStateResp.OUTCOME_PRESENT)
+				.configured(configured)
+				.config(resp)
+				.build();
+	}
+
+	private AiclawGroupConfigStateResp notAccessibleConfig(Long roomId) {
+		return AiclawGroupConfigStateResp.builder()
+				.outcome(AiclawGroupConfigStateResp.OUTCOME_NOT_ACCESSIBLE)
+				.configured(false)
+				.config(null)
+				.build();
+	}
 
 	@Override
 	public AiclawGroupConfigResp getConfig(Long aiclawUid, Long roomId, Long uid) {

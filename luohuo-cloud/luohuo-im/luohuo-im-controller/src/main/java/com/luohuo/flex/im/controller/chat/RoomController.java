@@ -6,11 +6,13 @@ import com.luohuo.flex.im.domain.vo.req.IdReqVO;
 import com.luohuo.flex.im.domain.vo.req.room.DisbandGroupReq;
 import com.luohuo.flex.im.domain.vo.req.room.GroupMemberPageReq;
 import com.luohuo.flex.im.domain.vo.req.room.GroupPageReq;
+import com.luohuo.flex.im.domain.vo.req.room.GroupUseStateReq;
 import com.luohuo.flex.im.domain.vo.req.room.UpdateMemberNicknameReq;
 import com.luohuo.flex.im.domain.vo.res.IdRespVO;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
+import com.luohuo.flex.im.domain.vo.resp.room.GroupUseStateResp;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -97,6 +99,13 @@ public class RoomController {
 			@RequestParam(value = "online", required = false, defaultValue = "false") Boolean online) {
 		Long aiclawUid = ContextUtil.getUid();
 		return R.success(roomService.aiclawListMembers(roomId, Boolean.TRUE.equals(online), aiclawUid));
+	}
+
+	@GetMapping("/group/use-state")
+	@Operation(summary ="群成员/权限当前事实（#484：绕缓存一致读，仅本次快照不是执行授权）")
+	public R<GroupUseStateResp> readGroupUseState(@Valid GroupUseStateReq request) {
+		Long uid = ContextUtil.getUid();
+		return R.success(roomService.readGroupUseState(request, uid));
 	}
 
     @GetMapping("/group/member/list")
