@@ -183,16 +183,13 @@ public class ThinkingProcessor implements MessageProcessor {
 				: receipt != null ? receipt.getLong("thinkingId")
 				: req.getClientRunId() == null ? result.getLong("data") : null; // Old IM cannot promise run idempotency.
 		if (id == null) {
-			pushError(actor, req.getRoomId(), null, req.getClientRunId(), result == null
-					? "thinking_start_unknown" : "thinking_run_conflict".equals(result.getStr("msg"))
-					? "thinking_run_conflict" : receipt == null && req.getClientRunId() != null && Boolean.TRUE.equals(result.getBool("success"))
-					? "thinking_run_unsupported" : "thinking_start_failed");
+			pushError(actor, req.getRoomId(), null, req.getClientRunId(), startErrorCode(result, receipt, req));
 			return;
 		}
 		String thinkingId = String.valueOf(id);
 		WSThinkingStart start = WSThinkingStart.builder().thinkingId(thinkingId)
 				.fromUid(String.valueOf(actor)).roomId(req.getRoomId()).triggerMsgId(req.getTriggerMsgId())
-				.clientRunId(req.getClientRunId()).build();
+				.clientRunId(req.getClientRunId()).authorizationEpoch(req.getAuthorizationEpoch()).build();
 		if (receipt != null && Boolean.TRUE.equals(receipt.getBool("replayed"))) {
 			Integer status = receipt.getInt("status");
 			if (status == null || status < 0 || status > 4) {
@@ -444,6 +441,23 @@ public class ThinkingProcessor implements MessageProcessor {
 		WSThinkingEnd end = WSThinkingEnd.builder().thinkingId(id).roomId(room)
 				.fromUid(String.valueOf(actor)).clientRunId(clientRunId).status("error").error(error).build();
 		pushToMembers("thinkingEnd", end, List.of(actor), actor);
+	}
+
+	/**
+	 * aichatoverview#485 T4：START 失败原因按「可辨认的权限合同拒绝 > 冲突 > 旧版 IM > 未知」排序。
+	 *
+	 * <p>权限拒绝必须原样上抛（{@code authorization_*} / {@code room_not_accessible}），
+	 * 让调用方能把它当作终态；被折叠成 {@code thinking_start_failed} 会让撤权后的旧任务一直被重试。</p>
+	 */
+	private static String startErrorCode(JSONObject result, JSONObject receipt, WSThinkingStart req) {
+		if (result == null) return "thinking_start_unknown";
+		String message = result.getStr("msg");
+		if (message != null && (message.startsWith("authorization_") || "room_not_accessible".equals(message)))
+			return message;
+		if ("thinking_run_conflict".equals(message)) return "thinking_run_conflict";
+		if (receipt == null && req.getClientRunId() != null && Boolean.TRUE.equals(result.getBool("success")))
+			return "thinking_run_unsupported";
+		return "thinking_start_failed";
 	}
 
 	private <T> void pushToMembers(String type, T data, List<Long> members, Long actor) {

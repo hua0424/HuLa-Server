@@ -251,7 +251,7 @@ public class ChatServiceImpl implements ChatService {
 		if (tenantId == null || uid == null || request.getRoomId() == null) {
 			throw new BizException("缺少可信租户或消息身份");
 		}
-		thinkingService.requireActiveAgent(uid, request.getRoomId(), tenantId);
+		thinkingService.requireActiveAgent(uid, request.getRoomId(), tenantId, requestedEpoch(request));
 		Long thinkingId;
 		try {
 			thinkingId = Long.valueOf(request.getExtra().get("thinkingId").toString());
@@ -262,6 +262,21 @@ public class ChatServiceImpl implements ChatService {
 			throw new BizException("思考记录不存在或无权关联");
 		}
 		return thinkingId; // Completed thinking remains eligible for explicit association.
+	}
+
+	/**
+	 * aichatoverview#485 T4：把输入入队时可信读取到的授权代次随消息带回。
+	 *
+	 * <p>客户端自报的 epoch 不是授权证明——server 只用它声明「这条输入属于哪个授权上下文」，
+	 * 再用当前事实重新推导代次比对；缺省（旧客户端/旧积压）不放松校验，只是不做代次比对。</p>
+	 */
+	private String requestedEpoch(ChatMessageReq request) {
+		Object epoch = request.getExtra() == null ? null : request.getExtra().get("authorizationEpoch");
+		if (epoch == null) {
+			return null;
+		}
+		String value = epoch.toString().strip();
+		return value.isEmpty() || value.length() > 128 ? null : value;
 	}
 
 	private void associateThinking(Long thinkingId, Long uid, Long roomId, Long msgId) {
@@ -298,7 +313,7 @@ public class ChatServiceImpl implements ChatService {
 		if (!UserTypeEnum.AICLAW.getValue().equals(sender.getUserType())) {
 			return; // 普通用户绕过 AICLAW 专属校验
 		}
-		thinkingService.requireActiveAgent(uid, request.getRoomId(), ContextUtil.getTenantId());
+		thinkingService.requireActiveAgent(uid, request.getRoomId(), ContextUtil.getTenantId(), requestedEpoch(request));
 	}
 
     /**

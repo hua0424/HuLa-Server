@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
+import com.luohuo.flex.im.core.chat.service.GroupRunAdmissionService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.user.dao.AiclawDao;
@@ -32,7 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -54,6 +57,7 @@ class AiclawGroupConfigCurrentReadTest {
 	@Mock private RoomGroupCache roomGroupCache;
 	@Mock private AiclawDao aiclawDao;
 	@Mock private GroupMemberDao groupMemberDao;
+	@Mock private GroupRunAdmissionService groupRunAdmissionService;
 
 	@InjectMocks private AiclawGroupConfigServiceImpl service;
 
@@ -112,6 +116,35 @@ class AiclawGroupConfigCurrentReadTest {
 		assertEquals("/w/acme", resp.getConfig().getWorkspaceDir());
 		assertEquals(9, resp.getConfig().getRateLimitPerMinute());
 		assertEquals("acc", resp.getConfig().getAccount());
+	}
+
+	/** aichatoverview#485 T4：当前读同时带回授权代次，但它只是「这份输入属于哪个授权上下文」的标记。 */
+	@Test
+	@DisplayName("#485 当前读：带上按当前事实推导的授权代次")
+	void carriesAuthorizationEpoch() {
+		when(roomGroupCache.getByRoomIdFromDb(ROOM_ID)).thenReturn(roomGroup());
+		when(groupMemberDao.getMemberByGroupId(GROUP_ID, OWNER_UID)).thenReturn(member(OWNER_UID));
+		when(groupMemberDao.getMemberByGroupId(GROUP_ID, AICLAW_UID)).thenReturn(member(AICLAW_UID));
+		when(aiclawGroupConfigMapper.selectOne(any(Wrapper.class))).thenReturn(null);
+		when(groupRunAdmissionService.currentEpoch(eq(AICLAW_UID), eq(ROOM_ID), any())).thenReturn("epoch-1");
+
+		AiclawGroupConfigStateResp resp = service.readCurrentGroupConfig(AICLAW_UID, ROOM_ID, OWNER_UID);
+
+		assertEquals("epoch-1", resp.getAuthorizationEpoch());
+	}
+
+	/**
+	 * aichatoverview#485 T4：无权访问不推导代次 —— 否则调用方会以为拿到了一份可用的授权上下文。
+	 */
+	@Test
+	@DisplayName("#485 当前读：NOT_ACCESSIBLE 不返回授权代次")
+	void notAccessibleHasNoEpoch() {
+		when(roomGroupCache.getByRoomIdFromDb(ROOM_ID)).thenReturn(null);
+
+		AiclawGroupConfigStateResp resp = service.readCurrentGroupConfig(AICLAW_UID, ROOM_ID, OWNER_UID);
+
+		assertNull(resp.getAuthorizationEpoch());
+		verifyNoInteractions(groupRunAdmissionService);
 	}
 
 	@Test

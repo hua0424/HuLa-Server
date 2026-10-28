@@ -59,12 +59,20 @@ class ThinkingServiceTest {
 	private AiclawThinkingMapper thinkingMapper;
 	@Mock private AiclawDao aiclawDao;
 	@Mock private UserDao userDao;
+	/** aichatoverview#485 T4：执行准入改为服务端当前事实判定，ThinkingService 只消费其结果。 */
+	@Mock private GroupRunAdmissionService groupRunAdmissionService;
 	@Mock private com.luohuo.flex.common.config.AiclawProperties aiclawProperties;
 	@Mock private com.luohuo.flex.im.core.user.service.impl.PushService pushService;
 	@Mock private MessageDao messageDao;
 
 	@BeforeEach
-	void tenant() { ContextUtil.setTenantId(1L); }
+	void tenant() {
+		ContextUtil.setTenantId(1L);
+		// 默认拒绝：只有显式 activeAgent() 的用例才获得准入，避免「没配 stub 就当已授权」。
+		lenient().when(groupRunAdmissionService.admitGroupRun(any(), any(), any(), any()))
+				.thenReturn(admission(GroupRunAdmissionService.DENIED,
+						GroupRunAdmissionService.REASON_IDENTITY_INACTIVE));
+	}
 
 	@AfterEach
 	void clearTenant() { ContextUtil.remove(); }
@@ -96,16 +104,15 @@ class ThinkingServiceTest {
 	private void activeAgent() { activeAgent(1L); }
 
 	private void activeAgent(Long tenantId) {
-		User user = new User();
-		user.setUserType(UserTypeEnum.AICLAW.getValue());
-		user.setTenantId(tenantId);
-		user.setState(0);
-		Aiclaw aiclaw = new Aiclaw();
-		aiclaw.setTenantId(tenantId);
-		aiclaw.setAuthStatus(1);
-		when(userDao.getById(100L)).thenReturn(user);
-		when(aiclawDao.getByUid(100L)).thenReturn(aiclaw);
-		when(thinkingMapper.isCurrentMember(100L, 10L, tenantId)).thenReturn(1);
+		lenient().when(groupRunAdmissionService.admitGroupRun(eq(100L), eq(10L), eq(tenantId), any()))
+				.thenReturn(admission(GroupRunAdmissionService.ADMITTED, null));
+	}
+
+	private static GroupRunAdmissionService.Admission admission(String outcome, String reason) {
+		return GroupRunAdmissionService.Admission.builder()
+				.outcome(outcome).roomId(10L).actorUid(100L)
+				.authorizationEpoch("epoch-test").reason(reason)
+				.schema(GroupRunAdmissionService.SCHEMA).build();
 	}
 
 	@Test
@@ -224,7 +231,9 @@ class ThinkingServiceTest {
 		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, 99L, "run-a"));
 		when(thinkingMapper.selectByRun(1L, 100L, "RUN-A")).thenReturn(original);
 		assertThrows(BizException.class, () -> thinkingService.create(100L, 10L, 42L, "RUN-A"));
-		when(thinkingMapper.isCurrentMember(100L, 11L, 1L)).thenReturn(1);
+		when(groupRunAdmissionService.admitGroupRun(100L, 11L, 1L, null))
+				.thenReturn(admission(GroupRunAdmissionService.DENIED,
+						GroupRunAdmissionService.REASON_MEMBERSHIP_GONE));
 		assertThrows(BizException.class, () -> thinkingService.create(100L, 11L, 42L, "run-a"));
 		verify(thinkingMapper, never()).insertWithRun(any(), any(), any(), any(), any(), any());
 	}

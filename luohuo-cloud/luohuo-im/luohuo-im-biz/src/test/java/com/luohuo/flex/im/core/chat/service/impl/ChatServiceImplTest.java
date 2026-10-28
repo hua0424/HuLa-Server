@@ -253,9 +253,9 @@ class ChatServiceImplTest {
 	@DisplayName("aiclaw 成员校验被 Service 拒绝 → 抛 BizException")
 	void aiclaw_notMember_shouldThrow() {
 		when(userCache.get(AICLAW_UID)).thenReturn(aiclawUser());
-		// 共享 Service 抛异常
+		// 共享 Service 抛异常（#485 起发送路径带输入入队时固定的授权代次）
 		doThrow(new BizException("非房间成员，无法发送消息"))
-				.when(thinkingService).requireActiveAgent(AICLAW_UID, ROOM_ID, 1L);
+				.when(thinkingService).requireActiveAgent(AICLAW_UID, ROOM_ID, 1L, null);
 
 		ChatMessageReq req = baseReq(ROOM_ID);
 		BizException ex = assertThrows(BizException.class, () -> chatService.sendMsg(req, AICLAW_UID));
