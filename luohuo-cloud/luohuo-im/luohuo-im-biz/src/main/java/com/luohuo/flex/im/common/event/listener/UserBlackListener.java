@@ -13,6 +13,7 @@ import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.model.entity.WSRespTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSBlack;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.api.DefUserApi;
 
@@ -54,7 +55,12 @@ public class UserBlackListener {
         WSBlack black = new WSBlack(uid);
         resp.setData(black);
         resp.setType(WSRespTypeEnum.INVALID_USER.getType());
-        pushService.sendPushMsg(resp, uid, ContextUtil.getUid());
+        // #482：推送被拒不得阻断强制下线；推送已接收也不代表会话已失效，两者独立记录。
+        PushSubmission submission = pushService.submitPushMsg(resp, uid, ContextUtil.getUid());
+        if (submission != null && !submission.isFullyAdmitted()) {
+            log.info("拉黑通知推送未全部接收: uid={}, admission={}, routeStatus={}, 未接收={}",
+                    uid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+        }
         try {
             defUserApi.logout(uid, null);
         } catch (Exception e) {

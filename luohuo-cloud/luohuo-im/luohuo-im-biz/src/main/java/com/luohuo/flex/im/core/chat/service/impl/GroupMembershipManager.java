@@ -60,6 +60,8 @@ import com.luohuo.flex.model.entity.ws.ChatMemberResp;
 import com.luohuo.flex.model.entity.ws.WSMemberChange;
 import com.luohuo.flex.im.core.user.service.RoleService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 
 import java.util.*;
@@ -119,6 +121,15 @@ public class GroupMembershipManager {
 	@RedissonLock(prefixKey = "addAdmin:", key = "#request.roomId")
 	@Transactional(rollbackFor = Exception.class)
 	public void addAdmin(Long uid, AdminSetReq request) {
+		addAdmin(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 B：本方法在真实事务内，通知回执只在业务真正提交后才写入载体；回滚即零任务。
+	 */
+	@RedissonLock(prefixKey = "addAdmin:", key = "#request.roomId")
+	@Transactional(rollbackFor = Exception.class)
+	public void addAdmin(Long uid, AdminSetReq request, PushReceipt receipt) {
 		// 1. 判断群聊是否存在
 		RoomGroup roomGroup = verifyGet(uid, request);
 
@@ -133,9 +144,9 @@ public class GroupMembershipManager {
 		// 3. 增加管理员
 		groupMemberDao.addAdmin(roomGroup.getId(), request.getUidList());
 
-		// 5. 发送给所有群成员
+		// 5. 发送给所有群成员（提交后提交，不在此等待 MQ/重试/ACK）
 		List<Long> memberUidList = groupMemberCache.getMemberUidList(roomGroup.getRoomId());
-		pushService.sendPushMsg(MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), true)), memberUidList, uid);
+		pushService.submitAfterCommit(receipt, MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), true)), memberUidList, uid);
 
 		// 每个被邀请的人都要收到邀请进群的消息
 		setAdminNotice(NoticeTypeEnum.GROUP_SET_ADMIN, uid, request.getUidList(), manageUidList, roomGroup.getRoomId());
@@ -176,13 +187,22 @@ public class GroupMembershipManager {
 	@RedissonLock(prefixKey = "revokeAdmin:", key = "#request.roomId")
 	@Transactional(rollbackFor = Exception.class)
 	public void revokeAdmin(Long uid, AdminSetReq request) {
+		revokeAdmin(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 B：通知回执只在业务真正提交后写入载体。
+	 */
+	@RedissonLock(prefixKey = "revokeAdmin:", key = "#request.roomId")
+	@Transactional(rollbackFor = Exception.class)
+	public void revokeAdmin(Long uid, AdminSetReq request, PushReceipt receipt) {
 		// 1. 校验
 		RoomGroup roomGroup = verifyGet(uid, request);
 
 		// 2. 撤销管理员
 		groupMemberDao.revokeAdmin(roomGroup.getId(), request.getUidList());
 		List<Long> memberUidList = groupMemberCache.getMemberUidList(roomGroup.getRoomId());
-		pushService.sendPushMsg(MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), false)), memberUidList, uid);
+		pushService.submitAfterCommit(receipt, MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), false)), memberUidList, uid);
 
 		setAdminNotice(NoticeTypeEnum.GROUP_RECALL_ADMIN, uid, request.getUidList(), new ArrayList<>(), roomGroup.getRoomId());
 	}
@@ -366,7 +386,12 @@ public class GroupMembershipManager {
 					memberUidList.add(removedUid);
 				}
 				WsBaseResp<WSMemberChange> ws = MemberAdapter.buildMemberRemoveWS(roomGroup.getRoomId(), (int) (memberNum - 1), Math.toIntExact(cachePlusOps.sCard(PresenceCacheKeyBuilder.onlineGroupMembersKey(room.getId()))), Arrays.asList(member.getUid()), WSMemberChange.CHANGE_TYPE_REMOVE);
-				pushService.sendPushMsg(ws, memberUidList, uid);
+				// #482：移除已提交，推送回执只记录事实；被拒不得截断后续通知落库。
+				PushSubmission submission = pushService.submitPushMsg(ws, memberUidList, uid);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("移出群成员推送未全部接收: roomId={}, removedUid={}, admission={}, routeStatus={}, 未接收={}",
+							roomGroup.getRoomId(), removedUid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
 				groupMemberCache.evictMemberList(room.getId());
 				groupMemberCache.evictExceptMemberList(room.getId());
 				groupMemberCache.evictMemberDetail(room.getId(), removedUid);
@@ -462,7 +487,12 @@ public class GroupMembershipManager {
 		invites.forEach(invite -> {
 			SummeryInfoDTO user = userSummaryCache.get(invite.getTargetId());
 			if (ObjectUtil.isNotNull(user)) {
-				pushService.sendPushMsg(MessageAdapter.buildInviteeUserAddGroupMessage(noticeDao.getUnReadCount(invite.getTargetId(), invite.getTargetId())), invite.getTargetId(), uid);
+				// #482：邀请记录已落库，推送回执只记录事实，被拒不得阻断后续通知批量落库。
+				PushSubmission submission = pushService.submitPushMsg(MessageAdapter.buildInviteeUserAddGroupMessage(noticeDao.getUnReadCount(invite.getTargetId(), invite.getTargetId())), invite.getTargetId(), uid);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("群邀请提醒推送未全部接收: roomId={}, targetUid={}, admission={}, routeStatus={}, 未接收={}",
+							roomGroup.getRoomId(), invite.getTargetId(), submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
 			}
 
 			// 每个被邀请的人都要收到邀请进群的消息
@@ -591,7 +621,8 @@ public class GroupMembershipManager {
 		// 4. 通知群里所有人昵称改变了
 		if (!equals && success) {
 			List<Long> memberUidList = groupMemberCache.getMemberExceptUidList(request.getRoomId());
-			pushService.sendPushMsg(RoomAdapter.buildMyRoomGroupChangeWS(request.getRoomId(), request.getUid(), request.getMyName()), memberUidList, request.getUid());
+			// #482：昵称已在本事务内落库，推送改为提交后提交（回滚=零任务），回执只记录事实。
+			pushService.submitAfterCommit(null, RoomAdapter.buildMyRoomGroupChangeWS(request.getRoomId(), request.getUid(), request.getMyName()), memberUidList, request.getUid());
 		}
 	}
 }

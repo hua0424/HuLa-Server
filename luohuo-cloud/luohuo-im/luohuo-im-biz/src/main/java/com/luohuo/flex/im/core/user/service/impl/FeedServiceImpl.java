@@ -306,7 +306,8 @@ public class FeedServiceImpl implements FeedService {
 		}
 
 		// 4. 告知 pushList 我发布了朋友圈
-		pushService.sendPushMsg(MemberAdapter.buildFeedPushWS(uid), pushList, uid);
+		// #482：有外层事务时提交后提交推送（回滚=零任务），无事务（editFeed）时直接提交并记录回执。
+		pushService.submitAfterCommit(null, MemberAdapter.buildFeedPushWS(uid), pushList, uid);
 	}
 
 	/**

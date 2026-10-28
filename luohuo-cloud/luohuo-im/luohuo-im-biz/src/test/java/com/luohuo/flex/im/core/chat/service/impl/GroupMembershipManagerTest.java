@@ -323,8 +323,8 @@ class GroupMembershipManagerTest {
 		verify(noticeService, never()).createNotice(any(), any(), anyLong(), anyLong(), any(), any(), any(), any());
 
 		// 每个被邀请人的未读数推送仍在循环内逐条发生（读 save 前状态）—— 每人恰一次
-		verify(pushService, times(1)).sendPushMsg(any(), eq(human1), eq(INVITER));
-		verify(pushService, times(1)).sendPushMsg(any(), eq(human2), eq(INVITER));
+		verify(pushService, times(1)).submitPushMsg(any(), eq(human1), eq(INVITER));
+		verify(pushService, times(1)).submitPushMsg(any(), eq(human2), eq(INVITER));
 	}
 
 	// ==================== 新增：delMember 状态转移（含 #170 AOP core） ====================
@@ -531,7 +531,7 @@ class GroupMembershipManagerTest {
 		membershipManager.addAdmin(OWNER, req);
 
 		verify(groupMemberDao).addAdmin(eq(GROUP_ID), eq(List.of(target)));
-		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+		verify(pushService).submitAfterCommit(any(), any(), anyList(), eq(OWNER));
 		// target 不在原管理员集合 → 应给它发通知
 		verify(noticeService).createNotice(any(), any(), eq(OWNER), eq(target), anyLong(), eq(target), eq(ROOM_ID), eq(""));
 	}
@@ -553,6 +553,6 @@ class GroupMembershipManagerTest {
 		membershipManager.revokeAdmin(OWNER, req);
 
 		verify(groupMemberDao).revokeAdmin(eq(GROUP_ID), eq(List.of(target)));
-		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+		verify(pushService).submitAfterCommit(any(), any(), anyList(), eq(OWNER));
 	}
 }

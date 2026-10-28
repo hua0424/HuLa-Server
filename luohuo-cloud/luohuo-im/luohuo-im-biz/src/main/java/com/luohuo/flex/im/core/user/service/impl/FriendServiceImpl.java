@@ -47,6 +47,7 @@ import com.luohuo.flex.im.domain.vo.req.friend.FriendReq;
 import com.luohuo.flex.im.domain.vo.resp.friend.FriendCheckResp;
 import com.luohuo.flex.im.domain.vo.resp.friend.FriendResp;
 import com.luohuo.flex.im.core.user.service.FriendService;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -163,12 +164,17 @@ public class FriendServiceImpl implements FriendService, InitializingBean {
 			// #192 P2-3: 推送计算整体 try/catch 降级——推送故障只丢推送记 warn，
 			// 绝不回滚写路径事务（推送=低延迟优化非正确性依赖，PRD AC4 重连拉取兜底）。
 			try {
-				pushService.sendPushMsg(
+				// #482：备注写已生效，推送回执只记录事实，未接收不回滚写路径。
+				PushSubmission submission = pushService.submitPushMsg(
 						WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
 								.uid(String.valueOf(request.getTargetUid()))
 								.changeType(WSUserInfoChange.REMARK)
 								.build()),
 						Collections.singletonList(employeeId), employeeId);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("好友备注变更推送未全部接收: employeeId={}, targetUid={}, admission={}, routeStatus={}, 未接收={}",
+							employeeId, request.getTargetUid(), submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
 			} catch (Exception e) {
 				log.warn("updateRemark: userInfoChange 推送失败（仅丢推送，不影响写路径），employeeId={}, targetUid={}",
 						employeeId, request.getTargetUid(), e);
@@ -240,7 +246,8 @@ public class FriendServiceImpl implements FriendService, InitializingBean {
 		WsBaseResp<String> wsMsg = new WsBaseResp<>();
 		wsMsg.setData(uid.toString());
 		wsMsg.setType(WSRespTypeEnum.DELETE_FRIEND.getType());
-		pushService.sendPushMsg(wsMsg, Collections.singletonList(friendUid), uid);
+		// #482：删除已在本事务内，通知改为提交后提交；回滚则不产生任何推送任务。
+		pushService.submitAfterCommit(null, wsMsg, Collections.singletonList(friendUid), uid);
     }
 
     @Override

@@ -11,6 +11,7 @@ import com.luohuo.flex.im.domain.enums.MessageTypeEnum;
 import com.luohuo.flex.im.domain.enums.ItemEnum;
 import com.luohuo.flex.im.core.user.service.UserBackpackService;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -64,7 +65,12 @@ public class MessageMarkListener {
     public void notifyAll(MessageMarkEvent event) {
         ChatMessageMarkDTO dto = event.getDto();
         Integer markCount = messageMarkDao.getMarkCount(dto.getMsgId(), dto.getMarkType());
-        pushService.sendPushMsg(WsAdapter.buildMsgMarkSend(dto, markCount), event.getUidList(), dto.getUid());
+        // #482：异步监听自己消费回执，不把推送拒绝升级成业务异常。
+        PushSubmission submission = pushService.submitPushMsg(WsAdapter.buildMsgMarkSend(dto, markCount), event.getUidList(), dto.getUid());
+        if (submission != null && !submission.isFullyAdmitted()) {
+            log.info("消息标记推送未全部接收: msgId={}, admission={}, routeStatus={}, 未接收={}",
+                    dto.getMsgId(), submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+        }
     }
 
 }

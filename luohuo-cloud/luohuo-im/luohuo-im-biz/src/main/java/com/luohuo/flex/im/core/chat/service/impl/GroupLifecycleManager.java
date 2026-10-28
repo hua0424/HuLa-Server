@@ -64,6 +64,8 @@ import com.luohuo.flex.im.core.chat.service.cache.RoomAnnouncementsCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 
 import java.time.LocalDateTime;
@@ -179,6 +181,14 @@ public class GroupLifecycleManager {
 	 * 群主，管理员才可以修改
 	 */
 	public Boolean updateRoomInfo(Long uid, RoomInfoReq request) {
+		return updateRoomInfo(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 B：推送登记在事务同步上，只在事务真正提交后提交；回滚即零任务。
+	 * <p>原实现把推送放在 transactionTemplate 内部（提交前），提交失败仍会先把通知发出去。</p>
+	 */
+	public Boolean updateRoomInfo(Long uid, RoomInfoReq request, PushReceipt receipt) {
 		// 1.校验修改权限
 		Triple<RoomGroup, GroupMember, Boolean> permissionCheck = checkGroupPermission(uid, request.getId());
 		if (!permissionCheck.getRight()) {
@@ -208,7 +218,7 @@ public class GroupLifecycleManager {
 				});
 
 				List<Long> memberUidList = groupMemberCache.getMemberExceptUidList(roomGroup.getRoomId());
-				pushService.sendPushMsg(RoomAdapter.buildRoomGroupChangeWS(roomGroup.getRoomId(), roomGroup.getName(), roomGroup.getAvatar()), memberUidList, uid);
+				pushService.submitAfterCommit(receipt, RoomAdapter.buildRoomGroupChangeWS(roomGroup.getRoomId(), roomGroup.getName(), roomGroup.getAvatar()), memberUidList, uid);
 				return true;
 			} catch (Exception e) {
 				status.setRollbackOnly();
@@ -237,7 +247,12 @@ public class GroupLifecycleManager {
 		// 3.通知群里所有人我的信息改变了
 		if (!equals && success) {
 			List<Long> memberUidList = groupMemberCache.getMemberExceptUidList(roomGroup.getRoomId());
-			pushService.sendPushMsg(RoomAdapter.buildMyRoomGroupChangeWS(roomGroup.getRoomId(), uid, request.getMyName()), memberUidList, uid);
+			// #482：昵称已落库，推送只做即时同步，未被接收按事实记录。
+			PushSubmission submission = pushService.submitPushMsg(RoomAdapter.buildMyRoomGroupChangeWS(roomGroup.getRoomId(), uid, request.getMyName()), memberUidList, uid);
+			if (submission != null && !submission.isFullyAdmitted()) {
+				log.info("我的群昵称变更推送未全部接收: roomId={}, uid={}, admission={}, routeStatus={}, 未接收={}",
+						roomGroup.getRoomId(), uid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+			}
 		}
 		return success;
 	}
@@ -349,7 +364,12 @@ public class GroupLifecycleManager {
 			roomAnnouncementsCache.add(param.getAnnouncementId(), uid);
 
 			List<Long> memberUidList = groupMemberCache.getMemberExceptUidList(param.getRoomId());
-			pushService.sendPushMsg(MessageAdapter.buildReadRoomGroupAnnouncement(new ReadAnnouncementsResp(uid, roomAnnouncementsCache.get(param.getAnnouncementId()))), memberUidList, uid);
+			// #482：已读状态已落库，推送只做即时同步，未接收不改变业务结果。
+			PushSubmission submission = pushService.submitPushMsg(MessageAdapter.buildReadRoomGroupAnnouncement(new ReadAnnouncementsResp(uid, roomAnnouncementsCache.get(param.getAnnouncementId()))), memberUidList, uid);
+			if (submission != null && !submission.isFullyAdmitted()) {
+				log.info("群公告已读推送未全部接收: roomId={}, announcementId={}, admission={}, routeStatus={}, 未接收={}",
+						param.getRoomId(), param.getAnnouncementId(), submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+			}
 		}
 		return success;
 	}
@@ -511,7 +531,14 @@ public class GroupLifecycleManager {
 			runQuietly("clearMemberUserGroupsKeys", roomId, () -> memberUidList.forEach(memberUid ->
 					cachePlusOps.sRem(PresenceCacheKeyBuilder.userGroupsKey(memberUid), room.getId())));
 			runQuietly("syncOnline", roomId, () -> presenceSyncHelper.syncOnline(memberUidList, room.getId(), false));
-			runQuietly("pushDissolution", roomId, () -> pushService.sendPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid));
+			runQuietly("pushDissolution", roomId, () -> {
+				// #482：解散广播提交后即返回，未被接收按事实记录，不当作已送达。
+				PushSubmission submission = pushService.submitPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("解散群广播未全部接收: roomId={}, admission={}, routeStatus={}, 未接收={}",
+							roomId, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
+			});
 			// #182/#153: 解散群时同样清 aiclaw 入群待批准去重标记，避免旧标记压制后续再次邀请通知。
 			// 该调用在事务外，且只操作 Redis，失败不得阻断已发出的解散广播。
 			runQuietly("onMembersRemoved", roomId, () -> aiclawParticipant.onMembersRemoved(roomId, memberUidList));
@@ -546,7 +573,12 @@ public class GroupLifecycleManager {
 				groupMemberCache.evictExceptMemberList(room.getId());
 				groupMemberCache.evictMemberDetail(room.getId(), uid);
 				WsBaseResp<WSMemberChange> ws = MemberAdapter.buildMemberRemoveWS(roomGroup.getRoomId(), Math.toIntExact(cachePlusOps.sCard(gKey)), Math.toIntExact(cachePlusOps.sCard(PresenceCacheKeyBuilder.onlineGroupMembersKey(room.getId()))), Arrays.asList(uid), WSMemberChange.CHANGE_TYPE_QUIT);
-				pushService.sendPushMsg(ws, memberUidList, uid);
+				// #482：退群已落库，移除广播只做即时同步，未被接收不影响退出结果。
+				PushSubmission submission = pushService.submitPushMsg(ws, memberUidList, uid);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("退群广播未全部接收: roomId={}, uid={}, admission={}, routeStatus={}, 未接收={}",
+							roomId, uid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
 
 				// #153 P1-2: 退群者若是 aiclaw → 清入群待批准去重标记（接缝内按 aiclaw 判定）。
 				// aiclaw 主动退群后若再被拉回，应重新给主人发待批准通知，不能被旧标记压制 24h。

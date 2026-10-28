@@ -4,6 +4,7 @@ import cn.hutool.core.util.IdUtil;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 import com.luohuo.basic.exception.BizException;
@@ -245,7 +246,12 @@ public class ThinkingService {
 						push.setType("thinkingEnd");
 						push.setData(WSThinkingEnd.builder().thinkingId(String.valueOf(row.getId()))
 								.roomId(String.valueOf(row.getRoomId())).status("error").error(reason).build());
-						pushService.sendPushMsg(push, recipients, 0L);
+						// #482：终止通知只对 CAS 胜出且状态已落库的 known id 提交，未接收按事实记录。
+						PushSubmission submission = pushService.submitPushMsg(push, recipients, 0L);
+						if (submission != null && !submission.isFullyAdmitted()) {
+							log.info("thinking 终止通知未全部接收: id={}, kind={}, admission={}, routeStatus={}, 未接收={}",
+									row.getId(), reason, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+						}
 					}
 				} catch (RuntimeException e) {
 					// No message contents, token, or exception payload in logs.

@@ -404,7 +404,7 @@ class AiclawGroupConfigServiceImplTest {
 		// 透传给 pushService.sendPushMsg(WsBaseResp<?>, List<Long>, Long)；这里捕获该信封并取出载荷。
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<WsBaseResp<?>> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
-		verify(pushService).sendPushMsg(msgCaptor.capture(), anyList(), eq(UID));
+		verify(pushService).submitAfterCommit(any(), msgCaptor.capture(), anyList(), eq(UID));
 		Object data = msgCaptor.getValue().getData();
 		assertTrue(data instanceof WSGroupConfigChange, "WsBaseResp.data 应为 WSGroupConfigChange");
 		WSGroupConfigChange change = (WSGroupConfigChange) data;
@@ -461,7 +461,7 @@ class AiclawGroupConfigServiceImplTest {
 		// 断言广播 ConfigDTO 也用 DB 真实默认值（非 null）
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<WsBaseResp<?>> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
-		verify(pushService).sendPushMsg(msgCaptor.capture(), anyList(), eq(UID));
+		verify(pushService).submitAfterCommit(any(), msgCaptor.capture(), anyList(), eq(UID));
 		Object data = msgCaptor.getValue().getData();
 		assertTrue(data instanceof WSGroupConfigChange, "WsBaseResp.data 应为 WSGroupConfigChange");
 		WSGroupConfigChange.ConfigDTO dto = ((WSGroupConfigChange) data).getConfig();

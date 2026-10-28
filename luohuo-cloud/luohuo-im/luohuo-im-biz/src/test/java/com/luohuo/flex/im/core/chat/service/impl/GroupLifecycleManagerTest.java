@@ -164,7 +164,7 @@ class GroupLifecycleManagerTest {
 		verify(aiclawThinkingMsgRelMapper).deleteByRoomId(ROOM_ID);
 		verify(aiclawThinkingMapper).logicDeleteByRoomId(ROOM_ID);
 		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(OWNER, MEMBER));
-		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+		verify(pushService).submitPushMsg(any(), anyList(), eq(OWNER));
 	}
 
 	@Test
@@ -193,7 +193,7 @@ class GroupLifecycleManagerTest {
 
 		assertDoesNotThrow(() -> lifecycleManager.exitGroup(true, OWNER, req));
 
-		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+		verify(pushService).submitPushMsg(any(), anyList(), eq(OWNER));
 	}
 
 	/**
@@ -235,7 +235,7 @@ class GroupLifecycleManagerTest {
 		verify(groupMemberCache).evictExceptMemberList(ROOM_ID);
 		verify(groupMemberCache).evictAllMemberDetails();
 		verify(presenceSyncHelper).syncOnline(List.of(OWNER, MEMBER), ROOM_ID, false);
-		verify(pushService).sendPushMsg(any(), anyList(), eq(OWNER));
+		verify(pushService).submitPushMsg(any(), anyList(), eq(OWNER));
 		verify(aiclawParticipant).onMembersRemoved(ROOM_ID, List.of(OWNER, MEMBER));
 	}
 

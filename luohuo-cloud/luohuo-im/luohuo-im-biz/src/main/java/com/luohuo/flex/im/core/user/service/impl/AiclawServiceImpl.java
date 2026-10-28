@@ -21,6 +21,7 @@ import com.luohuo.flex.im.core.user.service.FriendService;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.Message;
@@ -465,7 +466,8 @@ public class AiclawServiceImpl implements AiclawService {
 			// #192 P2-1: 显式加 ownerUid——owner 可能已解除与 aiclaw 的好友关系
 			// （此时反向好友集不含 owner），但 owner 必须收到自己 aiclaw 的资料变更。Set 去重天然处理重复。
 			targets.add(ownerUid);
-			pushService.sendPushMsg(
+			// #482：资料写已在本事务内，推送改为提交后提交（回滚=零任务），回执只记录事实。
+			pushService.submitAfterCommit(null,
 					WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
 							.uid(String.valueOf(aiclaw.getUid()))
 							.changeType(WSUserInfoChange.PROFILE)
@@ -523,11 +525,16 @@ public class AiclawServiceImpl implements AiclawService {
 		// #188 F2: WS 失效推送是低延迟优化——通知 plugins 人设已变（含清空），
 		// 正确性基础是连接/重连时拉取 self/persona，推送丢失由重连拉取兜底。
 		// 对齐群配置变更推送模式（AiclawGroupConfigServiceImpl.updateConfig）。
-		pushService.sendPushMsg(
+		// #482：人设已落库（本方法无事务），推送直接提交并记录回执，未接收不当作已送达。
+		PushSubmission submission = pushService.submitPushMsg(
 				WsAdapter.buildAiclawPersonaChanged(WSAiclawPersonaChanged.builder()
 						.aiclawUid(String.valueOf(aiclawUid))
 						.build()),
 				Collections.singletonList(aiclawUid), ownerUid);
+		if (submission != null && !submission.isFullyAdmitted()) {
+			log.info("aiclaw 人设变更推送未全部接收: aiclawUid={}, admission={}, routeStatus={}, 未接收={}",
+					aiclawUid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+		}
 		log.info("aiclaw persona updated: uid={}", aiclawUid);
 	}
 

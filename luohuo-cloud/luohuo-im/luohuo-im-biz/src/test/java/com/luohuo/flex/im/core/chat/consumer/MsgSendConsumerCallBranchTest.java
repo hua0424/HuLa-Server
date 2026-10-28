@@ -255,7 +255,7 @@ class MsgSendConsumerCallBranchTest {
         assertEquals("enriched", ((ChatMessageResp) reliable.getAllValues().get(1).getData()).getFromUser().getName());
         org.springframework.transaction.support.TransactionSynchronizationUtils.triggerAfterCommit();
         ArgumentCaptor<WsBaseResp> delayed = ArgumentCaptor.forClass(WsBaseResp.class);
-        verify(pushService, times(2)).sendPushMsgWithRetry(delayed.capture(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
+        verify(pushService, times(2)).submitPushMsgWithRetry(delayed.capture(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
         assertEquals("plain", ((ChatMessageResp) delayed.getAllValues().get(0).getData()).getFromUser().getName());
         assertEquals("enriched", ((ChatMessageResp) delayed.getAllValues().get(1).getData()).getFromUser().getName());
     }
@@ -271,7 +271,7 @@ class MsgSendConsumerCallBranchTest {
         consumer.onMessage(buildDto());
         // A real rollback never invokes registered afterCommit callbacks.
         verify(pushService, times(2)).sendReliablePushMsg(any(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
-        verify(pushService, never()).sendPushMsgWithRetry(any(), anyList(), any(), any());
+        verify(pushService, never()).submitPushMsgWithRetry(any(), anyList(), any(), any());
         verifyNoInteractions(cachePlusOps);
     }
 
@@ -286,7 +286,7 @@ class MsgSendConsumerCallBranchTest {
         consumer.onMessage(buildDto());
         doThrow(new IllegalStateException("cache unavailable")).when(cachePlusOps).sAdd(any(), eq(MSG_ID));
         org.springframework.transaction.support.TransactionSynchronizationUtils.triggerAfterCommit();
-        verify(pushService, times(2)).sendPushMsgWithRetry(any(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
+        verify(pushService, times(2)).submitPushMsgWithRetry(any(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
     }
 
     @Test
@@ -301,6 +301,6 @@ class MsgSendConsumerCallBranchTest {
         org.springframework.transaction.support.TransactionSynchronizationUtils.triggerAfterCommit();
         var order = inOrder(cachePlusOps, pushService);
         order.verify(cachePlusOps).sAdd(any(), eq(MSG_ID));
-        order.verify(pushService).sendPushMsgWithRetry(any(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
+        order.verify(pushService).submitPushMsgWithRetry(any(), anyList(), eq(MSG_ID), eq(ORIGINAL_FROM_UID));
     }
 }

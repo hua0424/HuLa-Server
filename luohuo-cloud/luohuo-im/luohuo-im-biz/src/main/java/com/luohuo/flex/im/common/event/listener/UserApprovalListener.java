@@ -9,6 +9,7 @@ import com.luohuo.flex.im.common.event.UserApprovalEvent;
 import com.luohuo.flex.im.domain.dto.RequestApprovalDto;
 import com.luohuo.flex.model.entity.ws.WSFriendApproval;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 
 import static com.luohuo.flex.im.common.config.ThreadPoolConfig.LUOHUO_EXECUTOR;
@@ -28,7 +29,12 @@ public class UserApprovalListener {
     @TransactionalEventListener(classes = UserApprovalEvent.class, fallbackExecution = true)
     public void notifyFriend(UserApprovalEvent event) {
         RequestApprovalDto requestApprovalDto = event.getRequestApprovalDto();
-        pushService.sendPushMsg(WsAdapter.buildApprovalSend(new WSFriendApproval(requestApprovalDto.getUid())), requestApprovalDto.getTargetUid(), requestApprovalDto.getUid());
+        // #482：异步监听自己消费回执，审批结果推送未接收不影响审批业务本身。
+        PushSubmission submission = pushService.submitPushMsg(WsAdapter.buildApprovalSend(new WSFriendApproval(requestApprovalDto.getUid())), requestApprovalDto.getTargetUid(), requestApprovalDto.getUid());
+        if (submission != null && !submission.isFullyAdmitted()) {
+            log.info("好友审批结果推送未全部接收: targetUid={}, admission={}, routeStatus={}, 未接收={}",
+                    requestApprovalDto.getTargetUid(), submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+        }
     }
 
 }
