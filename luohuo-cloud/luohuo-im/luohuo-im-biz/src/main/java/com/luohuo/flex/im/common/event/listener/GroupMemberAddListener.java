@@ -7,6 +7,7 @@ import com.luohuo.flex.im.core.chat.service.adapter.MemberAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.domain.entity.User;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.model.entity.ws.ChatMember;
 import lombok.AllArgsConstructor;
@@ -51,7 +52,12 @@ public class GroupMemberAddListener {
 		Map<Long, User> map = userCache.getBatch(event.getMemberList());
 
 		List<ChatMember> memberResps = groupMemberDao.getMemberListByUid(event.getMemberList());
-		pushService.sendPushMsg(MemberAdapter.buildMemberAddWS(roomId, event.getTotalNum(), onlineUids, memberResps, map), memberUidList, event.getUid());
+		// #482：异步监听自己消费回执并记录，不让推送被拒影响后续缓存失效。
+		PushSubmission submission = pushService.submitPushMsg(MemberAdapter.buildMemberAddWS(roomId, event.getTotalNum(), onlineUids, memberResps, map), memberUidList, event.getUid());
+		if (submission != null && !submission.isFullyAdmitted()) {
+			log.info("群成员变动推送未全部接收: roomId={}, admission={}, routeStatus={}, 未接收={}",
+					roomId, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+		}
 
         // 移除缓存
 		groupMemberCache.evictMemberList(roomId);

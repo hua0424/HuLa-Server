@@ -277,7 +277,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				.config(configDTO)
 				.account(accountOf(roomId))
 				.build();
-		pushService.sendPushMsg(WsAdapter.buildGroupConfigChange(change), memberUids, uid);
+		// #482：配置写已在本事务内，推送改为提交后提交（回滚=零任务），回执只记录事实。
+		pushService.submitAfterCommit(null, WsAdapter.buildGroupConfigChange(change), memberUids, uid);
 		log.debug("group config change broadcast: aiclawUid={}, roomId={}, members={}", aiclawUid, roomId, memberUids.size());
 	}
 

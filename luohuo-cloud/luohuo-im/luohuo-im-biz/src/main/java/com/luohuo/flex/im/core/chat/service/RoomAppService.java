@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.service;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
 import com.luohuo.flex.im.domain.vo.req.room.DisbandGroupReq;
 import com.luohuo.flex.im.domain.vo.req.room.GroupMemberPageReq;
 import com.luohuo.flex.im.domain.vo.request.admin.AdminSetReq;
@@ -126,6 +127,12 @@ public interface RoomAppService {
 	Boolean updateRoomInfo(Long uid, @Valid RoomInfoReq request);
 
 	/**
+	 * #482：管理员修改群信息，并把本次通知的准入回执写入请求级载体。
+	 * <p>载体内核在业务事务提交后才写入，回滚即无回执；由调用方在方法返回后读取。</p>
+	 */
+	Boolean updateRoomInfo(Long uid, @Valid RoomInfoReq request, PushReceipt receipt);
+
+	/**
 	 * 群成员修改自己在群里的信息
 	 * @return
 	 */
@@ -182,6 +189,9 @@ public interface RoomAppService {
 	 */
 	Boolean setNotification(Long uid, ContactNotificationReq request);
 
+	/** #482：免打扰设置，通知准入回执写入请求级载体（先落库后提交）。 */
+	Boolean setNotification(Long uid, ContactNotificationReq request, PushReceipt receipt);
+
 	/**
 	 * 查找群聊
 	 */
@@ -192,6 +202,9 @@ public interface RoomAppService {
 	 * @return
 	 */
 	Boolean setShield(Long uid, ContactShieldReq request);
+
+	/** #482：屏蔽/解除屏蔽，通知准入回执写入请求级载体（先落库后提交）。 */
+	Boolean setShield(Long uid, ContactShieldReq request, PushReceipt receipt);
 
 	/**
 	 * 合并消息
@@ -228,9 +241,19 @@ public interface RoomAppService {
 	void addAdmin(Long uid, @Valid AdminSetReq request);
 
 	/**
+	 * #482：添加管理员，把本次通知的准入回执写入请求级载体（事务提交后写入）。
+	 */
+	void addAdmin(Long uid, @Valid AdminSetReq request, PushReceipt receipt);
+
+	/**
 	 * 移除管理员
 	 */
 	void revokeAdmin(Long uid, @Valid AdminSetReq request);
+
+	/**
+	 * #482：移除管理员，把本次通知的准入回执写入请求级载体（事务提交后写入）。
+	 */
+	void revokeAdmin(Long uid, @Valid AdminSetReq request, PushReceipt receipt);
 
 	/**
 	 * 创建系统好友

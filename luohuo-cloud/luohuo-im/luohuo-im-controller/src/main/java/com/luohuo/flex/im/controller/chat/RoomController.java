@@ -37,7 +37,9 @@ import com.luohuo.flex.im.domain.vo.request.room.ReadAnnouncementsParam;
 import com.luohuo.flex.im.domain.vo.request.room.RoomGroupReq;
 import com.luohuo.flex.im.domain.vo.response.ChatMemberListResp;
 import com.luohuo.flex.im.domain.vo.response.MemberResp;
+import com.luohuo.flex.im.controller.chat.view.NotificationSyncResponse;
 import com.luohuo.flex.im.core.chat.service.RoomAppService;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
 import com.luohuo.flex.im.domain.vo.req.MergeMessageReq;
 import com.luohuo.flex.model.entity.ws.ChatMemberResp;
 
@@ -131,7 +133,10 @@ public class RoomController {
 	@Operation(summary = "修改群信息")
 	public R<Boolean> updateRoomInfo(@Valid @RequestBody RoomInfoReq request) {
 		Long uid = ContextUtil.getUid();
-		return R.success(roomService.updateRoomInfo(uid, request));
+		// #482：回执载体在事务外创建，业务方法返回（事务已提交）后读取；data 保持原布尔语义。
+		PushReceipt receipt = new PushReceipt();
+		Boolean result = roomService.updateRoomInfo(uid, request, receipt);
+		return NotificationSyncResponse.of(result, receipt.snapshot());
 	}
 
 	@PostMapping("updateMyRoomInfo")
@@ -153,16 +158,18 @@ public class RoomController {
     @Operation(summary ="添加管理员")
     public R<Boolean> addAdmin(@Valid @RequestBody AdminSetReq request) {
         Long uid = ContextUtil.getUid();
-		roomService.addAdmin(uid, request);
-        return R.success();
+		PushReceipt receipt = new PushReceipt();
+		roomService.addAdmin(uid, request, receipt);
+        return NotificationSyncResponse.of(null, receipt.snapshot());
     }
 
     @DeleteMapping("/group/admin")
     @Operation(summary ="撤销管理员")
     public R<Boolean> revokeAdmin(@Valid @RequestBody AdminSetReq request) {
         Long uid = ContextUtil.getUid();
-		roomService.revokeAdmin(uid, request);
-        return R.success();
+		PushReceipt receipt = new PushReceipt();
+		roomService.revokeAdmin(uid, request, receipt);
+        return NotificationSyncResponse.of(null, receipt.snapshot());
     }
 
 	@Operation(summary = "公告列表")

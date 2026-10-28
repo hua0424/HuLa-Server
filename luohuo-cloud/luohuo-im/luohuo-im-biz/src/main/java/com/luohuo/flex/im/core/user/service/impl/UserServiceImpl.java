@@ -57,6 +57,7 @@ import com.luohuo.flex.im.core.user.service.UserService;
 import com.luohuo.flex.im.core.user.service.FeedService;
 import com.luohuo.flex.im.core.user.service.adapter.UserAdapter;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
 import com.luohuo.flex.model.entity.ws.WSUserInfoChange;
 
@@ -190,12 +191,17 @@ public class UserServiceImpl implements UserService {
 			Set<Long> targets = cachePlusOps.sMembers(FriendCacheKeyBuilder.reverseFriendsKey(uid)).stream()
 					.map(obj -> Long.parseLong(obj.toString())).collect(Collectors.toSet());
 			targets.add(uid);
-			pushService.sendPushMsg(
+			// #482：改成消费回执，资料变更推送未接收不再已知即丢。
+			PushSubmission submission = pushService.submitPushMsg(
 					WsAdapter.buildUserInfoChange(WSUserInfoChange.builder()
 							.uid(String.valueOf(uid))
 							.changeType(WSUserInfoChange.PROFILE)
 							.build()),
 					new ArrayList<>(targets), uid);
+			if (submission != null && !submission.isFullyAdmitted()) {
+				log.info("资料变更推送未全部接收: uid={}, admission={}, routeStatus={}, 未接收={}",
+						uid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+			}
 		} catch (Exception e) {
 			log.warn("pushProfileChange: userInfoChange 推送失败（仅丢推送，不影响写路径），uid={}", uid, e);
 		}

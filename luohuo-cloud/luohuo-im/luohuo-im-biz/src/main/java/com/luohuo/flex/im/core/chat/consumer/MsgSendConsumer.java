@@ -24,6 +24,7 @@ import com.luohuo.flex.im.core.chat.service.adapter.MessageAdapter;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -229,7 +230,12 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
                     log.warn("在途缓存写入失败: msgId={}, uid={}", messageId, memberUid, e);
                 }
             }
-            pushService.sendPushMsgWithRetry(wsBaseResp, new ArrayList<>(recipients), messageId, cuid);
+            // #482：延迟探针的首次准入回执与业务事务无关（已在提交后），这里记录事实并对路由失败显式告警。
+            PushSubmission submission = pushService.submitPushMsgWithRetry(wsBaseResp, new ArrayList<>(recipients), messageId, cuid);
+            if (submission != null && !submission.isFullyAdmitted()) {
+                log.info("消息延迟探针首次提交未全部接收: msgId={}, admission={}, routeStatus={}, 未接收={}",
+                        messageId, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+            }
         });
 	}
 
