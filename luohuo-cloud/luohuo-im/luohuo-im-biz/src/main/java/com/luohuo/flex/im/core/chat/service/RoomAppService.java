@@ -10,6 +10,8 @@ import com.luohuo.flex.im.domain.vo.request.member.MemberExitReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
+import com.luohuo.flex.im.domain.vo.resp.room.GroupUseStateResp;
+import com.luohuo.flex.im.domain.vo.req.room.GroupUseStateReq;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import jakarta.validation.Valid;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
@@ -229,6 +231,18 @@ public interface RoomAppService {
 	 * @param aiclawUid  当前 aiclaw 的 uid（= ContextUtil.getUid()）
 	 */
 	List<AiclawMemberResp> aiclawListMembers(Long roomId, boolean online, Long aiclawUid);
+
+	/**
+	 * aichatoverview#484 (T3)：群成员/权限的「当前事实」窄读。
+	 *
+	 * <p>绕开 RoomCache / RoomGroupCache / GroupMemberCache，一次短读事务直取事实表；
+	 * 调用者身份与租户来自认证上下文。结论只有 MEMBER 与 NOT_ACCESSIBLE 两种，
+	 * 后者对「群不存在 / 已删除 / 不在群」同形。该快照只证明本次读取，不是执行授权凭据。</p>
+	 *
+	 * @param request 房间与需要投影的 UID 集合（未请求的 UID 不产生否定结论）
+	 * @param uid     当前登录用户 uid（= ContextUtil.getUid()）
+	 */
+	GroupUseStateResp readGroupUseState(@Valid GroupUseStateReq request, Long uid);
 
 	/**
 	 * 解散群聊

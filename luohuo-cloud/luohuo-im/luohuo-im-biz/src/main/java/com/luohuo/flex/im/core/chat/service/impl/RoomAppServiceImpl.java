@@ -28,6 +28,8 @@ import com.luohuo.flex.im.domain.entity.msg.TextMsgReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
+import com.luohuo.flex.im.domain.vo.resp.room.GroupUseStateResp;
+import com.luohuo.flex.im.domain.vo.req.room.GroupUseStateReq;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import com.luohuo.flex.im.domain.vo.request.contact.ContactAddReq;
 import jakarta.validation.Valid;
@@ -571,6 +573,12 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	@Override
 	public List<AiclawMemberResp> aiclawListMembers(Long roomId, boolean online, Long aiclawUid) {
 		return membershipManager.aiclawListMembers(roomId, online, aiclawUid);
+	}
+
+	// aichatoverview#484：委派不加事务注解，短读事务与缓存绕行在 manager 内（#170 惯例）
+	@Override
+	public GroupUseStateResp readGroupUseState(GroupUseStateReq request, Long uid) {
+		return membershipManager.readGroupUseState(request, uid);
 	}
 
 	@Override
