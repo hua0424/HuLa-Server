@@ -531,14 +531,10 @@ public class GroupLifecycleManager {
 			runQuietly("clearMemberUserGroupsKeys", roomId, () -> memberUidList.forEach(memberUid ->
 					cachePlusOps.sRem(PresenceCacheKeyBuilder.userGroupsKey(memberUid), room.getId())));
 			runQuietly("syncOnline", roomId, () -> presenceSyncHelper.syncOnline(memberUidList, room.getId(), false));
-			runQuietly("pushDissolution", roomId, () -> {
-				// #482：解散广播提交后即返回，未被接收按事实记录，不当作已送达。
-				PushSubmission submission = pushService.submitPushMsg(RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid);
-				if (submission != null && !submission.isFullyAdmitted()) {
-					log.info("解散群广播未全部接收: roomId={}, admission={}, routeStatus={}, 未接收={}",
-							roomId, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
-				}
-			});
+			runQuietly("pushDissolution", roomId, () ->
+					// #482：disbandGroup 外层事务仍可能未提交，解散广播必须等真实提交后再提交；
+					// 回滚则不产生任何推送任务，未被接收按事实记录，不当作已送达。
+					pushService.submitAfterCommit(null, RoomAdapter.buildGroupDissolution(roomGroup.getRoomId()), memberUidList, uid));
 			// #182/#153: 解散群时同样清 aiclaw 入群待批准去重标记，避免旧标记压制后续再次邀请通知。
 			// 该调用在事务外，且只操作 Redis，失败不得阻断已发出的解散广播。
 			runQuietly("onMembersRemoved", roomId, () -> aiclawParticipant.onMembersRemoved(roomId, memberUidList));
