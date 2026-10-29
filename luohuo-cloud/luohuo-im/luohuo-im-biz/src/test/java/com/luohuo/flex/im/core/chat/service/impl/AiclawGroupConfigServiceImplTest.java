@@ -4,6 +4,7 @@ import com.luohuo.basic.exception.BizException;
 import cn.hutool.json.JSONUtil;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
+import com.luohuo.flex.im.core.chat.service.GroupRunAdmissionService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.user.dao.AiclawDao;
@@ -56,6 +57,8 @@ class AiclawGroupConfigServiceImplTest {
 	@Mock private ValueOperations<String, String> valueOps;
 	@Mock private RoomGroupCache roomGroupCache;
 	@Mock private AiclawDao aiclawDao;
+	/** aichatoverview#485 T4：配置读路径新增的授权代次来源。 */
+	@Mock private GroupRunAdmissionService groupRunAdmissionService;
 	// #177: 用真实实例（@Spy 委托真实方法）注入，保留历史默认值 10/1000/30min/24h，
 	// 使默认值路径断言（rate=10、daily=1000）不变；非 @Mock 以免 stub 返回 null NPE。
 	@Spy private AiclawProperties aiclawProperties = new AiclawProperties();
@@ -404,7 +407,7 @@ class AiclawGroupConfigServiceImplTest {
 		// 透传给 pushService.sendPushMsg(WsBaseResp<?>, List<Long>, Long)；这里捕获该信封并取出载荷。
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<WsBaseResp<?>> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
-		verify(pushService).sendPushMsg(msgCaptor.capture(), anyList(), eq(UID));
+		verify(pushService).submitAfterCommit(any(), msgCaptor.capture(), anyList(), eq(UID));
 		Object data = msgCaptor.getValue().getData();
 		assertTrue(data instanceof WSGroupConfigChange, "WsBaseResp.data 应为 WSGroupConfigChange");
 		WSGroupConfigChange change = (WSGroupConfigChange) data;
@@ -461,7 +464,7 @@ class AiclawGroupConfigServiceImplTest {
 		// 断言广播 ConfigDTO 也用 DB 真实默认值（非 null）
 		@SuppressWarnings("unchecked")
 		ArgumentCaptor<WsBaseResp<?>> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
-		verify(pushService).sendPushMsg(msgCaptor.capture(), anyList(), eq(UID));
+		verify(pushService).submitAfterCommit(any(), msgCaptor.capture(), anyList(), eq(UID));
 		Object data = msgCaptor.getValue().getData();
 		assertTrue(data instanceof WSGroupConfigChange, "WsBaseResp.data 应为 WSGroupConfigChange");
 		WSGroupConfigChange.ConfigDTO dto = ((WSGroupConfigChange) data).getConfig();

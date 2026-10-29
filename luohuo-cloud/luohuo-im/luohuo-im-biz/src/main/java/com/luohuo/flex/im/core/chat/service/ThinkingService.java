@@ -4,22 +4,18 @@ import cn.hutool.core.util.IdUtil;
 import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSThinkingEnd;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.MessageDao;
 import com.luohuo.flex.im.core.chat.dao.RoomFriendDao;
-import com.luohuo.flex.im.core.user.dao.AiclawDao;
-import com.luohuo.flex.im.core.user.dao.UserDao;
-import com.luohuo.flex.im.enums.UserTypeEnum;
 import com.luohuo.flex.im.core.chat.mapper.AiclawThinkingMapper;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomCache;
-import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawThinking;
 import com.luohuo.flex.im.domain.entity.Message;
 import com.luohuo.flex.im.domain.entity.Room;
-import com.luohuo.flex.im.domain.entity.User;
 import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingDetailResp;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawThinkingListItemResp;
@@ -64,12 +60,6 @@ public class ThinkingService {
 	private AiclawThinkingMapper thinkingMapper;
 
 	@Resource
-	private AiclawDao aiclawDao;
-
-	@Resource
-	private UserDao userDao;
-
-	@Resource
 	private AiclawProperties aiclawProperties;
 
 	@Resource
@@ -88,6 +78,10 @@ public class ThinkingService {
 
 	@Resource
 	private RoomFriendDao roomFriendDao;
+
+	/** aichatoverview#485 T4：群执行准入（当前事实 + 授权代次）的唯一权威判定。 */
+	@Resource
+	private GroupRunAdmissionService groupRunAdmissionService;
 
 	/**
 	 * 创建 thinking 记录
@@ -118,11 +112,20 @@ public class ThinkingService {
 
 	/** Database uniqueness elects a single START across WS/IM nodes and process restarts. */
 	public StartReceipt create(Long actor, Long roomId, Long triggerMsgId, String clientRunId) {
+		return create(actor, roomId, triggerMsgId, clientRunId, null);
+	}
+
+	/**
+	 * aichatoverview#485 T4：START 是唯一执行准入接缝，授权代次在此与 run 身份一起固定。
+	 *
+	 * @param authorizationEpoch 输入入队时可信读取到的代次；撤权后重新批准会让它失效，因此旧输入不会被「洗新」
+	 */
+	public StartReceipt create(Long actor, Long roomId, Long triggerMsgId, String clientRunId, String authorizationEpoch) {
 		if (clientRunId == null) return new StartReceipt(create(actor, roomId, triggerMsgId), false, 0, null, true); // Legacy START.
 		if (clientRunId.isBlank() || clientRunId.length() > 128 || !clientRunId.equals(clientRunId.strip()))
 			throw new BizException("thinking_run_invalid");
 		Long tenantId = requireTenant();
-		requireActiveAgent(actor, roomId, tenantId);
+		requireActiveAgent(actor, roomId, tenantId, authorizationEpoch);
 		AiclawThinking previous = thinkingMapper.selectByRun(tenantId, actor, clientRunId);
 		if (previous != null) return new StartReceipt(matchingStart(previous, roomId, triggerMsgId, clientRunId), true,
 				previous.getStatus(), previous.getErrorCode(), Boolean.TRUE.equals(previous.getStartReady()));
@@ -245,7 +248,12 @@ public class ThinkingService {
 						push.setType("thinkingEnd");
 						push.setData(WSThinkingEnd.builder().thinkingId(String.valueOf(row.getId()))
 								.roomId(String.valueOf(row.getRoomId())).status("error").error(reason).build());
-						pushService.sendPushMsg(push, recipients, 0L);
+						// #482：终止通知只对 CAS 胜出且状态已落库的 known id 提交，未接收按事实记录。
+						PushSubmission submission = pushService.submitPushMsg(push, recipients, 0L);
+						if (submission != null && !submission.isFullyAdmitted()) {
+							log.info("thinking 终止通知未全部接收: id={}, kind={}, admission={}, routeStatus={}, 未接收={}",
+									row.getId(), reason, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+						}
 					}
 				} catch (RuntimeException e) {
 					// No message contents, token, or exception payload in logs.
@@ -300,20 +308,35 @@ public class ThinkingService {
 	}
 
 	public void requireActiveAgent(Long actor, Long roomId, Long tenantId) {
+		requireActiveAgent(actor, roomId, tenantId, null);
+	}
+
+	/**
+	 * aichatoverview#485 T4：执行授权一律走服务端当前事实（加锁读），不再由缓存/通知/UI 决定。
+	 *
+	 * <p>拒绝时抛出的 {@link BizException} 以准入原因作为消息（{@code room_not_accessible} /
+	 * {@code authorization_*}），调用方据此区分「这是权限合同拒绝」与普通失败：拒绝必须可被上游识别为
+	 * 终态，不能被当成超时或未知错误再做一轮自动重试。</p>
+	 *
+	 * @param requestedEpoch 输入入队时可信读取到的授权代次；非 null 时代次变化即拒绝，避免旧输入被重新批准「洗新」
+	 */
+	public void requireActiveAgent(Long actor, Long roomId, Long tenantId, String requestedEpoch) {
 		if (actor == null || roomId == null || !Objects.equals(tenantId, requireTenant())) {
 			throw new BizException("助理身份或房间无效");
 		}
-		User user = userDao.getById(actor); // Fresh DB state: a stale cached user cannot keep a disabled agent writable.
-		Aiclaw aiclaw = aiclawDao.getByUid(actor);
-		if (user == null || !UserTypeEnum.AICLAW.getValue().equals(user.getUserType())
-				|| !tenantId.equals(user.getTenantId()) || !Integer.valueOf(0).equals(user.getState())
-				|| aiclaw == null || !tenantId.equals(aiclaw.getTenantId())
-				|| !Integer.valueOf(1).equals(aiclaw.getAuthStatus()) || aiclaw.getDeactivatedAt() != null) {
-			throw new BizException("助理身份未激活或无权写入");
+		GroupRunAdmissionService.Admission admission =
+				groupRunAdmissionService.admitGroupRun(actor, roomId, tenantId, requestedEpoch);
+		if (admission.admitted()) {
+			return;
 		}
-		if (!Integer.valueOf(1).equals(thinkingMapper.isCurrentMember(actor, roomId, tenantId))) {
-			throw new BizException("非房间成员，无法写入");
+		throw denial(admission.getReason());
+	}
+
+	private BizException denial(String reason) {
+		if (reason == null || reason.isBlank()) {
+			return new BizException(GroupRunAdmissionService.REASON_INVALID);
 		}
+		return new BizException(reason);
 	}
 
 	/**

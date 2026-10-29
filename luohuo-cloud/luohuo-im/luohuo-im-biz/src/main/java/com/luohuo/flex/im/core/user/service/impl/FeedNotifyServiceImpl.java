@@ -136,7 +136,8 @@ public class FeedNotifyServiceImpl implements FeedNotifyService {
 		resp.setType(WSRespTypeEnum.FEED_NOTIFY.getType());
 		resp.setData(data);
 
-		pushService.sendPushMsg(resp, new ArrayList<>(interactiveUidSet), operatorUid);
+		// #482：上游点赞/评论事务提交后再提交推送（回滚=零任务；无事务时直接提交并记录回执）。
+		pushService.submitAfterCommit(null, resp, new ArrayList<>(interactiveUidSet), operatorUid);
 
 		Long feedId = (Long) data.get("feedId");
 		log.info("✅ {}通知已发送，朋友圈ID: {}，操作人: {}，通知人数: {}", type, feedId, operatorUid, interactiveUidSet.size());

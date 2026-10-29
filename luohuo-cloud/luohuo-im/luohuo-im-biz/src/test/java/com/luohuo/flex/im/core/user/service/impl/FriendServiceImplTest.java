@@ -80,7 +80,7 @@ class FriendServiceImplTest {
 
 		ArgumentCaptor<WsBaseResp> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
 		ArgumentCaptor<List<Long>> listCaptor = ArgumentCaptor.forClass(List.class);
-		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(SETTER_UID));
+		verify(pushService, times(1)).submitPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(SETTER_UID));
 
 		WsBaseResp<?> frame = msgCaptor.getValue();
 		assertEquals("userInfoChange", frame.getType(), "帧类型应为 userInfoChange");
@@ -105,13 +105,13 @@ class FriendServiceImplTest {
 
 		friendService.updateRemark(SETTER_UID, new FriendRemarkReq(TARGET_UID, "老王"));
 
-		verify(pushService, never()).sendPushMsg(any(), anyList(), any());
+		verify(pushService, never()).submitPushMsg(any(), anyList(), any());
 	}
 
 	// ==================== #192 P2-3: 推送异常降级（只丢推送，不回滚写路径） ====================
 
 	@Test
-	@DisplayName("#192 P2-3 updateRemark: sendPushMsg 抛异常只丢推送，写路径照常（updateById 被调、方法正常返回 true）")
+	@DisplayName("#192 P2-3 updateRemark: 提交回执抛异常只丢推送，写路径照常（updateById 被调、方法正常返回 true）")
 	void updateRemark_pushFails_writePathStillSucceeds() {
 		UserFriend userFriend = new UserFriend();
 		userFriend.setUid(SETTER_UID);
@@ -120,7 +120,7 @@ class FriendServiceImplTest {
 				.thenReturn(Collections.singletonList(userFriend));
 		when(userFriendDao.updateById(any())).thenReturn(true);
 		doThrow(new RuntimeException("push down")).when(pushService)
-				.sendPushMsg(any(), anyList(), any());
+				.submitPushMsg(any(), anyList(), any());
 
 		// 推送=低延迟优化非正确性依赖：异常绝不回滚/中断写路径（catch 后不得重抛）
 		Boolean updated = assertDoesNotThrow(
@@ -150,7 +150,7 @@ class FriendServiceImplTest {
 		verify(userFriendDao).updateById(ufCaptor.capture());
 		assertEquals("", ufCaptor.getValue().getRemark(),
 				"空串应写入实体字段（空串非 null，不受 MyBatis-Plus NOT_NULL 更新策略吞列影响）");
-		verify(pushService, times(1)).sendPushMsg(any(), anyList(), eq(SETTER_UID));
+		verify(pushService, times(1)).submitPushMsg(any(), anyList(), eq(SETTER_UID));
 	}
 
 	@Nested

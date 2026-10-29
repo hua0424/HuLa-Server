@@ -285,7 +285,7 @@ class AiclawServiceImplTest {
 		ArgumentCaptor<com.luohuo.flex.model.entity.WsBaseResp> msgCaptor =
 				ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
 		ArgumentCaptor<java.util.List<Long>> listCaptor = ArgumentCaptor.forClass(java.util.List.class);
-		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(OWNER_UID));
+		verify(pushService, times(1)).submitAfterCommit(any(), msgCaptor.capture(), listCaptor.capture(), eq(OWNER_UID));
 
 		com.luohuo.flex.model.entity.WsBaseResp<?> frame = msgCaptor.getValue();
 		assertEquals("userInfoChange", frame.getType(), "帧类型应为 userInfoChange");
@@ -323,7 +323,7 @@ class AiclawServiceImplTest {
 		aiclawService.updateProfile(req, OWNER_UID);
 
 		ArgumentCaptor<java.util.List<Long>> listCaptor = ArgumentCaptor.forClass(java.util.List.class);
-		verify(pushService, times(1)).sendPushMsg(any(), listCaptor.capture(), eq(OWNER_UID));
+		verify(pushService, times(1)).submitAfterCommit(any(), any(), listCaptor.capture(), eq(OWNER_UID));
 		java.util.List<Long> targets = listCaptor.getValue();
 		assertTrue(targets.contains(OWNER_UID),
 				"推送目标必须显式含 ownerUid——owner 必须收到自己 aiclaw 的资料变更，即使已解除好友关系");
@@ -359,7 +359,7 @@ class AiclawServiceImplTest {
 		ownedAiclaw();
 		when(cachePlusOps.sMembers(any())).thenReturn(java.util.Collections.emptySet());
 		doThrow(new RuntimeException("push down")).when(pushService)
-				.sendPushMsg(any(), any(java.util.List.class), any());
+				.submitAfterCommit(any(), any(), any(java.util.List.class), any());
 		com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq req =
 				com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawUpdateReq.builder()
 						.uid(AICLAW_UID)
@@ -424,7 +424,7 @@ class AiclawServiceImplTest {
 		ArgumentCaptor<com.luohuo.flex.model.entity.WsBaseResp> msgCaptor =
 				ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
 		ArgumentCaptor<java.util.List<Long>> listCaptor = ArgumentCaptor.forClass(java.util.List.class);
-		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(OWNER_UID));
+		verify(pushService, times(1)).submitPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(OWNER_UID));
 
 		com.luohuo.flex.model.entity.WsBaseResp<?> frame = msgCaptor.getValue();
 		assertEquals("aiclawPersonaChanged", frame.getType(), "帧类型应为 aiclawPersonaChanged");
@@ -447,7 +447,7 @@ class AiclawServiceImplTest {
 		// 清空语义：走 LambdaUpdateWrapper 显式 set（updateById 的 NOT_NULL 策略会吞掉 null 列）
 		verify(aiclawDao).update(any(LambdaUpdateWrapper.class));
 		// 失效推送不省略——plugins 必须得知人设已清空
-		verify(pushService, times(1)).sendPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
+		verify(pushService, times(1)).submitPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
 	}
 
 	// ==================== #188 P1: setPersona 清空人设必须真正落库 ====================
@@ -484,7 +484,7 @@ class AiclawServiceImplTest {
 		assertTrue(wrapper.getParamNameValuePairs().containsValue(AICLAW_UID),
 				"应只更新传入 uid 的行");
 		// 清空也要推送失效帧（plugins 重拉拿到 null）
-		verify(pushService, times(1)).sendPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
+		verify(pushService, times(1)).submitPushMsg(any(), any(java.util.List.class), eq(OWNER_UID));
 	}
 
 	@Test

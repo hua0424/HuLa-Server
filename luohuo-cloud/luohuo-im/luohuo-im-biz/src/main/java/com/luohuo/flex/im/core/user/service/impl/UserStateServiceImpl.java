@@ -9,6 +9,7 @@ import com.luohuo.flex.im.domain.vo.resp.user.UserStateVo;
 import com.luohuo.flex.im.core.user.service.UserService;
 import com.luohuo.flex.im.core.user.service.UserStateService;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -50,7 +51,12 @@ public class UserStateServiceImpl implements UserStateService {
 		userSummaryCache.delete(uid);
 
 		// 2.推送数据
-		pushService.pushRoom(uid, WSRespTypeEnum.USER_STATE_CHANGE.getType(), new UserStateVo(uid, userState == null? 0L: userState.getId()));
+		// #482：状态变更已落库，房间推送只做即时同步；未被接收时记录事实，不回滚也不伪装成功。
+		PushSubmission submission = pushService.submitPushRoom(uid, WSRespTypeEnum.USER_STATE_CHANGE.getType(), new UserStateVo(uid, userState == null? 0L: userState.getId()));
+		if (submission != null && !submission.isFullyAdmitted()) {
+			log.info("用户状态变更推送未全部接收: uid={}, stateId={}, admission={}, routeStatus={}, 未接收={}",
+					uid, userStateId, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+		}
 		return true;
 	}
 }

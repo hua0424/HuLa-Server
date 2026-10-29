@@ -65,7 +65,7 @@ class ThinkingCleanupTest {
         verify(mapper).finalizeActive(12L, 3L, 100L, 10L, "", null, 3, "timeout");
         verify(mapper, never()).selectCurrentMemberUids(10L, 3L);
         @SuppressWarnings("rawtypes") ArgumentCaptor<WsBaseResp> packet = ArgumentCaptor.forClass(WsBaseResp.class);
-        verify(pushService).sendPushMsg(packet.capture(), eq(List.of(200L)), eq(0L));
+        verify(pushService).submitPushMsg(packet.capture(), eq(List.of(200L)), eq(0L));
         assertEquals("thinkingEnd", packet.getValue().getType());
         WSThinkingEnd end = (WSThinkingEnd) packet.getValue().getData();
         assertEquals("11", end.getThinkingId());
@@ -88,7 +88,7 @@ class ThinkingCleanupTest {
 
         service.cleanupActiveThinkings();
 
-        verify(pushService, never()).sendPushMsg(any(), anyList(), anyLong());
+        verify(pushService, never()).submitPushMsg(any(), anyList(), anyLong());
         verify(mapper).finalizeActive(15L, 4L, 100L, 10L, "", null, 2, "authorization_revoked");
         assertNull(ContextUtil.getTenantId());
     }

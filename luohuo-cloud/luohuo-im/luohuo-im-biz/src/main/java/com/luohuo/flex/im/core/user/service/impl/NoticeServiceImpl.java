@@ -8,6 +8,7 @@ import com.luohuo.flex.im.core.chat.dao.RoomGroupDao;
 import com.luohuo.flex.im.core.user.dao.NoticeDao;
 import com.luohuo.flex.im.core.user.service.NoticeService;
 import com.luohuo.flex.im.core.user.service.cache.UserSummaryCache;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.domain.dto.SummeryInfoDTO;
 import com.luohuo.flex.im.domain.entity.Notice;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
@@ -21,6 +22,7 @@ import com.luohuo.flex.model.entity.WSRespTypeEnum;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.model.entity.ws.WSNotice;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -35,6 +37,7 @@ import java.util.stream.Collectors;
 
 import static com.luohuo.flex.im.domain.enums.ApplyReadStatusEnum.UNREAD;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class NoticeServiceImpl implements NoticeService {
@@ -48,7 +51,12 @@ public class NoticeServiceImpl implements NoticeService {
 		WsBaseResp<NoticeVO> wsMsg = new WsBaseResp<>();
 		wsMsg.setData(convertToVO(notice));
 		wsMsg.setType(WSRespTypeEnum.NOTIFY_EVENT.getType());
-		pushService.sendPushMsg(wsMsg, Collections.singletonList(receiverId), notice.getSenderId());
+		// #482：通知已落库，推送只做即时同步；未被接收时记录未接收目标，由通知持久化面兜底。
+		PushSubmission submission = pushService.submitPushMsg(wsMsg, Collections.singletonList(receiverId), notice.getSenderId());
+		if (submission != null && !submission.isFullyAdmitted()) {
+			log.info("通知推送未全部接收: applyId={}, receiverId={}, admission={}, routeStatus={}, 未接收={}",
+					notice.getApplyId(), receiverId, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+		}
 	}
 
 	@Override

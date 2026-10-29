@@ -29,4 +29,14 @@ public class WSThinkingStart {
 
 	@Schema(description = "本轮执行 ID（仅关联，不授权；START 回执原样回显）")
 	private String clientRunId;
+
+	/**
+	 * aichatoverview#485 T4：输入入队时可信读取到的授权代次。
+	 *
+	 * <p>客户端的自报值不能作为授权证明，它只用来声明「这条输入属于哪个授权上下文」：server 会把它与
+	 * 当前事实推导出的代次比对，不等即拒（见 {@code GroupRunAdmissionService}）。缺省表示调用方没有
+	 * 可信来源，此时只做当前事实判定。</p>
+	 */
+	@Schema(description = "输入入队时可信读取到的授权代次（aichatoverview#485）；缺省表示无可信来源")
+	private String authorizationEpoch;
 }

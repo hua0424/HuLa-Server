@@ -5,6 +5,7 @@ import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawGroupConfigUpdateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigResp;
+import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawGroupConfigStateResp;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
@@ -38,6 +39,15 @@ public class AiclawGroupConfigController {
 		// aichatoverview#26: aiclawUid 仅来自认证身份，端点不声明任何 query 参数，
 		// 调用方无法借 query 拉取其他 aiclaw 的配置（防 IDOR）。
 		return R.success(aiclawGroupConfigService.listSelfConfigs(ContextUtil.getUid()));
+	}
+
+	@GetMapping("/current")
+	@Operation(summary = "#484 查询 aiclaw 群配置的当前事实（绕缓存一致读，PRESENT/NOT_ACCESSIBLE）")
+	public R<AiclawGroupConfigStateResp> readCurrentGroupConfig(
+			@RequestParam Long aiclawUid,
+			@RequestParam Long roomId) {
+		return R.success(aiclawGroupConfigService.readCurrentGroupConfig(
+				aiclawUid, roomId, ContextUtil.getUid()));
 	}
 
 	@PutMapping

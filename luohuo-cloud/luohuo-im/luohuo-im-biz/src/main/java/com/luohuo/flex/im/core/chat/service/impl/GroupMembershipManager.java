@@ -13,6 +13,7 @@ import com.luohuo.flex.common.OnlineService;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.common.constant.DefValConstants;
 import com.luohuo.flex.im.core.chat.dao.RoomGroupDao;
+import com.luohuo.flex.im.core.chat.dao.RoomDao;
 import com.luohuo.flex.im.core.user.dao.NoticeDao;
 import com.luohuo.flex.im.core.user.dao.UserApplyDao;
 import com.luohuo.flex.im.core.user.service.NoticeService;
@@ -26,6 +27,8 @@ import com.luohuo.flex.im.domain.vo.request.admin.AdminSetReq;
 import com.luohuo.flex.im.domain.vo.request.member.MemberExitReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
+import com.luohuo.flex.im.domain.vo.resp.room.GroupUseStateResp;
+import com.luohuo.flex.im.domain.vo.req.room.GroupUseStateReq;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
 import com.luohuo.flex.model.entity.ws.AdminChangeDTO;
 import com.luohuo.flex.model.enums.ChatActiveStatusEnum;
@@ -60,6 +63,8 @@ import com.luohuo.flex.model.entity.ws.ChatMemberResp;
 import com.luohuo.flex.model.entity.ws.WSMemberChange;
 import com.luohuo.flex.im.core.user.service.RoleService;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 
 import java.util.*;
@@ -87,6 +92,7 @@ public class GroupMembershipManager {
 	private final UserApplyDao userApplyDao;
 	private final AiclawParticipant aiclawParticipant;
 	private ContactDao contactDao;
+	private RoomDao roomDao;
 	private RoomCache roomCache;
 	private RoomGroupCache roomGroupCache;
 	private CachePlusOps cachePlusOps;
@@ -119,6 +125,15 @@ public class GroupMembershipManager {
 	@RedissonLock(prefixKey = "addAdmin:", key = "#request.roomId")
 	@Transactional(rollbackFor = Exception.class)
 	public void addAdmin(Long uid, AdminSetReq request) {
+		addAdmin(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 B：本方法在真实事务内，通知回执只在业务真正提交后才写入载体；回滚即零任务。
+	 */
+	@RedissonLock(prefixKey = "addAdmin:", key = "#request.roomId")
+	@Transactional(rollbackFor = Exception.class)
+	public void addAdmin(Long uid, AdminSetReq request, PushReceipt receipt) {
 		// 1. 判断群聊是否存在
 		RoomGroup roomGroup = verifyGet(uid, request);
 
@@ -133,9 +148,9 @@ public class GroupMembershipManager {
 		// 3. 增加管理员
 		groupMemberDao.addAdmin(roomGroup.getId(), request.getUidList());
 
-		// 5. 发送给所有群成员
+		// 5. 发送给所有群成员（提交后提交，不在此等待 MQ/重试/ACK）
 		List<Long> memberUidList = groupMemberCache.getMemberUidList(roomGroup.getRoomId());
-		pushService.sendPushMsg(MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), true)), memberUidList, uid);
+		pushService.submitAfterCommit(receipt, MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), true)), memberUidList, uid);
 
 		// 每个被邀请的人都要收到邀请进群的消息
 		setAdminNotice(NoticeTypeEnum.GROUP_SET_ADMIN, uid, request.getUidList(), manageUidList, roomGroup.getRoomId());
@@ -176,13 +191,22 @@ public class GroupMembershipManager {
 	@RedissonLock(prefixKey = "revokeAdmin:", key = "#request.roomId")
 	@Transactional(rollbackFor = Exception.class)
 	public void revokeAdmin(Long uid, AdminSetReq request) {
+		revokeAdmin(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 B：通知回执只在业务真正提交后写入载体。
+	 */
+	@RedissonLock(prefixKey = "revokeAdmin:", key = "#request.roomId")
+	@Transactional(rollbackFor = Exception.class)
+	public void revokeAdmin(Long uid, AdminSetReq request, PushReceipt receipt) {
 		// 1. 校验
 		RoomGroup roomGroup = verifyGet(uid, request);
 
 		// 2. 撤销管理员
 		groupMemberDao.revokeAdmin(roomGroup.getId(), request.getUidList());
 		List<Long> memberUidList = groupMemberCache.getMemberUidList(roomGroup.getRoomId());
-		pushService.sendPushMsg(MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), false)), memberUidList, uid);
+		pushService.submitAfterCommit(receipt, MessageAdapter.buildSetAdminMessage(new AdminChangeDTO(roomGroup.getRoomId(), request.getUidList(), false)), memberUidList, uid);
 
 		setAdminNotice(NoticeTypeEnum.GROUP_RECALL_ADMIN, uid, request.getUidList(), new ArrayList<>(), roomGroup.getRoomId());
 	}
@@ -281,6 +305,113 @@ public class GroupMembershipManager {
 				.collect(Collectors.toList());
 	}
 
+	/**
+	 * aichatoverview#484 (T3)：群成员/权限的「当前事实」窄读。
+	 *
+	 * <p>为什么另起入口而不是复用 {@link #listMember} / {@code getGroupDetail}：</p>
+	 * <ul>
+	 *   <li>{@code listMember} 走 {@code roomCache}（TTL=-1，失效失败会留永久陈旧）；
+	 *       成员列表 SQL 还 INNER JOIN im_user 并过滤 tenant/别名缺字段，profile 缺失即丢成员，
+	 *       客户端会把「摘要缺失」误当成「成员已被移除」。</li>
+	 *   <li>{@code getGroupDetail} 的人数取 {@code groupMemberCache}（另一套 TTL），
+	 *       与成员事实不同源，删除后仍可能报旧人数。</li>
+	 *   <li>两者都没有调用者身份校验，构成先读 self 再读 list 的 TOCTOU。</li>
+	 * </ul>
+	 *
+	 * <p>本入口一律绕开三处缓存（RoomCache / RoomGroupCache / GroupMemberCache），
+	 * 在一次短读事务里直接取事实表，使「一次读取」自洽。它只证明本次读取的事实，
+	 * <b>不是</b>执行授权凭据——每次业务操作仍由各自服务重做准入。</p>
+	 */
+	public GroupUseStateResp readGroupUseState(GroupUseStateReq request, Long uid) {
+		Long roomId = request == null ? null : request.getRoomId();
+		if (roomId == null) {
+			return notAccessible(null, uid);
+		}
+
+		// UID 上限在服务层兜底（注解校验可能被内部调用绕过），超限部分丢弃并由 coverage 显式标记，
+		// 避免调用方把「没投影」误读为「不存在」。
+		List<Long> requested = request.getMemberUids() == null ? List.of()
+				: request.getMemberUids().stream().filter(Objects::nonNull).distinct().collect(Collectors.toList());
+		boolean truncated = requested.size() > GroupUseStateReq.MAX_MEMBER_UIDS;
+		List<Long> effective = truncated ? requested.subList(0, GroupUseStateReq.MAX_MEMBER_UIDS) : requested;
+
+		return transactionTemplate.execute(status -> {
+			// 1. 房间与群事实：直查 DB，不用 RoomCache（TTL=-1）/ RoomGroupCache（失效无 wiring）
+			Room room = roomDao.getById(roomId);
+			if (room == null || !room.isRoomGroup()) {
+				return notAccessible(roomId, uid);
+			}
+			RoomGroup roomGroup = roomGroupDao.getByRoomId(roomId);
+			if (roomGroup == null) {
+				return notAccessible(roomId, uid);
+			}
+
+			// 2. 自己的成员资格：只认事实表，不从任何成员页/摘要推断
+			GroupMember self = groupMemberDao.getMemberByGroupId(roomGroup.getId(), uid);
+			if (self == null) {
+				return notAccessible(roomId, uid);
+			}
+
+			// 3. 人数用 DB 口径（groupId 直查，不经 groupMemberCache）
+			long memberCount = groupMemberDao.count(Wrappers.<GroupMember>lambdaQuery()
+					.eq(GroupMember::getGroupId, roomGroup.getId()));
+
+			// 4. 请求 UID 的资格投影：一次批量查事实表；展示字段缺失只影响展示
+			List<GroupUseStateResp.MemberProjection> projections = new ArrayList<>();
+			if (!effective.isEmpty()) {
+				Map<Long, GroupMember> membership = groupMemberDao
+						.getMemberBatch(roomGroup.getId(), effective).stream()
+						.collect(Collectors.toMap(GroupMember::getUid, java.util.function.Function.identity(),
+								(a, b) -> a));
+				Map<Long, SummeryInfoDTO> summaries = userSummaryCache.getBatch(
+						effective.stream().filter(membership::containsKey).collect(Collectors.toList()));
+				effective.forEach(memberUid -> {
+					GroupMember membershipRow = membership.get(memberUid);
+					SummeryInfoDTO summary = summaries == null ? null : summaries.get(memberUid);
+					projections.add(GroupUseStateResp.MemberProjection.builder()
+							.uid(memberUid)
+							.exists(membershipRow != null)
+							.roleId(membershipRow == null ? null : membershipRow.getRoleId())
+							.name(summary == null ? null : summary.getName())
+							.account(summary == null ? null : summary.getAccount())
+							.build());
+				});
+			}
+
+			return GroupUseStateResp.builder()
+					.outcome(GroupUseStateResp.OUTCOME_MEMBER)
+					.roomId(roomId)
+					.selfUid(uid)
+					.selfRoleId(self.getRoleId())
+					.memberCount(memberCount)
+					.groupName(roomGroup.getName())
+					.account(roomGroup.getAccount())
+					.remark(self.getRemark())
+					.myName(self.getMyName())
+					.allowScanEnter(roomGroup.getAllowScanEnter())
+					.requestedMembers(projections)
+					.coverage(GroupUseStateResp.Coverage.builder()
+							.requested(requested.size())
+							.covered(projections.size())
+							.limit(GroupUseStateReq.MAX_MEMBER_UIDS)
+							.truncated(truncated)
+							.build())
+					.build();
+		});
+	}
+
+	/**
+	 * 同形 NOT_ACCESSIBLE：群不存在 / 已删除 / 调用者不在群一律走这里，
+	 * 对外不区分，避免用读接口探测群是否存在。
+	 */
+	private GroupUseStateResp notAccessible(Long roomId, Long uid) {
+		return GroupUseStateResp.builder()
+				.outcome(GroupUseStateResp.OUTCOME_NOT_ACCESSIBLE)
+				.roomId(roomId)
+				.selfUid(uid)
+				.build();
+	}
+
 	public List<ChatMemberListResp> getMemberList(ChatMessageMemberReq request) {
 		Room room = roomCache.get(request.getRoomId());
 		AssertUtil.isNotEmpty(room, "房间号有误");
@@ -366,7 +497,12 @@ public class GroupMembershipManager {
 					memberUidList.add(removedUid);
 				}
 				WsBaseResp<WSMemberChange> ws = MemberAdapter.buildMemberRemoveWS(roomGroup.getRoomId(), (int) (memberNum - 1), Math.toIntExact(cachePlusOps.sCard(PresenceCacheKeyBuilder.onlineGroupMembersKey(room.getId()))), Arrays.asList(member.getUid()), WSMemberChange.CHANGE_TYPE_REMOVE);
-				pushService.sendPushMsg(ws, memberUidList, uid);
+				// #482：移除已提交，推送回执只记录事实；被拒不得截断后续通知落库。
+				PushSubmission submission = pushService.submitPushMsg(ws, memberUidList, uid);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("移出群成员推送未全部接收: roomId={}, removedUid={}, admission={}, routeStatus={}, 未接收={}",
+							roomGroup.getRoomId(), removedUid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
 				groupMemberCache.evictMemberList(room.getId());
 				groupMemberCache.evictExceptMemberList(room.getId());
 				groupMemberCache.evictMemberDetail(room.getId(), removedUid);
@@ -462,7 +598,12 @@ public class GroupMembershipManager {
 		invites.forEach(invite -> {
 			SummeryInfoDTO user = userSummaryCache.get(invite.getTargetId());
 			if (ObjectUtil.isNotNull(user)) {
-				pushService.sendPushMsg(MessageAdapter.buildInviteeUserAddGroupMessage(noticeDao.getUnReadCount(invite.getTargetId(), invite.getTargetId())), invite.getTargetId(), uid);
+				// #482：邀请记录已落库，推送回执只记录事实，被拒不得阻断后续通知批量落库。
+				PushSubmission submission = pushService.submitPushMsg(MessageAdapter.buildInviteeUserAddGroupMessage(noticeDao.getUnReadCount(invite.getTargetId(), invite.getTargetId())), invite.getTargetId(), uid);
+				if (submission != null && !submission.isFullyAdmitted()) {
+					log.info("群邀请提醒推送未全部接收: roomId={}, targetUid={}, admission={}, routeStatus={}, 未接收={}",
+							roomGroup.getRoomId(), invite.getTargetId(), submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+				}
 			}
 
 			// 每个被邀请的人都要收到邀请进群的消息
@@ -591,7 +732,8 @@ public class GroupMembershipManager {
 		// 4. 通知群里所有人昵称改变了
 		if (!equals && success) {
 			List<Long> memberUidList = groupMemberCache.getMemberExceptUidList(request.getRoomId());
-			pushService.sendPushMsg(RoomAdapter.buildMyRoomGroupChangeWS(request.getRoomId(), request.getUid(), request.getMyName()), memberUidList, request.getUid());
+			// #482：昵称已在本事务内落库，推送改为提交后提交（回滚=零任务），回执只记录事实。
+			pushService.submitAfterCommit(null, RoomAdapter.buildMyRoomGroupChangeWS(request.getRoomId(), request.getUid(), request.getMyName()), memberUidList, request.getUid());
 		}
 	}
 }

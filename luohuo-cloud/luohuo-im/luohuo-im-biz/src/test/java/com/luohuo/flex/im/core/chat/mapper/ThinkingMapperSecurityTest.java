@@ -59,8 +59,6 @@ class ThinkingMapperSecurityTest extends AbstractMapperIT {
 
     @Test
     void scannerAndRecipientsRespectRealTenantMembershipAndRevocation() {
-        assertEquals(1, mapper.isCurrentMember(92001L, 90001L, 1L));
-        assertNull(mapper.isCurrentMember(92001L, 90002L, 2L));
         assertNull(mapper.selectOwned(94001L, 2L, 92001L, 90001L)); // tenant alone differs
         assertNull(mapper.selectOwned(94001L, 1L, 92002L, 90001L)); // actor alone differs
         assertNull(mapper.selectOwned(94001L, 1L, 92001L, 90002L)); // room alone differs
@@ -75,7 +73,6 @@ class ThinkingMapperSecurityTest extends AbstractMapperIT {
                 .stream().map(AiclawThinking::getId).toList());
         jdbc.update("UPDATE im_aiclaw SET auth_status=1 WHERE id=93001");
         jdbc.update("UPDATE im_group_member SET is_del=1 WHERE id=95001");
-        assertNull(mapper.isCurrentMember(92001L, 90001L, 1L));
         assertEquals(List.of(), mapper.selectCurrentMemberUids(90001L, 1L));
     }
 

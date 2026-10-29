@@ -194,4 +194,63 @@ class NacosRouterServiceTest {
 		// when / then: 视为无路由，不抛 ClassCastException
 		assertThat(routerService.getDeviceNode(100L, "clientA")).isNull();
 	}
+
+	@Test
+	@DisplayName("#486 T5：同节点同 clientId 跨 uid 冲突时保留先到者，并把 nodeId|clientId 回报给调用方")
+	void findNodeDeviceUser_reportsDeviceConflictAndKeepsFirstUid() throws Exception {
+		// given: 同一节点上 clientId 同时映射到两个目标 uid（设备指纹/机器码冲突）
+		Instance activeNode = instance("node-1", true);
+		when(namingService.getAllInstances(anyString(), anyString()))
+				.thenReturn(List.of(activeNode));
+		Cursor<Map.Entry<Object, Object>> cursor = mockHashCursor(
+				hashEntry("100:sharedClient", "node-1"),
+				hashEntry("200:sharedClient", "node-1"));
+		when(hashOps.scan(anyString(), any(ScanOptions.class))).thenReturn(cursor);
+		Set<String> conflicts = new java.util.HashSet<>();
+
+		// when
+		Map<String, Map<String, Long>> result =
+				routerService.findNodeDeviceUser(List.of(100L, 200L), conflicts);
+
+		// then: 保留先到者（结果对同一路由集合稳定），冲突键格式 nodeId|clientId 交给调用方判定
+		assertThat(result.get("node-1")).containsEntry("sharedClient", 100L);
+		assertThat(conflicts).containsExactly("node-1|sharedClient");
+	}
+
+	@Test
+	@DisplayName("#486 T5：不同节点上的同 clientId 不算冲突（设备分别连在不同节点是正常拓扑）")
+	void findNodeDeviceUser_doesNotReportConflictAcrossNodes() throws Exception {
+		// given: 两个节点各有一条同名设备记录，分属不同 uid
+		Instance node1 = instance("node-1", true);
+		Instance node2 = instance("node-2", true);
+		when(namingService.getAllInstances(anyString(), anyString())).thenReturn(List.of(node1, node2));
+		Cursor<Map.Entry<Object, Object>> cursor = mockHashCursor(
+				hashEntry("100:wandering", "node-1"),
+				hashEntry("200:wandering", "node-2"));
+		when(hashOps.scan(anyString(), any(ScanOptions.class))).thenReturn(cursor);
+		Set<String> conflicts = new java.util.HashSet<>();
+
+		Map<String, Map<String, Long>> result =
+				routerService.findNodeDeviceUser(List.of(100L, 200L), conflicts);
+
+		assertThat(result.get("node-1")).containsEntry("wandering", 100L);
+		assertThat(result.get("node-2")).containsEntry("wandering", 200L);
+		assertThat(conflicts).isEmpty();
+	}
+
+	@Test
+	@DisplayName("#486 T5：单参入口保持既有语义，不因新增冲突收集而改变返回结构")
+	void findNodeDeviceUser_singleArgKeepsLegacyContract() throws Exception {
+		Instance activeNode = instance("node-1", true);
+		when(namingService.getAllInstances(anyString(), anyString())).thenReturn(List.of(activeNode));
+		Cursor<Map.Entry<Object, Object>> cursor = mockHashCursor(
+				hashEntry("100:clientA", "node-1"),
+				hashEntry("200:clientA", "node-1"));
+		when(hashOps.scan(anyString(), any(ScanOptions.class))).thenReturn(cursor);
+
+		Map<String, Map<String, Long>> result = routerService.findNodeDeviceUser(List.of(100L, 200L));
+
+		assertThat(result).containsOnlyKeys("node-1");
+		assertThat(result.get("node-1")).containsEntry("clientA", 100L);
+	}
 }

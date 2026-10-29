@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.service;
 
 import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
 import com.luohuo.flex.im.domain.vo.req.room.DisbandGroupReq;
 import com.luohuo.flex.im.domain.vo.req.room.GroupMemberPageReq;
 import com.luohuo.flex.im.domain.vo.request.admin.AdminSetReq;
@@ -9,6 +10,8 @@ import com.luohuo.flex.im.domain.vo.request.member.MemberExitReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
+import com.luohuo.flex.im.domain.vo.resp.room.GroupUseStateResp;
+import com.luohuo.flex.im.domain.vo.req.room.GroupUseStateReq;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import jakarta.validation.Valid;
 import com.luohuo.flex.im.domain.vo.req.CursorPageBaseReq;
@@ -126,6 +129,12 @@ public interface RoomAppService {
 	Boolean updateRoomInfo(Long uid, @Valid RoomInfoReq request);
 
 	/**
+	 * #482：管理员修改群信息，并把本次通知的准入回执写入请求级载体。
+	 * <p>载体内核在业务事务提交后才写入，回滚即无回执；由调用方在方法返回后读取。</p>
+	 */
+	Boolean updateRoomInfo(Long uid, @Valid RoomInfoReq request, PushReceipt receipt);
+
+	/**
 	 * 群成员修改自己在群里的信息
 	 * @return
 	 */
@@ -182,6 +191,9 @@ public interface RoomAppService {
 	 */
 	Boolean setNotification(Long uid, ContactNotificationReq request);
 
+	/** #482：免打扰设置，通知准入回执写入请求级载体（先落库后提交）。 */
+	Boolean setNotification(Long uid, ContactNotificationReq request, PushReceipt receipt);
+
 	/**
 	 * 查找群聊
 	 */
@@ -192,6 +204,9 @@ public interface RoomAppService {
 	 * @return
 	 */
 	Boolean setShield(Long uid, ContactShieldReq request);
+
+	/** #482：屏蔽/解除屏蔽，通知准入回执写入请求级载体（先落库后提交）。 */
+	Boolean setShield(Long uid, ContactShieldReq request, PushReceipt receipt);
 
 	/**
 	 * 合并消息
@@ -218,6 +233,18 @@ public interface RoomAppService {
 	List<AiclawMemberResp> aiclawListMembers(Long roomId, boolean online, Long aiclawUid);
 
 	/**
+	 * aichatoverview#484 (T3)：群成员/权限的「当前事实」窄读。
+	 *
+	 * <p>绕开 RoomCache / RoomGroupCache / GroupMemberCache，一次短读事务直取事实表；
+	 * 调用者身份与租户来自认证上下文。结论只有 MEMBER 与 NOT_ACCESSIBLE 两种，
+	 * 后者对「群不存在 / 已删除 / 不在群」同形。该快照只证明本次读取，不是执行授权凭据。</p>
+	 *
+	 * @param request 房间与需要投影的 UID 集合（未请求的 UID 不产生否定结论）
+	 * @param uid     当前登录用户 uid（= ContextUtil.getUid()）
+	 */
+	GroupUseStateResp readGroupUseState(@Valid GroupUseStateReq request, Long uid);
+
+	/**
 	 * 解散群聊
 	 */
 	void exitGroup(Boolean isGroup, Long uid, @Valid MemberExitReq request);
@@ -228,9 +255,19 @@ public interface RoomAppService {
 	void addAdmin(Long uid, @Valid AdminSetReq request);
 
 	/**
+	 * #482：添加管理员，把本次通知的准入回执写入请求级载体（事务提交后写入）。
+	 */
+	void addAdmin(Long uid, @Valid AdminSetReq request, PushReceipt receipt);
+
+	/**
 	 * 移除管理员
 	 */
 	void revokeAdmin(Long uid, @Valid AdminSetReq request);
+
+	/**
+	 * #482：移除管理员，把本次通知的准入回执写入请求级载体（事务提交后写入）。
+	 */
+	void revokeAdmin(Long uid, @Valid AdminSetReq request, PushReceipt receipt);
 
 	/**
 	 * 创建系统好友

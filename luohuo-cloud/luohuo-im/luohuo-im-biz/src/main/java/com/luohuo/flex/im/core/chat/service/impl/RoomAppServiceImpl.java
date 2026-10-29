@@ -28,6 +28,8 @@ import com.luohuo.flex.im.domain.entity.msg.TextMsgReq;
 import com.luohuo.flex.im.domain.vo.res.PageBaseResp;
 import com.luohuo.flex.im.domain.vo.resp.room.AiclawMemberResp;
 import com.luohuo.flex.im.domain.vo.resp.room.GroupMemberSimpleResp;
+import com.luohuo.flex.im.domain.vo.resp.room.GroupUseStateResp;
+import com.luohuo.flex.im.domain.vo.req.room.GroupUseStateReq;
 import com.luohuo.flex.im.domain.vo.response.GroupResp;
 import com.luohuo.flex.im.domain.vo.request.contact.ContactAddReq;
 import jakarta.validation.Valid;
@@ -86,6 +88,8 @@ import com.luohuo.flex.model.entity.ws.ChatMemberResp;
 import com.luohuo.flex.im.core.user.service.FriendService;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import com.luohuo.flex.im.core.user.service.cache.UserCache;
+import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 
 import java.util.*;
@@ -283,12 +287,22 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 
 	@Override
 	public void addAdmin(Long uid, AdminSetReq request) {
-		membershipManager.addAdmin(uid, request);
+		addAdmin(uid, request, null);
+	}
+
+	@Override
+	public void addAdmin(Long uid, AdminSetReq request, PushReceipt receipt) {
+		membershipManager.addAdmin(uid, request, receipt);
 	}
 
 	@Override
 	public void revokeAdmin(Long uid, AdminSetReq request) {
-		membershipManager.revokeAdmin(uid, request);
+		revokeAdmin(uid, request, null);
+	}
+
+	@Override
+	public void revokeAdmin(Long uid, AdminSetReq request, PushReceipt receipt) {
+		membershipManager.revokeAdmin(uid, request, receipt);
 	}
 
 	/**
@@ -326,6 +340,11 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	@Override
 	public Boolean updateRoomInfo(Long uid, RoomInfoReq request) {
 		return lifecycleManager.updateRoomInfo(uid, request);
+	}
+
+	@Override
+	public Boolean updateRoomInfo(Long uid, RoomInfoReq request, PushReceipt receipt) {
+		return lifecycleManager.updateRoomInfo(uid, request, receipt);
 	}
 
 	@Override
@@ -385,22 +404,43 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 
 	@Override
 	public Boolean setNotification(Long uid, ContactNotificationReq request) {
+		return setNotification(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 A：先落库再提交通知，避免「通知已发出但最后一步 DML 失败」的假成功。
+	 * <p>只把推送挪到 DML 之后，不新增包裹事务；返回值仍是最后一次 DAO 的布尔结果。</p>
+	 */
+	@Override
+	public Boolean setNotification(Long uid, ContactNotificationReq request, PushReceipt receipt) {
 		// 1. 判断会话我有没有
 		Contact contact = contactDao.get(uid, request.getRoomId());
 		if (ObjectUtil.isNull(contact)) {
 			return false;
 		}
 
-		// 2. 修改会话通知类型并通知其他终端
+		// 2. 修改会话通知类型
 		contact.setMuteNotification(request.getType());
+		Boolean updated = contactDao.updateById(contact);
 
-		// 3.通知所有设备我已经开启/关闭这个房间的免打扰
-		pushService.sendPushMsg(WsAdapter.buildContactNotification(request), uid, uid);
-		return contactDao.updateById(contact);
+		// 3. 落库成功后才通知所有设备（回执交给请求级载体，不再静默丢弃结果）
+		if (Boolean.TRUE.equals(updated)) {
+			recordSubmission(receipt, pushService.submitPushMsg(WsAdapter.buildContactNotification(request), uid, uid));
+		}
+		return updated;
 	}
 
 	@Override
 	public Boolean setShield(Long uid, ContactShieldReq request) {
+		return setShield(uid, request, null);
+	}
+
+	/**
+	 * #482 时序类 A：屏蔽状态与通知都改在本方法内，先完成各步写入，最后落库成功才提交通知。
+	 * <p>不新增包裹事务，也不声称早期写入可回滚。</p>
+	 */
+	@Override
+	public Boolean setShield(Long uid, ContactShieldReq request, PushReceipt receipt) {
 		Contact contact = contactDao.get(uid, request.getRoomId());
 		if (ObjectUtil.isNull(contact)) {
 			return false;
@@ -420,11 +460,22 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 			name = userSummaryCache.get(roomFriend.getUid1().equals(uid) ? roomFriend.getUid2() : roomFriend.getUid1()).getName();
 		}
 
-		// 3. 通知所有设备我已经屏蔽这个房间
-		pushService.sendPushMsg(WsAdapter.buildShieldContact(request.getState(), name), uid, uid);
 		roomFriendCache.delete(request.getRoomId());
 		contact.setShield(request.getState());
-		return contactDao.updateById(contact);
+		Boolean updated = contactDao.updateById(contact);
+
+		// 3. 落库成功后才通知所有设备我已经屏蔽这个房间
+		if (Boolean.TRUE.equals(updated)) {
+			recordSubmission(receipt, pushService.submitPushMsg(WsAdapter.buildShieldContact(request.getState(), name), uid, uid));
+		}
+		return updated;
+	}
+
+	/** #482：把通知回执写入请求级载体，载体为空时忽略（纯后台通知不提供 HTTP 反馈）。 */
+	private static void recordSubmission(PushReceipt receipt, PushSubmission submission) {
+		if (receipt != null && submission != null) {
+			receipt.record(submission);
+		}
 	}
 
 	@Override
@@ -522,6 +573,12 @@ public class RoomAppServiceImpl implements RoomAppService, InitializingBean {
 	@Override
 	public List<AiclawMemberResp> aiclawListMembers(Long roomId, boolean online, Long aiclawUid) {
 		return membershipManager.aiclawListMembers(roomId, online, aiclawUid);
+	}
+
+	// aichatoverview#484：委派不加事务注解，短读事务与缓存绕行在 manager 内（#170 惯例）
+	@Override
+	public GroupUseStateResp readGroupUseState(GroupUseStateReq request, Long uid) {
+		return membershipManager.readGroupUseState(request, uid);
 	}
 
 	@Override

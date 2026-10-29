@@ -15,6 +15,7 @@ import com.luohuo.flex.im.common.event.UserApplyEvent;
 import com.luohuo.flex.im.domain.entity.UserApply;
 import com.luohuo.flex.model.entity.ws.WSNotice;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
+import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 
 import java.util.Objects;
@@ -58,7 +59,12 @@ public class UserApplyListener {
 		}
 
 		WSNotice resp = noticeDao.getUnReadCount(userApply.getUid(), pushToUid);
-        pushService.sendPushMsg(WsAdapter.buildApplySend(resp), pushToUid, userApply.getUid());
+		// #482：异步监听自己消费回执，提醒推送未接收不影响申请单已落库。
+		PushSubmission submission = pushService.submitPushMsg(WsAdapter.buildApplySend(resp), pushToUid, userApply.getUid());
+		if (submission != null && !submission.isFullyAdmitted()) {
+			log.info("好友申请提醒推送未全部接收: applyId={}, pushToUid={}, admission={}, routeStatus={}, 未接收={}",
+					userApply.getId(), pushToUid, submission.getAdmission(), submission.getRouteStatus(), submission.getUnreceivedUids());
+		}
     }
 
 }

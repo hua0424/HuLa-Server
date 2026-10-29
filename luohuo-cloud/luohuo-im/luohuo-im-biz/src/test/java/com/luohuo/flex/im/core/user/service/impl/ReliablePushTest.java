@@ -37,7 +37,9 @@ class ReliablePushTest {
     private void configure(Map<String, Map<String, Long>> route) {
         ReflectionTestUtils.setField(push, "mqProducer", producer);
         ReflectionTestUtils.setField(push, "routerService", router);
+        // #486 T5：可靠首发沿单参入口（不消费设备冲突回报）；mock 不会委托到两参重载，两条都桩。
         when(router.findNodeDeviceUser(anyList())).thenReturn(route);
+        when(router.findNodeDeviceUser(anyList(), any())).thenReturn(route);
     }
 
     @Test

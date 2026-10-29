@@ -87,7 +87,7 @@ class UserServiceImplTest {
 
 		ArgumentCaptor<WsBaseResp> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
 		ArgumentCaptor<List<Long>> listCaptor = ArgumentCaptor.forClass(List.class);
-		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(UID));
+		verify(pushService, times(1)).submitPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(UID));
 
 		WsBaseResp<?> frame = msgCaptor.getValue();
 		assertEquals("userInfoChange", frame.getType(), "帧类型应为 userInfoChange");
@@ -119,7 +119,7 @@ class UserServiceImplTest {
 
 		ArgumentCaptor<WsBaseResp> msgCaptor = ArgumentCaptor.forClass(WsBaseResp.class);
 		ArgumentCaptor<List<Long>> listCaptor = ArgumentCaptor.forClass(List.class);
-		verify(pushService, times(1)).sendPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(UID));
+		verify(pushService, times(1)).submitPushMsg(msgCaptor.capture(), listCaptor.capture(), eq(UID));
 
 		WsBaseResp<?> frame = msgCaptor.getValue();
 		assertEquals("userInfoChange", frame.getType(), "帧类型应为 userInfoChange");
