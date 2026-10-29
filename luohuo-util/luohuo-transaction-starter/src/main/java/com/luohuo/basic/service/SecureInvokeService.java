@@ -21,6 +21,8 @@ import java.lang.reflect.Method;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
@@ -36,6 +38,9 @@ public class SecureInvokeService {
     private final SecureInvokeRecordDao secureInvokeRecordDao;
 
     private final Executor executor;
+
+    /** #486 T5：执行资源拒绝次数（未执行、未计一次尝试），供 D7 容量测量读取。 */
+    private final AtomicLong admissionDeferred = new AtomicLong();
 
     @Scheduled(cron = "*/5 * * * * ?")
     public void retry() {
@@ -121,10 +126,27 @@ public class SecureInvokeService {
             log.warn("排空截止：跳过异步重放（未执行，记录保留待下次启动重放）: id={}", record.getId());
             return;
         }
-        executor.execute(() -> {
-			log.info("消息同步执行 线程：{}", Thread.currentThread().getName());
-            doInvoke(record);
-        });
+        try {
+            executor.execute(() -> {
+				log.info("消息同步执行 线程：{}", Thread.currentThread().getName());
+                doInvoke(record);
+            });
+        } catch (RejectedExecutionException refused) {
+            // #486 T5：执行资源已满时的调度拒绝是一种独立结果——既不是一次网络尝试（不推进 retryTimes，
+            // 不算进重试预算），也不能正常返回让调用方以为本次已执行完（记录必须保留待下次扫描）。
+            // 记录仍是 WAIT 且 next_retry_time 未变，下一次 retry() 扫描会重新拿到它。
+            admissionDeferred.incrementAndGet();
+            log.warn("重放执行资源已满，本轮不派发（未执行，未计一次尝试，记录保留待下次扫描）: id={}, reason={}",
+                    record.getId(), refused.getMessage());
+        }
+    }
+
+    /**
+     * #486 T5：执行资源拒绝累计次数（D7 容量测量用）。与真正执行过的尝试次数分开统计，
+     * 避免把调度拒绝混进重试量。
+     */
+    public long admissionDeferredCount() {
+        return admissionDeferred.get();
     }
 
     public void doInvoke(SecureInvokeRecord record) {

@@ -123,6 +123,21 @@ public class NacosRouterService {
 	 * @param uids 用户id
 	 */
 	public Map<String, Map<String, Long>> findNodeDeviceUser(List<Long> uids) {
+		return findNodeDeviceUser(uids, null);
+	}
+
+	/**
+	 * 聚合节点 → 设备 → 用户映射，并把无法唯一归属的设备冲突回报给调用方。
+	 *
+	 * <p>#486 T5：以 deviceId 为键的映射在跨 uid 碰撞时只能保留一方，被覆盖的一方会从本次推送中
+	 * 静默丢失。既有实现只告警后覆盖；当调用方需要「不得把无法唯一归属的设备算成已接收」时，
+	 * 必须知道冲突发生在哪个节点的哪个设备，因此这里改为<b>保留先到的 uid</b>（不再覆盖，
+	 * 结果对同一输入稳定）并把冲突键（{@code nodeId|deviceId}）交给调用方判定。
+	 *
+	 * @param uids 用户id
+	 * @param deviceConflicts 冲突收集器；null 表示调用方只关心映射结果
+	 */
+	public Map<String, Map<String, Long>> findNodeDeviceUser(List<Long> uids, Set<String> deviceConflicts) {
 		// 0. 前置校验
 		if (CollUtil.isEmpty(uids)) return Collections.emptyMap();
 
@@ -173,12 +188,17 @@ public class NacosRouterService {
 				if (!targetUids.contains(uid)) continue;
 
 				// 5.5 构建映射：节点 → 设备 → UID
-				// REQ-122: clientId 冲突告警 —— 同一节点上同一 clientId 若已映射到「另一个」uid，
-				// 该 clientId→uid 覆盖会让其中一方从本次推送中静默丢失（群消息漏投）。仅告警，不改路由行为。
-				Long prevUid = result.computeIfAbsent(nodeId, k -> new ConcurrentHashMap<>()).put(clientId, uid);
+				// REQ-122: clientId 冲突告警 —— 同一节点上同一 clientId 若已映射到「另一个」uid。
+				// #486 T5：改为保留先到者（putIfAbsent），结果对同一路由集合稳定可复现；
+				// 冲突的 (nodeId, deviceId) 回报给调用方，由其决定不得算作已接收。
+				Map<String, Long> nodeDevices = result.computeIfAbsent(nodeId, k -> new ConcurrentHashMap<>());
+				Long prevUid = nodeDevices.putIfAbsent(clientId, uid);
 				if (prevUid != null && !prevUid.equals(uid)) {
+					if (deviceConflicts != null) {
+						deviceConflicts.add(nodeId + "|" + clientId);
+					}
 					log.warn("clientId 冲突：节点 {} 上 clientId={} 同时映射到 uid={} 与 uid={}，" +
-							"后者覆盖前者，将有一方从本次推送中丢失（设备指纹/机器码冲突）",
+							"保留先到者，冲突设备不计入已接收（设备指纹/机器码冲突）",
 							nodeId, clientId, prevUid, uid);
 				}
 			}

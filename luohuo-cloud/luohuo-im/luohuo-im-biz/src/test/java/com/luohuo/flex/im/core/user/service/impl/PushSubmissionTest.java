@@ -120,7 +120,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("全部目标被接收：ALL，可称本次提交未被拒，且不产生同步未完成提示")
 	void submitPush_allAccepted_admissionAll() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID, "client-2", OTHER_UID)));
 
 		PushSubmission submission = pushService.submitPush(msg(), List.of(UID, OTHER_UID), ACTOR);
@@ -136,7 +136,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("部分被拒：PARTIAL，只定位未接收目标，已接收目标不被列入重投范围")
 	void submitPush_partialAdmission_locatesOnlyRejected() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID), "node-2", Map.of("client-2", OTHER_UID)));
 
 		PushSubmission submission = pushService.submitPush(msg(), List.of(UID, OTHER_UID), ACTOR);
@@ -154,7 +154,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("路由查询失败：FAILED 单独上报，不伪造设备目标、不被读成 ALL")
 	void submitPush_routeFailure_reportsFailed() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenThrow(new IllegalStateException("router unavailable"));
 
 		PushSubmission submission = pushService.submitPush(msg(), List.of(UID), ACTOR);
@@ -172,7 +172,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("无在线目标：NO_TARGET 单独上报，不等于已送达也不等于业务失败")
 	void submitPush_noTarget_reportsNoTarget() {
-		when(routerService.findNodeDeviceUser(anyList())).thenReturn(Map.of());
+		when(routerService.findNodeDeviceUser(anyList(), any())).thenReturn(Map.of());
 
 		PushSubmission submission = pushService.submitPush(msg(), List.of(UID), ACTOR);
 
@@ -185,7 +185,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("停止期拒绝：明确拒绝事实被记录，不静默返回成功")
 	void submitPush_shutdownRefused_recordsRejection() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 		pushService.destroy();
 
@@ -201,7 +201,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("批次不被截断：多节点多设备逐目标都进回执，单节点被拒不丢其它目标")
 	void submitPush_batchNotTruncated() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID), "node-2", Map.of("client-2", OTHER_UID)));
 
 		PushSubmission submission = pushService.submitPush(msg(), List.of(UID, OTHER_UID), ACTOR);
@@ -218,7 +218,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("首投成功：firstAttempt=SUCCESS，仅代表本次 MQ 首投，不承诺重试与 ACK 之后的结果")
 	void submitPush_firstAttemptSuccess() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 
 		PushSubmission submission = pushService.submitPush(msg(), List.of(UID), ACTOR);
@@ -230,7 +230,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("首投明确失败：firstAttempt=DEFINITE_FAIL，且不改写准入结论")
 	void submitPush_firstAttemptDefiniteFail() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 		doThrow(new RuntimeException("broker rejected")).when(mqProducer).sendMsg(anyString(), any());
 
@@ -246,7 +246,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("首投超时：firstAttempt=UNCERTAIN——broker 可能已接收，不能表述为确定失败")
 	void submitPush_firstAttemptTimeoutIsUncertain() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 		doThrow(new RuntimeException(new TimeoutException("syncSend timeout")))
 				.when(mqProducer).sendMsg(anyString(), any());
@@ -276,7 +276,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("事务内提交：真实提交后才产生推送任务")
 	void submitAfterCommit_insideTx_waitsForCommit() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 		TransactionSynchronizationManager.setActualTransactionActive(true);
 		TransactionSynchronizationManager.initSynchronization();
@@ -298,7 +298,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("事务回滚：不产生推送任务，回执保持空——未提交业务不得表述为已同步")
 	void submitAfterCommit_rollback_producesNothing() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 		TransactionSynchronizationManager.setActualTransactionActive(true);
 		TransactionSynchronizationManager.initSynchronization();
@@ -315,7 +315,7 @@ class PushSubmissionTest {
 	@Test
 	@DisplayName("无事务提交点：直接提交，不注册永不执行的提交回调")
 	void submitAfterCommit_noTx_submitsDirectly() {
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", UID)));
 		PushReceipt receipt = new PushReceipt();
 
