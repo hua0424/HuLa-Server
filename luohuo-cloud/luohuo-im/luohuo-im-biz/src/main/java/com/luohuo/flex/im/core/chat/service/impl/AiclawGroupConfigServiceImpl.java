@@ -3,12 +3,14 @@ package com.luohuo.flex.im.core.chat.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.luohuo.basic.context.ContextUtil;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.common.constant.AiclawRedisKeys;
 import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawGroupConfigMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawGroupConfigService;
+import com.luohuo.flex.im.core.chat.service.GroupRunAdmissionService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.domain.entity.RoomGroup;
@@ -55,6 +57,8 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 	private final RoomGroupCache roomGroupCache;
 	private final AiclawDao aiclawDao;
 	private final GroupMemberDao groupMemberDao;
+	/** aichatoverview#485 T4：授权代次由准入服务按当前事实现算，配置读路径不自己推导。 */
+	private final GroupRunAdmissionService groupRunAdmissionService;
 
 	/**
 	 * aichatoverview#484 (T3)：aiclaw 群配置的「当前事实」窄读。
@@ -123,6 +127,7 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 				.outcome(AiclawGroupConfigStateResp.OUTCOME_PRESENT)
 				.configured(configured)
 				.config(resp)
+				.authorizationEpoch(groupRunAdmissionService.currentEpoch(aiclawUid, roomId, ContextUtil.getTenantId()))
 				.build();
 	}
 
@@ -196,6 +201,9 @@ public class AiclawGroupConfigServiceImpl implements AiclawGroupConfigService {
 					AiclawGroupConfigResp r = BeanUtil.copyProperties(c, AiclawGroupConfigResp.class);
 					// REQ-009#82: 按 roomId 回填群号
 					r.setAccount(accountOf(c.getRoomId()));
+					// aichatoverview#485 (T4)：预热读取同样带上代次，否则重连后缓存的配置没有标记，
+					// 入队输入只能退回「仅校验事实」，撤权前入队的输入会在重新批准后被放行。
+					r.setAuthorizationEpoch(groupRunAdmissionService.currentEpoch(aiclawUid, c.getRoomId(), ContextUtil.getTenantId()));
 					return r;
 				})
 				.toList();

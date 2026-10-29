@@ -42,4 +42,14 @@ public class AiclawGroupConfigResp {
 
 	@Schema(description = "REQ-009#82: 群的可读群号（plugins 据此派生工作目录 groupkey）")
 	private String account;
+
+	/**
+	 * aichatoverview#485 (T4)：读取这一行时看到的授权代次。
+	 *
+	 * <p>它不是权限本身，只是「这次输入属于哪个授权上下文」的标记：plugins 把它随输入冻结、
+	 * 随 START 回传，server 每次用当前事实重新推导并比对，不等即拒。由此撤权前入队的输入
+	 * 不会因为「之后又被批准」而重新变得可执行。
+	 */
+	@Schema(description = "授权代次：读取时看到的授权上下文的指纹（非权限，server 每次重算比对）")
+	private String authorizationEpoch;
 }
