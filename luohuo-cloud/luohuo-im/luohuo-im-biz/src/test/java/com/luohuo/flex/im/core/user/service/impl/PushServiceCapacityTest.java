@@ -5,6 +5,8 @@ import com.luohuo.basic.service.MQProducer;
 import com.luohuo.basic.utils.ShutdownDrainClock;
 import com.luohuo.flex.model.entity.WsBaseResp;
 import com.luohuo.flex.router.NacosRouterService;
+import com.luohuo.flex.im.core.push.activation.PushActivationGate;
+import com.luohuo.flex.im.core.push.activation.PushActivationGuard;
 import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,6 +56,7 @@ class PushServiceCapacityTest {
 	@Mock private CachePlusOps cachePlusOps;
 	@Mock private ScheduledExecutorService retryScheduler;
 	@Mock private ExecutorService nodeExecutor;
+	@Mock private PushActivationGuard activationGuard;
 
 	private PushService pushService;
 
@@ -78,6 +81,10 @@ class PushServiceCapacityTest {
 		ReflectionTestUtils.setField(pushService, "capacityMaxExpandRooms", 4);
 		ReflectionTestUtils.setField(pushService, "capacityMaxExpandTargets", 8);
 		ReflectionTestUtils.setField(pushService, "capacityExpandBudgetMillis", 2_000L);
+		// #487 T6：默认注入"未获资格"的门禁，启用必须显式授予资格，不能靠开关自己生效。
+		ReflectionTestUtils.setField(pushService, "activationGuard", activationGuard);
+		when(activationGuard.verdict()).thenReturn(
+				PushActivationGate.Verdict.blocked(List.of("qualification_absent"), "no qualification"));
 		pushService.init();
 		ReflectionTestUtils.setField(pushService, "retryScheduler", retryScheduler);
 		@SuppressWarnings("unchecked")
@@ -104,6 +111,8 @@ class PushServiceCapacityTest {
 
 	private void enableCapacity() {
 		ReflectionTestUtils.setField(pushService, "capacityEnabled", true);
+		// #487 T6：开关 + 资格判定两条都满足才算启用（工具方法代表"已获资格"的合规情形）。
+		when(activationGuard.verdict()).thenReturn(PushActivationGate.Verdict.ready("granted"));
 		pushService.init();
 		ReflectionTestUtils.setField(pushService, "retryScheduler", retryScheduler);
 		@SuppressWarnings("unchecked")
@@ -139,11 +148,35 @@ class PushServiceCapacityTest {
 		verify(mqProducer).sendMsg(anyString(), any());
 	}
 
+	/**
+	 * #487 T6：开关打开但资格判定未通过 → 必须停在既有语义上。
+	 *
+	 * <p>这是「配置里写 true 不能绕过启用门」在公共入口上的证据：单改一个配置键不足以抢先启用
+	 * 新拒绝策略；观察面同时要能区分「想要启用」与「真的启用了」。
+	 */
+	@Test
+	@DisplayName("#487 T6：请求启用但未获资格 → 保持既有语义，未被抢先拒绝")
+	void requestedButUnqualifiedKeepsExistingSemantics() {
+		ReflectionTestUtils.setField(pushService, "capacityEnabled", true);
+		when(activationGuard.verdict()).thenReturn(
+				PushActivationGate.Verdict.blocked(List.of("qualification.d7_missing"), "d7 missing"));
+		pushService.init();
+		ReflectionTestUtils.setField(pushService, "retryScheduler", retryScheduler);
+		routeTo(Map.of("node-1", Map.of("client-1", 100L)));
+
+		PushSubmission submission = pushService.submitPush(msg(), List.of(100L), 0L);
+
+		assertTrue(submission.isFullyAdmitted(), "未获资格时不得启用新上限，提交应保持既有语义全部接收");
+		Map<String, Object> snapshot = pushService.capacitySnapshot();
+		assertEquals(false, snapshot.get("enabled"), "资格未通过时账本不应存在");
+		assertEquals(true, snapshot.get("requested"), "观察面要能看出配置曾请求启用");
+		assertEquals("BLOCKED", ((Map<?, ?>) snapshot.get("activation")).get("outcome"));
+	}
+
 	/** 单节点任务额度用尽：同节点第二条被真实拒绝，健康节点不受牵连。 */
 	@Test
 	@DisplayName("启用：单节点额度用尽产生逐目标拒绝，健康节点照常接收")
-	void perNodeLimitRejectsOnlyThatNode() {
-		enableCapacity();
+	void perNodeLimitRejectsOnlyThatNode() {		enableCapacity();
 		routeTo(Map.of("node-1", Map.of("client-1", 100L)));
 		// 占住唯一一个 node-1 额度（任务不执行：executor 换成"只登记不运行"）
 		@SuppressWarnings("unchecked")
@@ -290,7 +323,7 @@ class PushServiceCapacityTest {
 		@SuppressWarnings("unchecked")
 		Map<String, Object> snapshot = pushService.capacitySnapshot();
 		assertEquals(true, snapshot.get("closed"));
-		assertNull(snapshot.get("enabled"), "启用后快照不再带 enabled 标记");
+		assertEquals(true, snapshot.get("enabled"), "启用后快照明确报告 enabled=true");
 		PushSubmission afterClose = pushService.submitPush(msg(), List.of(100L), 0L);
 		assertFalse(afterClose.isFullyAdmitted());
 	}

@@ -11,6 +11,8 @@ import com.luohuo.basic.jackson.JsonUtil;
 import com.luohuo.basic.utils.ShutdownDrainClock;
 import com.luohuo.flex.common.cache.PresenceCacheKeyBuilder;
 import com.luohuo.flex.common.constant.MqConstant;
+import com.luohuo.flex.im.core.push.activation.PushActivationGate;
+import com.luohuo.flex.im.core.push.activation.PushActivationGuard;
 import com.luohuo.flex.im.core.user.service.dto.PushReceipt;
 import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.model.entity.dto.NodePushDTO;
@@ -85,9 +87,16 @@ public class PushService {
 	/**
 	 * #486 T5：容量策略开关。<b>默认关闭</b>——未冻结 D7 数值前不启用新上限，
 	 * 关闭时行为与既有实现完全一致；只有获得启用授权后才置 true。
+	 *
+	 * <p>#487 T6：置 true 本身<b>不足以</b>启用。必须同时通过 {@link PushActivationGuard}
+	 * 的资格判定；两者任一不满足都停在既有语义上，见 {@link #init()}。
 	 */
 	@Value("${luohuo.push.capacity.enabled:false}")
 	private boolean capacityEnabled;
+
+	/** #487 T6：新策略启用资格的判定结果来源（启动时判定一次，之后冻结）。 */
+	@Resource
+	private PushActivationGuard activationGuard;
 
 	/** 允许同时保留执行器的节点数（含 churn 期未退出的旧代）。 */
 	@Value("${luohuo.push.capacity.max-active-nodes:64}")
@@ -175,11 +184,22 @@ public class PushService {
 						.build());
 
 		if (capacityEnabled) {
-			capacityLedger = new PushCapacityLedger(capacityMaxActiveNodes, capacityMaxTotalTasks,
-					capacityMaxTasksPerNode, capacityMaxPayloadBytes, capacityMaxConcurrentRetries);
-			log.info("推送容量策略已启用（#486 T5，需 D7 冻结后由 T6 授权）: nodes<={}, tasks<={}, perNode<={}, payloadBytes<={}, retries<={}",
-					capacityMaxActiveNodes, capacityMaxTotalTasks, capacityMaxTasksPerNode,
-					capacityMaxPayloadBytes, capacityMaxConcurrentRetries);
+			// #487 T6：开关只是"打算启用"，真正放行还要资格判定通过；
+			// 判定不通过就停在既有语义上，绝不因为配置里写了 true 就抢先启用新策略。
+			PushActivationGate.Verdict verdict = activationGuard == null
+					? PushActivationGate.Verdict.blocked(List.of("guard_absent"), "缺少启用资格判定组件")
+					: activationGuard.verdict();
+			if (verdict.ready()) {
+				capacityLedger = new PushCapacityLedger(capacityMaxActiveNodes, capacityMaxTotalTasks,
+						capacityMaxTasksPerNode, capacityMaxPayloadBytes, capacityMaxConcurrentRetries);
+				log.info("推送容量策略已启用（#486 T5 + #487 T6 资格判定通过）: nodes<={}, tasks<={}, perNode<={}, payloadBytes<={}, retries<={}",
+						capacityMaxActiveNodes, capacityMaxTotalTasks, capacityMaxTasksPerNode,
+						capacityMaxPayloadBytes, capacityMaxConcurrentRetries);
+			} else {
+				capacityLedger = null;
+				log.warn("推送容量策略配置为启用但未获启用资格（#487 T6），保持既有上限语义: reasons={}",
+						verdict.reasons());
+			}
 		} else {
 			capacityLedger = null;
 			log.info("推送容量策略未启用（#486 T5 默认关闭）：保持既有上限语义");
@@ -188,10 +208,27 @@ public class PushService {
 		log.info("初始化推送延迟调度器");
 	}
 
-	/** 只读观察点：容量账本快照；未启用时返回空 map（供 D7 测量与拒绝排查）。 */
+	/**
+	 * 只读观察点：容量账本快照；未启用时返回空 map（供 D7 测量与拒绝排查）。
+	 *
+	 * <p>#487 T6：额外报告启用资格状态，使"配置想要启用但被门禁拦下"与"根本没打算启用"
+	 * 在观察面上可区分（AC7 要求启用/回滚结果可区分，不把两种情形混成一句"没开"）。
+	 */
 	public Map<String, Object> capacitySnapshot() {
 		PushCapacityLedger ledger = capacityLedger;
-		return ledger == null ? Map.of("enabled", false) : ledger.snapshot();
+		Map<String, Object> snapshot = new LinkedHashMap<>();
+		snapshot.put("enabled", ledger != null);
+		if (ledger != null) {
+			snapshot.putAll(ledger.snapshot());
+		}
+		PushActivationGuard guard = activationGuard;
+		snapshot.put("requested", capacityEnabled);
+		snapshot.put("activation", guard == null ? Map.of("outcome", "BLOCKED",
+				"reasons", List.of("guard_absent")) : Map.of(
+				"outcome", guard.verdict().outcome().name(),
+				"reasons", guard.verdict().reasons(),
+				"detail", guard.verdict().detail()));
+		return snapshot;
 	}
 
 	private static PushDrainException rejected(String what) {
