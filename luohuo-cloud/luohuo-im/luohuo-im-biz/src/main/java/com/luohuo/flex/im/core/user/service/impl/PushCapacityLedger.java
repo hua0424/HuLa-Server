@@ -2,6 +2,7 @@ package com.luohuo.flex.im.core.user.service.impl;
 
 import com.luohuo.basic.jackson.JsonUtil;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -274,33 +275,31 @@ final class PushCapacityLedger {
 		}
 	}
 
-	/** @return 本次计入的 wire bytes；超预算返回 -1 且不留下引用。 */
+	/**
+	 * @return 本次计入的 wire bytes；超预算返回 -1 且不留下引用。
+	 *
+	 * <p>判限与累加必须在同一临界段内完成：分别做的话两个并发线程各自看到「还有余量」，
+	 * 合计就会越过 {@code maxPayloadBytes}。字节估算留在锁外，避免一次大载荷的序列化
+	 * 阻塞所有准入。
+	 */
 	private int acquirePayload(Object payload) {
 		if (payload == null) {
 			return 0;
 		}
-		PayloadRef existing;
+		int bytes = estimatePayloadBytes(payload);
 		synchronized (payloads) {
-			existing = payloads.get(payload);
+			PayloadRef existing = payloads.get(payload);
 			if (existing != null) {
 				existing.refs++;
 				return existing.bytes;
 			}
-		}
-		int bytes = estimatePayloadBytes(payload);
-		if (payloadBytes.get() + bytes > maxPayloadBytes) {
-			return -1;
-		}
-		synchronized (payloads) {
-			PayloadRef raced = payloads.get(payload);
-			if (raced != null) {
-				raced.refs++;
-				return raced.bytes;
+			if (payloadBytes.get() + bytes > maxPayloadBytes) {
+				return -1;
 			}
 			payloadBytes.addAndGet(bytes);
 			payloads.put(payload, new PayloadRef(bytes));
+			return bytes;
 		}
-		return bytes;
 	}
 
 	private void releaseAdmission(String nodeId, boolean retry, Object payload) {
@@ -327,13 +326,18 @@ final class PushCapacityLedger {
 	}
 
 	/**
-	 * 一次载荷的 wire 字节估算（UTF-8 计法：Java char 数即可作为上界，ASCII 场景精确）。
-	 * 只在首次见到该 payload 时计算一次，之后按引用复用；序列化失败按 0 计并保留引用
+	 * 一次载荷的 wire 字节（JSON 序列化后的 UTF-8 字节数）。
+	 *
+	 * <p>必须按 UTF-8 的<b>字节</b>算，不能用 {@code String.length()}：那是 UTF-16 code unit
+	 * 计数，中文正文一个字符只算 1，实际 wire 上是 3 字节，会把预算低估约 3 倍，
+	 * 也会让 #487/T6 据此冻结的计量单位失真。
+	 *
+	 * <p>只在首次见到该 payload 时计算一次，之后按引用复用；序列化失败按 0 计并保留引用
 	 * （宁可低估也不把一次可发送的推送判成超额）。
 	 */
 	private static int estimatePayloadBytes(Object payload) {
 		String json = JsonUtil.toJson(payload);
-		return json == null ? 0 : json.length();
+		return json == null ? 0 : json.getBytes(StandardCharsets.UTF_8).length;
 	}
 
 	/** 供测试与观察：当前所有维度的一句话摘要。 */

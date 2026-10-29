@@ -198,4 +198,76 @@ class PushCapacityLedgerTest {
 		held.forEach(PushCapacityLedger.Admission::release);
 		assertEquals(nodes * perNode, ledger.snapshot().get("globalFreePermits"), "全部释放后应完全复位");
 	}
+
+	/**
+	 * 不同载荷对象并发入场时字节预算仍是硬上限。
+	 *
+	 * <p>回归防护：判限与累加若不在同一临界段，多个线程会各自看到「还有余量」，
+	 * 合计越过 maxPayloadBytes。上面的并发用例所有线程共用同一个 payload 对象，
+	 * 只走到「引用数 +1」，掩盖了这个窗口。
+	 */
+	@Test
+	void concurrentDistinctPayloadsNeverExceedTheByteBudget() throws Exception {
+		int budget = 4096;
+		PushCapacityLedger ledger = new PushCapacityLedger(64, 4096, 4096, budget, 16);
+		// 每个载荷 128 字节 wire 开销（128 个 ASCII 字符 + 2 个引号），预算只够 32 个。
+		String body = "a".repeat(126);
+		int perPayload = body.length() + 2;
+		int capacity = budget / perPayload;
+		ExecutorService pool = Executors.newFixedThreadPool(16);
+		List<PushCapacityLedger.Admission> held = new ArrayList<>();
+		AtomicInteger admitted = new AtomicInteger();
+		CountDownLatch start = new CountDownLatch(1);
+		try {
+			for (int i = 0; i < 200; i++) {
+				int index = i;
+				pool.execute(() -> {
+					try {
+						start.await(2, TimeUnit.SECONDS);
+					} catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+						return;
+					}
+					// new String(...) 保证每次都是不同身份 → 每个都独立计费。
+					PushCapacityLedger.Reservation reservation =
+							ledger.reserve("n" + (index % 8), new String(body));
+					if (reservation.admitted()) {
+						admitted.incrementAndGet();
+						synchronized (held) {
+							held.add(reservation.admission());
+						}
+					}
+				});
+			}
+			start.countDown();
+			pool.shutdown();
+			assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "并发准入应在预算内完成");
+		} finally {
+			pool.shutdownNow();
+		}
+		int countedBytes = ((Number) ledger.snapshot().get("payloadBytes")).intValue();
+		assertTrue(countedBytes <= budget,
+				"并发不同载荷合计 " + countedBytes + " 字节，不得超过预算 " + budget);
+		assertEquals(capacity, admitted.get(), "只应放进预算内的载荷数");
+		assertEquals(capacity * perPayload, countedBytes, "计费字节应等于实际放进的载荷之和");
+		held.forEach(PushCapacityLedger.Admission::release);
+		assertEquals(0, ((Number) ledger.snapshot().get("payloadBytes")).intValue(), "全部释放后字节归零");
+	}
+
+	/**
+	 * 计费单位是 UTF-8 字节，不是 String.length()。
+	 *
+	 * <p>回归防护：用 char 数计费会低估中文正文约 3 倍，并误导 #487/T6 冻结的计量单位。
+	 */
+	@Test
+	void payloadIsBilledInUtf8BytesNotUtf16Chars() {
+		PushCapacityLedger ledger = new PushCapacityLedger(2, 2, 2, 4096, 1);
+		// 10 个中文字符：String.length() = 10，JSON 里带引号后 UTF-8 是 32 字节。
+		String chinese = "推送容量预算校验用例";
+		assertEquals(12, chinese.length() + 2, "前提：char 数确实是 10");
+		assertTrue(ledger.reserve("n1", chinese).admitted());
+		int counted = ((Number) ledger.snapshot().get("payloadBytes")).intValue();
+		assertEquals(32, counted, "中文必须按 UTF-8 字节计费，char 数会低估");
+		assertTrue(counted > chinese.length() + 2, "按字节计必须明显大于 char 数");
+	}
 }
