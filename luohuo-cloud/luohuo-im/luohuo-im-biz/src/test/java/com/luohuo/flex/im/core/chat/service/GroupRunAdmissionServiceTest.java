@@ -4,6 +4,7 @@ import com.luohuo.flex.im.core.chat.mapper.GroupRunAdmissionMapper;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.entity.Room;
+import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.entity.User;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.im.enums.UserTypeEnum;
@@ -56,6 +57,20 @@ class GroupRunAdmissionServiceTest {
 		room.setType(RoomTypeEnum.FRIEND.getType());
 		room.setIsDel(false);
 		return room;
+	}
+
+	/** 单聊成员事实行：uid1/uid2 含 actor，deFriend 为 null 表示正常。 */
+	private RoomFriend friend(Boolean deFriend1, Boolean deFriend2) {
+		RoomFriend friend = new RoomFriend();
+		friend.setId(800L);
+		friend.setRoomId(ROOM);
+		friend.setUid1(ACTOR);
+		friend.setUid2(ACTOR + 1);
+		friend.setDeFriend1(deFriend1);
+		friend.setDeFriend2(deFriend2);
+		friend.setUpdateTime(LocalDateTime.of(2026, 1, 1, 0, 0));
+		friend.setIsDel(false);
+		return friend;
 	}
 
 	private AiclawGroupConfig config(Long id, Integer approved, String workspace, LocalDateTime updateTime) {
@@ -199,14 +214,45 @@ class GroupRunAdmissionServiceTest {
 		}
 
 		@Test
-		@DisplayName("单聊不套群 approved：只要成员与身份成立即可")
+		@DisplayName("单聊不套群 approved：成员事实取自 im_room_friend 行，成立即准入")
 		void friendRoomSkipsConfig() {
 			when(admissionMapper.selectRoom(ROOM, TENANT)).thenReturn(friendRoom());
-			when(admissionMapper.lockMembership(ACTOR, ROOM, TENANT)).thenReturn(900L);
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(friend(null, null));
 			when(admissionMapper.lockUser(ACTOR)).thenReturn(identity(ACTOR, 0, TENANT));
 			when(admissionMapper.lockAiclaw(ACTOR)).thenReturn(aiclaw(ACTOR, 1, TENANT, null));
 
-			assertTrue(service.admitGroupRun(ACTOR, ROOM, TENANT, null).admitted());
+			GroupRunAdmissionService.Admission admission = service.admitGroupRun(ACTOR, ROOM, TENANT, null);
+
+			assertTrue(admission.admitted());
+			assertNull(admission.getWorkspaceDir());
+		}
+
+		@Test
+		@DisplayName("单聊没有 im_room_friend 行（已删好友）：authorization_membership_revoked")
+		void friendRoomWithoutRowIsRevoked() {
+			when(admissionMapper.selectRoom(ROOM, TENANT)).thenReturn(friendRoom());
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(null);
+			when(admissionMapper.lockUser(ACTOR)).thenReturn(identity(ACTOR, 0, TENANT));
+			when(admissionMapper.lockAiclaw(ACTOR)).thenReturn(aiclaw(ACTOR, 1, TENANT, null));
+
+			assertEquals(GroupRunAdmissionService.REASON_MEMBERSHIP_GONE,
+					service.admitGroupRun(ACTOR, ROOM, TENANT, null).getReason());
+		}
+
+		@Test
+		@DisplayName("单聊任一方屏蔽（de_friend1/de_friend2 任一置位）：与删好友同义的撤权")
+		void friendRoomBlockedEitherDirectionIsRevoked() {
+			when(admissionMapper.selectRoom(ROOM, TENANT)).thenReturn(friendRoom());
+			when(admissionMapper.lockUser(ACTOR)).thenReturn(identity(ACTOR, 0, TENANT));
+			when(admissionMapper.lockAiclaw(ACTOR)).thenReturn(aiclaw(ACTOR, 1, TENANT, null));
+
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(friend(true, null));
+			assertEquals(GroupRunAdmissionService.REASON_MEMBERSHIP_GONE,
+					service.admitGroupRun(ACTOR, ROOM, TENANT, null).getReason());
+
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(friend(null, true));
+			assertEquals(GroupRunAdmissionService.REASON_MEMBERSHIP_GONE,
+					service.admitGroupRun(ACTOR, ROOM, TENANT, null).getReason());
 		}
 	}
 
@@ -261,6 +307,29 @@ class GroupRunAdmissionServiceTest {
 					.thenReturn(aiclaw(ACTOR + 500L, 1, TENANT, null));
 
 			assertNotEquals(before, service.admitGroupRun(ACTOR, ROOM, TENANT, null).getAuthorizationEpoch());
+		}
+
+		@Test
+		@DisplayName("单聊删好友/屏蔽：im_room_friend 行事实变化即换代次，旧输入不得被重新加好友洗新")
+		void friendRoomBlockInvalidatesOldInput() {
+			when(admissionMapper.selectRoom(ROOM, TENANT)).thenReturn(friendRoom());
+			when(admissionMapper.lockUser(ACTOR)).thenReturn(identity(ACTOR, 0, TENANT));
+			when(admissionMapper.lockAiclaw(ACTOR)).thenReturn(aiclaw(ACTOR, 1, TENANT, null));
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(friend(null, null));
+			String before = service.admitGroupRun(ACTOR, ROOM, TENANT, null).getAuthorizationEpoch();
+
+			// 拉黑（de_friend1 置位）：拒绝 + 事实变化。
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(friend(true, null));
+			assertEquals(GroupRunAdmissionService.REASON_MEMBERSHIP_GONE,
+					service.admitGroupRun(ACTOR, ROOM, TENANT, before).getReason());
+
+			// 重新加好友：de_friend 复位但行版本前进，旧代次仍然失效。
+			RoomFriend restored = friend(null, null);
+			restored.setUpdateTime(LocalDateTime.of(2026, 2, 1, 0, 0));
+			when(admissionMapper.lockFriendMembership(ACTOR, ROOM, TENANT)).thenReturn(restored);
+			assertNotEquals(before, service.admitGroupRun(ACTOR, ROOM, TENANT, null).getAuthorizationEpoch());
+			assertEquals(GroupRunAdmissionService.REASON_EPOCH_STALE,
+					service.admitGroupRun(ACTOR, ROOM, TENANT, before).getReason());
 		}
 
 		@Test

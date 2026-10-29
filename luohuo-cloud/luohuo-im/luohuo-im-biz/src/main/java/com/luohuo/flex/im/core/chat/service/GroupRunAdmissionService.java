@@ -5,6 +5,7 @@ import com.luohuo.flex.im.core.chat.mapper.GroupRunAdmissionMapper;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.entity.Room;
+import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.entity.User;
 import com.luohuo.flex.im.domain.enums.RoomTypeEnum;
 import com.luohuo.flex.im.enums.UserTypeEnum;
@@ -26,10 +27,11 @@ import java.util.Objects;
  * 都不会让撤权失效。</p>
  *
  * <p>授权代次（authorization epoch）由「当时参与判定的事实行」推导：配置行 id + 配置版本 + approved +
- * workspaceDir、成员行 id、身份行 id + 状态/批准状态/停用时间。软删不释放
+ * workspaceDir、成员行 id（群成员行为 {@code im_group_member.id}，单聊成员行为 {@code im_room_friend.id}
+ * 及其 deFriend 状态）、身份行 id + 状态/批准状态/停用时间。软删不释放
  * {@code im_aiclaw_group_config} 的 (aiclaw_uid, room_id) 唯一键，成员与配置行重建会拿到新的雪花 id，
- * 所以撤权→再批准、成员删除→重入、身份停用→恢复都会得到不同的代次；同一代次只在事实未变时重复出现。
- * 这不需要新增列，也不会把 ABA 折叠成一个布尔。</p>
+ * 所以撤权→再批准、成员删除→重入、身份停用→恢复、删好友→重新加好友都会得到不同的代次；同一代次只在
+ * 事实未变时重复出现。这不需要新增列，也不会把 ABA 折叠成一个布尔。</p>
  *
  * <p>并发顺序以本类事务提交为准：准入事务先提交即该次执行合法；撤权事务先提交则后续准入必然读到并拒绝。
  * 加锁读是 MySQL 的当前读（不是快照读），所以即使被调用方事务包着也不会读到旧快照；本类不持锁跨越
@@ -106,25 +108,41 @@ public class GroupRunAdmissionService {
 			return deny(roomId, actor, REASON_ROOM_GONE);
 		}
 
-		// 固定锁序：配置行 → 成员行 → 身份行。撤权写入方（配置更新、踢人、身份停用）按同一顺序争用。
+		// 固定锁序：配置行 → 成员行 → 身份行。撤权写入方（配置更新、踢人、删好友、身份停用）按同一顺序争用。
 		AiclawGroupConfig config = null;
 		String reason = null;
-		if (!Objects.equals(room.getType(), RoomTypeEnum.FRIEND.getType())) {
+		String membershipFact;
+		if (Objects.equals(room.getType(), RoomTypeEnum.FRIEND.getType())) {
+			// 单聊没有 im_room_group / im_group_member 行：成员事实就是 im_room_friend 那一行。
+			// 任一 de_friend 置位都让该房间不可执行（CheckDeFriend 对两个方向都拦：屏蔽方与被屏蔽方都不能发）。
+			RoomFriend friend = lock ? admissionMapper.lockFriendMembership(actor, roomId, tenantId)
+					: admissionMapper.selectFriendMembership(actor, roomId, tenantId);
+			if (friend == null) {
+				membershipFact = "mem-null";
+			} else {
+				membershipFact = "fr-" + friend.getId() + "-" + friend.getUpdateTime()
+						+ "-" + friend.getDeFriend1() + "-" + friend.getDeFriend2();
+				if (Boolean.TRUE.equals(friend.getDeFriend1()) || Boolean.TRUE.equals(friend.getDeFriend2())) {
+					reason = REASON_MEMBERSHIP_GONE;
+				}
+			}
+		} else {
 			config = lock ? admissionMapper.lockConfig(actor, roomId) : admissionMapper.selectConfig(actor, roomId);
 			reason = configDenialReason(config);
+			Long membershipId = lock ? admissionMapper.lockMembership(actor, roomId, tenantId)
+					: admissionMapper.selectMembership(actor, roomId, tenantId);
+			membershipFact = "mem-" + membershipId;
 		}
-		Long membershipId = lock ? admissionMapper.lockMembership(actor, roomId, tenantId)
-				: admissionMapper.selectMembership(actor, roomId, tenantId);
 		User user = lock ? admissionMapper.lockUser(actor) : admissionMapper.selectUser(actor);
 		Aiclaw aiclaw = lock ? admissionMapper.lockAiclaw(actor) : admissionMapper.selectAiclaw(actor);
 
-		String identityIncarnation = identityIncarnation(user, aiclaw);
-		String epoch = epochOf(config, membershipId, identityIncarnation);
+		String identityPart = identityIncarnation(user, aiclaw);
+		String epoch = epochOf(config, membershipFact, identityPart);
 
 		if (reason != null) {
 			return new Admission(DENIED, roomId, actor, epoch, null, reason, SCHEMA);
 		}
-		if (membershipId == null) {
+		if ("mem-null".equals(membershipFact)) {
 			return new Admission(DENIED, roomId, actor, epoch, null, REASON_MEMBERSHIP_GONE, SCHEMA);
 		}
 		if (!identityActive(user, aiclaw, tenantId)) {
@@ -177,12 +195,12 @@ public class GroupRunAdmissionService {
 				+ ":" + (aiclaw.getDeactivatedAt() == null ? "-" : aiclaw.getDeactivatedAt());
 	}
 
-	private String epochOf(AiclawGroupConfig config, Long membershipId, String identityIncarnation) {
+	private String epochOf(AiclawGroupConfig config, String membershipFact, String identityPart) {
 		String configPart = config == null
 				? "cfg-none"
 				: "cfg-" + config.getId() + "-" + config.getUpdateTime() + "-" + config.getApproved()
 						+ "-" + (config.getWorkspaceDir() == null ? "-" : config.getWorkspaceDir());
-		return DigestUtil.sha256Hex(configPart + "|mem-" + membershipId + "|id-" + identityIncarnation)
+		return DigestUtil.sha256Hex(configPart + "|" + membershipFact + "|id-" + identityPart)
 				.substring(0, 32);
 	}
 }

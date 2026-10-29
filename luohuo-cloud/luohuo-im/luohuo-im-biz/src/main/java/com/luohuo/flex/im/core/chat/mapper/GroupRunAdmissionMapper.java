@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.annotation.InterceptorIgnore;
 import com.luohuo.flex.im.domain.entity.Aiclaw;
 import com.luohuo.flex.im.domain.entity.AiclawGroupConfig;
 import com.luohuo.flex.im.domain.entity.Room;
+import com.luohuo.flex.im.domain.entity.RoomFriend;
 import com.luohuo.flex.im.domain.entity.User;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
@@ -51,6 +52,23 @@ public interface GroupRunAdmissionMapper {
 			+ "WHERE rg.room_id = #{roomId} AND rg.tenant_id = #{tenantId} AND rg.is_del = 0 "
 			+ "LIMIT 1")
 	Long selectMembership(@Param("actor") Long actor, @Param("roomId") Long roomId,
+			@Param("tenantId") Long tenantId);
+
+	/**
+	 * 单聊成员事实加锁：与删好友/重新加好友（im_room_friend.de_friend* 更新）串行。
+	 *
+	 * <p>单聊没有 im_room_group/im_group_member 行，成员事实就是这一行；返回整行是因为
+	 * {@code de_friend1}/{@code de_friend2} 与行 id 都要参与判定与代次推导：
+	 * {@code CheckDeFriend} 对两个方向都拦截，所以任一 de_friend=1 即该房间不可执行。</p>
+	 */
+	@Select("SELECT * FROM im_room_friend WHERE room_id = #{roomId} AND tenant_id = #{tenantId} "
+			+ "AND is_del = 0 AND (uid1 = #{actor} OR uid2 = #{actor}) LIMIT 1 FOR UPDATE")
+	RoomFriend lockFriendMembership(@Param("actor") Long actor, @Param("roomId") Long roomId,
+			@Param("tenantId") Long tenantId);
+
+	@Select("SELECT * FROM im_room_friend WHERE room_id = #{roomId} AND tenant_id = #{tenantId} "
+			+ "AND is_del = 0 AND (uid1 = #{actor} OR uid2 = #{actor}) LIMIT 1")
+	RoomFriend selectFriendMembership(@Param("actor") Long actor, @Param("roomId") Long roomId,
 			@Param("tenantId") Long tenantId);
 
 	/** 身份事实加锁：与停用/恢复/删除身份的行更新串行。 */

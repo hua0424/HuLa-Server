@@ -72,17 +72,6 @@ public interface AiclawThinkingMapper extends BaseMapper<AiclawThinking> {
 			@Param("content") String content, @Param("duration") Integer duration,
 			@Param("status") Integer status, @Param("error") String error);
 
-	@Select("SELECT 1 FROM im_room r WHERE r.id = #{roomId} AND r.tenant_id = #{tenantId} "
-			+ "AND r.is_del = 0 AND ((r.type = 1 AND EXISTS (SELECT 1 FROM im_room_group rg "
-			+ "JOIN im_group_member gm ON gm.group_id = rg.id AND gm.uid = #{actor} AND gm.is_del = 0 "
-			+ "WHERE rg.room_id = r.id AND rg.tenant_id = r.tenant_id "
-			+ "AND gm.tenant_id = r.tenant_id AND rg.is_del = 0)) "
-			+ "OR (r.type = 2 AND EXISTS (SELECT 1 FROM im_room_friend rf "
-			+ "WHERE rf.room_id = r.id AND rf.tenant_id = r.tenant_id AND rf.is_del = 0 "
-			+ "AND (rf.uid1 = #{actor} OR rf.uid2 = #{actor})))) LIMIT 1")
-	Integer isCurrentMember(@Param("actor") Long actor, @Param("roomId") Long roomId,
-			@Param("tenantId") Long tenantId);
-
 	/** Cross-tenant service scan: every returned row carries its own tenant; the update still uses tenant-bound CAS. */
 	@InterceptorIgnore(tenantLine = "true")
 	@Select("SELECT t.id, t.tenant_id, t.aiclaw_uid, t.room_id, t.create_time "
