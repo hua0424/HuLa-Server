@@ -67,6 +67,13 @@ public class PushService {
 	private Integer delaySeconds;
 
 	/**
+	 * 单次 MQ 发送的调用等待预算（毫秒）。#486 T5：与延迟时长解耦，默认 10s 覆盖 broker 可观测的
+	 * syncSend 抖动而不把一次发送挂到分钟级；&lt;=0 时回落到按延迟级别推导的默认预算。
+	 */
+	@Value("${luohuo.push.send-timeout-millis:10000}")
+	private long pushSendTimeoutMillis;
+
+	/**
 	 * 有限排空预算（秒）。默认 30s 对齐 Spring {@code spring.lifecycle.timeout-per-shutdown-phase=30s}
 	 *（Nacos dev-runtime common.yml 有效值，见 #450 §2）；该 30s 在当前容器下不可达（Java 收不到
 	 * SIGTERM，有效窗口为 0），仅为排空机制占位——数值预算 BLOCK 维持，待 §6 适配 + V3 实测后重冻，
@@ -74,6 +81,48 @@ public class PushService {
 	 */
 	@Value("${luohuo.push.shutdown-budget-seconds:30}")
 	private long shutdownBudgetSeconds;
+
+	/**
+	 * #486 T5：容量策略开关。<b>默认关闭</b>——未冻结 D7 数值前不启用新上限，
+	 * 关闭时行为与既有实现完全一致；只有获得启用授权后才置 true。
+	 */
+	@Value("${luohuo.push.capacity.enabled:false}")
+	private boolean capacityEnabled;
+
+	/** 允许同时保留执行器的节点数（含 churn 期未退出的旧代）。 */
+	@Value("${luohuo.push.capacity.max-active-nodes:64}")
+	private int capacityMaxActiveNodes;
+
+	/** 全局同时可容纳的节点任务数（跨节点合计，含排队）。 */
+	@Value("${luohuo.push.capacity.max-total-tasks:512}")
+	private int capacityMaxTotalTasks;
+
+	/** 单节点同时可容纳的任务数（1 个执行 + 有限排队；热点节点不挤占其他节点）。 */
+	@Value("${luohuo.push.capacity.max-tasks-per-node:4}")
+	private int capacityMaxTasksPerNode;
+
+	/** 共享载荷字节上限（同一 payload 跨节点只计一次 + 引用）。 */
+	@Value("${luohuo.push.capacity.max-payload-bytes:16777216}")
+	private int capacityMaxPayloadBytes;
+
+	/** 同时可预约的延迟重试/直发重发链数。 */
+	@Value("${luohuo.push.capacity.max-concurrent-retries:64}")
+	private int capacityMaxConcurrentRetries;
+
+	/** 单次房间广播最多展开的房间数（超限整次拒绝，不做部分接收）。 */
+	@Value("${luohuo.push.capacity.max-expand-rooms:256}")
+	private int capacityMaxExpandRooms;
+
+	/** 单次房间广播最多展开的目标用户数。 */
+	@Value("${luohuo.push.capacity.max-expand-targets:4096}")
+	private int capacityMaxExpandTargets;
+
+	/** 单次房间广播的展开耗时预算（毫秒）。 */
+	@Value("${luohuo.push.capacity.expand-budget-millis:2000}")
+	private long capacityExpandBudgetMillis;
+
+	/** 容量账本；容量策略关闭时为 null（零开销、零行为变化）。 */
+	private volatile PushCapacityLedger capacityLedger;
 
 	// 延迟任务线程池
 	private ScheduledExecutorService retryScheduler;
@@ -125,7 +174,24 @@ public class PushService {
 						.setDaemon(true)
 						.build());
 
+		if (capacityEnabled) {
+			capacityLedger = new PushCapacityLedger(capacityMaxActiveNodes, capacityMaxTotalTasks,
+					capacityMaxTasksPerNode, capacityMaxPayloadBytes, capacityMaxConcurrentRetries);
+			log.info("推送容量策略已启用（#486 T5，需 D7 冻结后由 T6 授权）: nodes<={}, tasks<={}, perNode<={}, payloadBytes<={}, retries<={}",
+					capacityMaxActiveNodes, capacityMaxTotalTasks, capacityMaxTasksPerNode,
+					capacityMaxPayloadBytes, capacityMaxConcurrentRetries);
+		} else {
+			capacityLedger = null;
+			log.info("推送容量策略未启用（#486 T5 默认关闭）：保持既有上限语义");
+		}
+
 		log.info("初始化推送延迟调度器");
+	}
+
+	/** 只读观察点：容量账本快照；未启用时返回空 map（供 D7 测量与拒绝排查）。 */
+	public Map<String, Object> capacitySnapshot() {
+		PushCapacityLedger ledger = capacityLedger;
+		return ledger == null ? Map.of("enabled", false) : ledger.snapshot();
 	}
 
 	private static PushDrainException rejected(String what) {
@@ -228,7 +294,10 @@ public class PushService {
 
 	private NodeDispatch dispatchNodeSends(WsBaseResp<?> msg, List<Long> uids, Long hashId, Long cuid, Boolean retry) {
 		// 1. 构建三级映射: 节点 → 设备指纹 → 用户ID
-		Map<String, Map<String, Long>> nodeDeviceUser = routerService.findNodeDeviceUser(uids);
+		// #486 T5：设备身份冲突（同节点同 deviceId 归属多个 uid）无法唯一归属，必须回报，
+		// 否则被覆盖的一方会被算成「已接收」而实际永远收不到。
+		Set<String> deviceConflicts = new HashSet<>();
+		Map<String, Map<String, Long>> nodeDeviceUser = routerService.findNodeDeviceUser(uids, deviceConflicts);
 
 		// #482：可信租户在提交线程捕获，随延迟消息带到 MQ，绝不在工作线程猜默认租户。
 		Long tenantId = ContextUtil.getTenantId();
@@ -238,10 +307,28 @@ public class PushService {
 		List<PushSubmission> parts = new ArrayList<>();
 		nodeDeviceUser.forEach((nodeId, deviceUserMap) -> {
 			List<PushSubmission.Target> targets = PushSubmission.targetsOf(nodeId, deviceUserMap);
+			rejectConflictingDevices(targets, deviceConflicts);
 			futures.add(submitNodeSend(msg, deviceUserMap, hashId, cuid, retry, nodeId, targets, tenantId));
 			parts.add(PushSubmission.resolved(targets));
 		});
 		return new NodeDispatch(futures, parts);
+	}
+
+	/**
+	 * #486 T5：冲突设备不进入「已接收」——它们无法唯一归属，投递结果不可判定。
+	 * <p>
+	 * 冲突的设备仍会随本节点批次发出（保留既有保守投递行为，不因冲突丢掉那条路由），
+	 * 但准入结论如实记为拒绝，调用方不会把它当作真实接收。
+	 */
+	private static void rejectConflictingDevices(List<PushSubmission.Target> targets, Set<String> deviceConflicts) {
+		if (deviceConflicts.isEmpty()) {
+			return;
+		}
+		for (PushSubmission.Target target : targets) {
+			if (deviceConflicts.contains(target.getNodeId() + "|" + target.getDeviceId())) {
+				target.reject("device_identity_conflict");
+			}
+		}
 	}
 
 	private CompletableFuture<Void> sendAsyncInternal(WsBaseResp<?> msg, List<Long> uids, Long hashId, Long cuid, Boolean retry) {
@@ -252,17 +339,45 @@ public class PushService {
 	private CompletableFuture<Void> submitNodeSend(WsBaseResp<?> msg, Map<String, Long> deviceUserMap,
 			Long hashId, Long cuid, Boolean retry, String nodeId, List<PushSubmission.Target> targets, Long tenantId) {
 		CompletableFuture<Void> future = new CompletableFuture<>();
+		// #486：容量策略启用时先取得节点/全局/载荷额度，失败即逐目标可处理拒绝，不进入执行器。
+		PushCapacityLedger ledger = capacityLedger;
+		PushCapacityLedger.Admission admission = null;
+		if (ledger != null) {
+			PushCapacityLedger.Reservation reservation = ledger.reserve(nodeId, msg);
+			if (!reservation.admitted()) {
+				String reason = reservation.reason();
+				settleRejected(future, nodeId, msg, new PushDrainException(reason));
+				rejectTargets(targets, reason);
+				log.warn("MQ推送容量拒绝: nodeId={}, type={}, reason={}", nodeId, msg.getType(), reason);
+				return future;
+			}
+			admission = reservation.admission();
+		}
 		ExecutorService exec;
 		try {
 			exec = getExecutorForNode(nodeId);
 		} catch (RuntimeException e) {
+			if (admission != null) {
+				admission.release();
+			}
 			settleRejected(future, nodeId, msg, e);
 			rejectTargets(targets, e.getMessage());
 			return future;
 		}
+		// #486 T5：入队前冻结本次接收的投递内容——设备映射复制一份，之后调用方改动自己的 map
+		// 不能改变已经承诺接收的内容。
+		// ponytail: WsBaseResp 本体未深拷贝（它是既有推送契约里的不可变入参）；升级路径是在
+		// 准入时序列化出 wire 载荷并按该字节数计费，代价是每条推送多一次序列化，由 D7 测量决定。
+		Map<String, Long> frozenDevices = Map.copyOf(deviceUserMap);
+		NodePushDTO dto = new NodePushDTO(msg, frozenDevices, hashId, cuid, tenantId);
 		NodeSendTask task = new NodeSendTask(future, nodeId, msg.getType(),
-				() -> doNodeSend(msg, deviceUserMap, hashId, cuid, retry, nodeId, targets, tenantId));
+				() -> doNodeSend(dto, retry, nodeId, targets));
 		inFlight.put(future, new TrackedTask(task, "send", nodeId));
+		if (admission != null) {
+			// 额度归还与任务终局绑定（含排空结算路径），Admission 自身幂等，不会多扣。
+			PushCapacityLedger.Admission held = admission;
+			future.whenComplete((r, t) -> held.release());
+		}
 		future.whenComplete((r, t) -> inFlight.remove(future));
 		try {
 			exec.execute(task);
@@ -283,19 +398,25 @@ public class PushService {
 		}
 	}
 
-	private void doNodeSend(WsBaseResp<?> msg, Map<String, Long> deviceUserMap,
-			Long hashId, Long cuid, Boolean retry, String nodeId, List<PushSubmission.Target> targets, Long tenantId) {
+	/**
+	 * #486 T5：投递内容在准入时已冻结为 {@link NodePushDTO}，本方法只用冻结副本，
+	 * 不再回头读调用方的可变 map。
+	 */
+	private void doNodeSend(NodePushDTO dto, Boolean retry, String nodeId, List<PushSubmission.Target> targets) {
+		WsBaseResp<?> msg = dto.getWsBaseMsg();
 		try {
 			if (retry) {
-				mqProducer.sendMsgWithDelay(MqConstant.PUSH_DELAY_TOPIC, new NodePushDTO(msg, deviceUserMap, hashId, cuid, tenantId), delaySeconds);
+				// #486 T5：延迟时长与发送超时分离——延迟仍按配置秒数，发送超时用独立预算，
+				// 不再由延迟级别反推（此前 30 秒延迟会让一次 syncSend 等满 1 小时才失败）。
+				mqProducer.sendMsgWithDelay(MqConstant.PUSH_DELAY_TOPIC, dto, delaySeconds, pushSendTimeoutMillis);
 			} else {
-				mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId, new NodePushDTO(msg, deviceUserMap, hashId, cuid, tenantId));
+				mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId, dto);
 			}
 			// #482：首投成功只是「已交给 broker」，不推断重试结果，更不推断客户端 ACK。
 			markFirstAttempt(targets, PushSubmission.FirstAttempt.SUCCESS, null);
 		} catch (Exception e) {
 			// #220：MQ 发送失败不再静默丢弃——升级 WARN 告警
-			List<Long> targetUids = new ArrayList<>(deviceUserMap.values());
+			List<Long> targetUids = new ArrayList<>(dto.getDeviceUserMap().values());
 			log.warn("MQ发送失败: nodeId={}, type={}, uids={}, retry={}, reason={}",
 					nodeId, msg.getType(), targetUids, retry, e.getMessage(), e);
 			// #482：同步段抛出的失败是「明确的提交拒绝」；超时/中断不在此列，记不确定。
@@ -309,7 +430,7 @@ public class PushService {
 			}
 			// P1-2（PR #76）：不走 PUSH_DELAY_TOPIC（persona 类推送 hashId=0 不在 in-flight 集合，
 			// RetryPushConsumer 对它是 no-op，重试空转）——改为有界直发重发 PUSH_TOPIC+nodeId
-			scheduleDirectResend(nodeId, msg, deviceUserMap, hashId, cuid, 1, "MQ发送失败: " + e.getMessage());
+			scheduleDirectResend(nodeId, dto, 1, "MQ发送失败: " + e.getMessage());
 		}
 	}
 
@@ -466,12 +587,20 @@ public class PushService {
 			log.warn("MQ推送拒绝房间推送新提交: uid={}, type={}（#451 有限排空）", uid, type);
 			return PushSubmission.refused(List.of(), List.of(), rejected("新提交").getMessage());
 		}
+		// #486 T5：容量策略启用时先做有界展开——超出预算整次不接收并明确报告未解析来源，
+		// 不把「读不完」当成「没有目标」，也不先全量聚合再分块（那是无界内存占用）。
+		boolean bounded = capacityLedger != null;
+		long expandDeadlineNanos = bounded ? System.nanoTime() + capacityExpandBudgetMillis * 1_000_000L : 0L;
 		// 1. 获取用户所在群聊ID列表
 		CacheKey ugKey = PresenceCacheKeyBuilder.userGroupsKey(uid);
 		Set<Long> roomIds = cachePlusOps.sMembers(ugKey).parallelStream().map(obj -> Long.parseLong(obj.toString())).collect(Collectors.toSet());
 
 		if (roomIds.isEmpty()) {
 			return PushSubmission.noTarget();
+		}
+		if (bounded && roomIds.size() > capacityMaxExpandRooms) {
+			return expandOverflow(uid, type, "房间数超过展开预算 roomCount=" + roomIds.size()
+					+ " limit=" + capacityMaxExpandRooms);
 		}
 
 		// 2. 创建通用响应对象
@@ -494,6 +623,17 @@ public class PushService {
 					.forEach(allMemberIds::add);
 		});
 
+		// #486 T5：展开结果同样有界——目标数与耗时都必须在预算内，否则整次失败而不是截断部分成员。
+		if (bounded) {
+			if (allMemberIds.size() > capacityMaxExpandTargets) {
+				return expandOverflow(uid, type, "目标数超过展开预算 targetCount=" + allMemberIds.size()
+						+ " limit=" + capacityMaxExpandTargets);
+			}
+			if (System.nanoTime() - expandDeadlineNanos > 0) {
+				return expandOverflow(uid, type, "展开耗时超过预算 budgetMillis=" + capacityExpandBudgetMillis);
+			}
+		}
+
 		// 4. 移除自己，避免给自己发送消息
 //		allMemberIds.remove(uid);
 
@@ -507,6 +647,16 @@ public class PushService {
 		List<PushSubmission> parts = new ArrayList<>();
 		Lists.partition(memberIdList, pageSize).forEach(batch -> parts.add(submitPush(commonResp, batch, uid)));
 		return parts.isEmpty() ? PushSubmission.noTarget() : PushSubmission.combine(parts);
+	}
+
+	/**
+	 * #486 T5：有界展开拒绝——整次广播不接收，按「目标范围未知」报告并带上未解析来源摘要，
+	 * 不静默降级成「部分已推送」，也不把「读不完」当成「没有目标」。
+	 */
+	private PushSubmission expandOverflow(Long uid, String type, String detail) {
+		rejectedSubmits.incrementAndGet();
+		log.warn("MQ推送房间广播超过展开预算，整次不接收: uid={}, type={}, {}", uid, type, detail);
+		return PushSubmission.routeFailed(List.of(), "push_expand_over_budget: " + detail);
 	}
 
     /** Enter via this Spring bean proxy only after the RocketMQ DTO tenant context has been restored. */
@@ -591,6 +741,11 @@ public class PushService {
 		// #461：共享截止时钟幂等首启（本 JVM 其他关停参与者沿用同一截止）；本地截止与之一致。
 		ShutdownDrainClock.beginDrain(shutdownBudgetSeconds);
 		drainDeadlineNanos = ShutdownDrainClock.deadlineNanos();
+		// #486：容量账本同刻关闭准入；在途额度按原路径结算，不因关闭提前释放物理占用。
+		PushCapacityLedger ledger = capacityLedger;
+		if (ledger != null) {
+			ledger.close();
+		}
 		log.info("开始推送有限排空：已停止外部准入，统一截止预算={}s", shutdownBudgetSeconds);
 
 		// 截止前：在途任务与内部重试继续（受原 maxRetryCount 上限与同一截止约束，不续期）。
@@ -769,10 +924,30 @@ public class PushService {
 			return CompletableFuture.completedFuture(null);
 		}
 		CompletableFuture<Void> result = new CompletableFuture<>();
+		// #486：重试链预约与节点任务共用同一账本，只单独限制并发链数；拒绝在调度前定稿。
+		PushCapacityLedger ledger = capacityLedger;
+		PushCapacityLedger.Admission retryAdmission = null;
+		if (ledger != null) {
+			PushCapacityLedger.Reservation reservation = ledger.reserveRetry("delay");
+			if (!reservation.admitted()) {
+				rejectedSubmits.incrementAndGet();
+				PushDrainException refusedRetry = new PushDrainException(
+						reservation.reason() + "，延迟重试未预约（#486 T5），reason=" + reason);
+				log.warn("MQ推送延迟重试容量拒绝: type={}, uids={}, retryCount={}, reason={}",
+						msg.getType(), uids, retryCount, refusedRetry.getMessage());
+				result.completeExceptionally(refusedRetry);
+				return result;
+			}
+			retryAdmission = reservation.admission();
+		}
 		// #482：调度线程没有请求/消费上下文，租户必须在还有可信来源时快照，供延迟探针与原消息一致地回读。
 		RetryTask task = new RetryTask(result, msg, uids, hashId, cuid, retryCount, reason, ContextUtil.getTenantId());
 		pendingRetries.add(task);
 		inFlight.put(result, new TrackedTask(task, "延迟重试", "retryScheduler"));
+		if (retryAdmission != null) {
+			PushCapacityLedger.Admission held = retryAdmission;
+			result.whenComplete((r, t) -> held.release());
+		}
 		result.whenComplete((r, t) -> {
 			inFlight.remove(result);
 			pendingRetries.remove(task);
@@ -891,17 +1066,32 @@ public class PushService {
 	 * 有界直发重发（P1-2，语义同旧代码直发 executeAsync 分支，但不再内部切执行器）：
 	 * 截止后不续期；排队任务触发前被 destroy 丢弃记未执行；Future 永不悬挂。
 	 */
-	private void scheduleDirectResend(String nodeId, WsBaseResp<?> msg, Map<String, Long> deviceUserMap,
-									  Long hashId, Long cuid, int attempt, String reason) {
+	private void scheduleDirectResend(String nodeId, NodePushDTO dto, int attempt, String reason) {
+		WsBaseResp<?> msg = dto.getWsBaseMsg();
 		if (!admissionOpen.get() || pastDeadline() || attempt > maxRetryCount) {
 			log.warn("MQ推送直发重发终止: nodeId={}, type={}, attempt={}/{}, reason={}（#451 有限排空）",
 					nodeId, msg.getType(), attempt, maxRetryCount, reason);
 			return;
 		}
 		CompletableFuture<Void> future = new CompletableFuture<>();
-		DirectResendTask task = new DirectResendTask(future, nodeId, msg, deviceUserMap,
-				hashId, cuid, attempt, reason);
+		// #486：直发重发也是真实 MQ 调用，同样先占账本额度（失败即放弃本轮，不静默无限重排）。
+		PushCapacityLedger ledger = capacityLedger;
+		PushCapacityLedger.Admission admission = null;
+		if (ledger != null) {
+			PushCapacityLedger.Reservation reservation = ledger.reserveRetry("direct");
+			if (!reservation.admitted()) {
+				log.warn("MQ推送直发重发容量拒绝: nodeId={}, type={}, attempt={}, reason={}（#486 T5）",
+						nodeId, msg.getType(), attempt, reservation.reason());
+				return;
+			}
+			admission = reservation.admission();
+		}
+		DirectResendTask task = new DirectResendTask(future, nodeId, dto, attempt, reason);
 		inFlight.put(future, new TrackedTask(task, "直发重发", nodeId));
+		if (admission != null) {
+			PushCapacityLedger.Admission held = admission;
+			future.whenComplete((r, t) -> held.release());
+		}
 		future.whenComplete((r, t) -> {
 			inFlight.remove(future);
 			pendingRetries.remove(task);
@@ -921,27 +1111,22 @@ public class PushService {
 	private final class DirectResendTask implements Runnable {
 		private final CompletableFuture<Void> future;
 		private final String nodeId;
-		private final WsBaseResp<?> msg;
-		private final Map<String, Long> deviceUserMap;
-		private final Long hashId;
-		private final Long cuid;
+		/** #486 T5：准入时冻结的投递内容，重发不重新读调用方状态。 */
+		private final NodePushDTO dto;
 		private final int attempt;
 		private final String reason;
 
-		DirectResendTask(CompletableFuture<Void> future, String nodeId, WsBaseResp<?> msg,
-						 Map<String, Long> deviceUserMap, Long hashId, Long cuid, int attempt, String reason) {
+		DirectResendTask(CompletableFuture<Void> future, String nodeId, NodePushDTO dto, int attempt, String reason) {
 			this.future = future;
 			this.nodeId = nodeId;
-			this.msg = msg;
-			this.deviceUserMap = deviceUserMap;
-			this.hashId = hashId;
-			this.cuid = cuid;
+			this.dto = dto;
 			this.attempt = attempt;
 			this.reason = reason;
 		}
 
 		@Override
 		public void run() {
+			WsBaseResp<?> msg = dto.getWsBaseMsg();
 			if (future.isDone()) {
 				return;
 			}
@@ -954,15 +1139,14 @@ public class PushService {
 				return;
 			}
 			try {
-				mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId,
-						new NodePushDTO(msg, deviceUserMap, hashId, cuid));
+				mqProducer.sendMsg(MqConstant.PUSH_TOPIC + nodeId, dto);
 				if (future.complete(null)) {
 					completedSends.incrementAndGet();
 				}
 			} catch (Exception e) {
 				log.warn("MQ推送直发重发出错: nodeId={}, type={}, attempt={}/{}, reason={}",
 						nodeId, msg.getType(), attempt, maxRetryCount, e.getMessage(), e);
-				scheduleDirectResend(nodeId, msg, deviceUserMap, hashId, cuid, attempt + 1,
+				scheduleDirectResend(nodeId, dto, attempt + 1,
 						"MQ推送直发重发续期: " + e.getMessage());
 				future.complete(null);
 			}

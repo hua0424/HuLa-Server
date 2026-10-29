@@ -104,7 +104,7 @@ class PushServiceTest {
 	@DisplayName("重试：sendAsync 内 MQ 发送失败 → 捕获并调度有界直发重试（PUSH_TOPIC 直接重发，不走 PUSH_DELAY_TOPIC）")
 	void sendAsync_schedulesDirectResendWhenMqSendFails() {
 		// given: 路由命中 node-1；MQ 发送抛异常
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
 		doThrow(new RuntimeException("syncSend timeout")).when(mqProducer).sendMsg(anyString(), any());
 
@@ -120,7 +120,7 @@ class PushServiceTest {
 	@DisplayName("有界直发：MQ 持续失败时重试计数递增，到 maxRetryCount 停手，不无限循环")
 	void sendAsync_directResendIsBoundedByMaxRetryCount() {
 		// given: 路由命中 node-1；MQ 发送持续抛异常；调度任务同步执行（重试递归在同一调用栈展开）
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
 		doThrow(new RuntimeException("syncSend timeout")).when(mqProducer).sendMsg(anyString(), any());
 		doAnswer(inv -> {
@@ -140,9 +140,9 @@ class PushServiceTest {
 	@DisplayName("防递归：retry=true（PUSH_DELAY_TOPIC 延迟发送本身）失败时抛回上层按 retryCount 递增重试，内部不自调 scheduleDelayRetry")
 	void sendAsync_retryBranchRethrowsWithoutSelfScheduling() {
 		// given: 路由命中 node-1；延迟发送抛异常
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
-		doThrow(new RuntimeException("syncSend timeout")).when(mqProducer).sendMsgWithDelay(anyString(), any(), anyInt());
+		doThrow(new RuntimeException("syncSend timeout")).when(mqProducer).sendMsgWithDelay(anyString(), any(), anyInt(), anyLong());
 
 		// when: future 异常完成（由 executeRetry.whenComplete 按 retryCount+1 继续，受 maxRetryCount 约束）
 		CompletableFuture<Void> future = pushService.sendAsync(msg(), List.of(100L), 0L, 100L, true);
@@ -156,7 +156,7 @@ class PushServiceTest {
 	@DisplayName("对照：MQ 发送成功时不触发延迟重试")
 	void sendAsync_noRetryWhenMqSendSucceeds() {
 		// given: 路由命中 node-1；MQ 发送正常
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
 
 		// when
@@ -191,7 +191,7 @@ class PushServiceTest {
 		Map<String, ExecutorService> pools =
 				(Map<String, ExecutorService>) ReflectionTestUtils.getField(pushService, "nodeExecutors");
 		pools.put("node-block", real);
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-block", Map.of("client-1", 100L)));
 		CountDownLatch entered = new CountDownLatch(1);
 		CountDownLatch release = new CountDownLatch(1);
@@ -226,7 +226,7 @@ class PushServiceTest {
 		Map<String, ExecutorService> pools =
 				(Map<String, ExecutorService>) ReflectionTestUtils.getField(pushService, "nodeExecutors");
 		pools.put("node-q", real);
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-q", Map.of("client-1", 100L)));
 		CountDownLatch occupantRunning = new CountDownLatch(1);
 		real.execute(() -> {
@@ -260,7 +260,7 @@ class PushServiceTest {
 		Map<String, ExecutorService> pools =
 				(Map<String, ExecutorService>) ReflectionTestUtils.getField(pushService, "nodeExecutors");
 		pools.put("node-r", real);
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-r", Map.of("client-1", 100L)));
 		AtomicBoolean released = new AtomicBoolean(false);
 		CountDownLatch entered = new CountDownLatch(1);
@@ -298,14 +298,14 @@ class PushServiceTest {
 	@DisplayName("R1：executeRetry 经 PUSH_DELAY_TOPIC 重发（retry=true），成功即完成")
 	void executeRetry_routesThroughDelayTopic() {
 		// given: 路由命中 node-1；延迟发送成功
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
 
 		// when
 		pushService.executeRetry(msg(), List.of(100L), 0L, 100L, 1, "r1").join();
 
 		// then: 走延迟通道而非直发
-		verify(mqProducer).sendMsgWithDelay(eq(MqConstant.PUSH_DELAY_TOPIC), any(), anyInt());
+		verify(mqProducer).sendMsgWithDelay(eq(MqConstant.PUSH_DELAY_TOPIC), any(), anyInt(), anyLong());
 		verify(mqProducer, never()).sendMsg(anyString(), any());
 		verify(retryScheduler, never()).schedule(ArgumentMatchers.<Runnable>any(), anyLong(), any());
 	}
@@ -314,16 +314,16 @@ class PushServiceTest {
 	@DisplayName("R1：executeRetry 延迟通道失败时按 retryCount+1 续链（受 maxRetryCount 约束）")
 	void executeRetry_delayFailureChainsWithIncrementedCount() {
 		// given: 路由命中 node-1；延迟发送持续失败；调度器 mock 不执行任务
-		when(routerService.findNodeDeviceUser(anyList()))
+		when(routerService.findNodeDeviceUser(anyList(), any()))
 				.thenReturn(Map.of("node-1", Map.of("client-1", 100L)));
 		doThrow(new RuntimeException("delay send timeout"))
-				.when(mqProducer).sendMsgWithDelay(anyString(), any(), anyInt());
+				.when(mqProducer).sendMsgWithDelay(anyString(), any(), anyInt(), anyLong());
 
 		// when
 		pushService.executeRetry(msg(), List.of(100L), 0L, 100L, 1, "r1-chain");
 
 		// then: 失败续期 retryCount=2 调度（mock 未执行故 future 悬挂属预期，只验调度）
-		verify(mqProducer).sendMsgWithDelay(eq(MqConstant.PUSH_DELAY_TOPIC), any(), anyInt());
+		verify(mqProducer).sendMsgWithDelay(eq(MqConstant.PUSH_DELAY_TOPIC), any(), anyInt(), anyLong());
 		verify(retryScheduler).schedule(ArgumentMatchers.<Runnable>any(), eq(1L), eq(TimeUnit.SECONDS));
 	}
 
