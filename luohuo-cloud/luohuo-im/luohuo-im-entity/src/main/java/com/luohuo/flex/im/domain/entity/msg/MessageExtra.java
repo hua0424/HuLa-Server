@@ -61,4 +61,7 @@ public class MessageExtra implements Serializable {
 	 * 供 sync 路径(/chat/msg/list)从 DB 回读并回显给发送者做乐观气泡精确 reconcile。
 	 */
 	private String clientMsgId;
+
+    /** Persisted trusted command request ID; suppresses agent delivery including history replay. */
+    private String commandFeedback;
 }

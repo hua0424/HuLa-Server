@@ -17,6 +17,30 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class TokenContextFilterThinkingAuthTest {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings={"/api/im/aiclaw/commands/result", "/im/aiclaw/commands/result"})
+    void authenticatedAgentCallbackGetsServerProofNotForgedActor(String path) {
+        String token="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        var redis=mock(StringRedisTemplate.class);
+        var values=mock(org.springframework.data.redis.core.ValueOperations.class);
+        doReturn(values).when(redis).opsForValue(); doReturn(true).when(redis).hasKey("aiclaw:token:aaaaaaaa");
+        doReturn("{\"uid\":30,\"ownerUid\":11,\"tenantId\":1,\"authStatus\":1,\"tokenSha256\":\""+
+                cn.hutool.crypto.SecureUtil.sha256(token)+"\",\"machineCode\":\"m1\"}").when(values).get("aiclaw:token:aaaaaaaa");
+        var config=mock(SaTokenConfig.class); when(config.getTokenName()).thenReturn("Authorization");
+        var filter=new TokenContextFilter(mock(IgnoreProperties.class),config,redis,WebClient.builder());
+        org.springframework.test.util.ReflectionTestUtils.setField(filter,"thinkingInternalSecret","test-secret");
+        WebFilterChain chain=mock(WebFilterChain.class);
+        when(chain.filter(any())).thenAnswer(i -> {
+            var headers=i.<org.springframework.web.server.ServerWebExchange>getArgument(0).getRequest().getHeaders();
+            assertEquals("test-secret",headers.getFirst("X-Thinking-Service-Auth"));
+            assertEquals("30",headers.getFirst("X-Thinking-Actor-Uid"));
+            assertEquals("1",headers.getFirst(ContextConstants.HEADER_TENANT_ID)); return Mono.empty();
+        });
+        filter.filter(MockServerWebExchange.from(MockServerHttpRequest.post(path).header("Authorization",token)
+                .header("X-Thinking-Service-Auth","forged").header("X-Thinking-Actor-Uid","999").build()),chain).block();
+        verify(chain).filter(any());
+    }
+
 	@Test void stripsForgedIdentityEvenOnIgnoredRoute() {
 		IgnoreProperties ignored = mock(IgnoreProperties.class);
 		when(ignored.isIgnoreUser(any(), any())).thenReturn(true);

@@ -63,4 +63,8 @@ public class ChatMessageReq {
 
 	@Schema(description ="客户端生成的临时消息 id（F3-1 #42：仅回显给发送者做乐观气泡精确 reconcile，不参与业务）")
 	private String clientMsgId;
+
+    /** Internal command feedback marker: never bind from an external chat request. */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private String commandFeedbackRequestId;
 }

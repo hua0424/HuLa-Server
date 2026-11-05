@@ -32,6 +32,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class MessageAdapterTest {
 
+    @Test void commandFeedbackMarkerIsTrustedPersistedAndProjectedInHistory() throws Exception {
+        var json = new com.fasterxml.jackson.databind.ObjectMapper();
+        ChatMessageReq forged = json.readValue("{\"roomId\":1,\"msgType\":1,\"body\":{},\"commandFeedbackRequestId\":\"forged\"}", ChatMessageReq.class);
+        assertNull(forged.getCommandFeedbackRequestId());
+        ChatMessageReq req = baseReq(); req.setClientMsgId("client-1"); req.setCommandFeedbackRequestId("command-1");
+        Message saved = MessageAdapter.buildMsgSave(req, 11L); saved.setCreateTime(LocalDateTime.now());
+        assertEquals("client-1", saved.getExtra().getClientMsgId());
+        assertEquals("command-1", saved.getExtra().getCommandFeedback());
+        AbstractMsgHandler<?> handler = Mockito.mock(AbstractMsgHandler.class);
+        try (var factory = Mockito.mockStatic(MsgHandlerFactory.class)) {
+            factory.when(() -> MsgHandlerFactory.getStrategyNoNull(1)).thenReturn(handler);
+            var history = MessageAdapter.buildMsgResp(List.of(saved), List.of(), 11L);
+            assertEquals("command-1", history.get(0).getMessage().getExtra().get("commandFeedback"));
+        }
+    }
+
 	private ChatMessageReq baseReq() {
 		return ChatMessageReq.builder()
 				.roomId(1L)

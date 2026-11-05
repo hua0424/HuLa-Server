@@ -623,7 +623,8 @@ public class TokenContextFilter implements WebFilter, Ordered {
     private void addThinkingServiceIdentity(ServerHttpRequest request, ServerHttpRequest.Builder mutate, Long uid) {
         String path = request.getPath().value();
         if (path.equals("/api/ws/ws") || path.equals("/ws/ws") ||
-                path.equals("/api/im/chat/msg") || path.equals("/im/chat/msg")) {
+                path.equals("/api/im/chat/msg") || path.equals("/im/chat/msg") ||
+                path.equals("/api/im/aiclaw/commands/result") || path.equals("/im/aiclaw/commands/result")) {
             if (thinkingInternalSecret == null || thinkingInternalSecret.isBlank()) {
                 throw new UnauthorizedException(503, "thinking internal authentication unavailable");
             }

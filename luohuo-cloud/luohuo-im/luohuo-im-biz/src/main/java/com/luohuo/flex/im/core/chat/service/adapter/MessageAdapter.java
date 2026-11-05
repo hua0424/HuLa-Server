@@ -57,8 +57,9 @@ public class MessageAdapter {
 		// F3-1 #42: 把客户端临时 id 放进 extra 随消息落库,供 sync 路径回读后回显给发送者精确 reconcile。
 		// 仅在带 clientMsgId 时创建 extra;不带时 extra 维持 null,不改变原有行为。
 		// 各子类 handler 的 saveMsg 都以 Optional.ofNullable(msg.getExtra()).orElse(new) 保留既有 extra,此值得以存活。
-		if (request.getClientMsgId() != null) {
-			msg.setExtra(MessageExtra.builder().clientMsgId(request.getClientMsgId()).build());
+		if (request.getClientMsgId() != null || request.getCommandFeedbackRequestId() != null) {
+			msg.setExtra(MessageExtra.builder().clientMsgId(request.getClientMsgId())
+                    .commandFeedback(request.getCommandFeedbackRequestId()).build());
 		}
 		return msg;
     }
@@ -148,6 +149,9 @@ public class MessageAdapter {
         messageVO.setMessageMarks(buildMsgMark(marks, receiveUid));
         // F3-1 #42: 回显持久化在 extra 里的 clientMsgId(三条读路径均经此点),供发送者精确 reconcile 乐观气泡。
         messageVO.setClientMsgId(message.getExtra() == null ? null : message.getExtra().getClientMsgId());
+        if (message.getExtra() != null && message.getExtra().getCommandFeedback() != null) {
+            messageVO.setExtra(new HashMap<>(Map.of("commandFeedback", message.getExtra().getCommandFeedback())));
+        }
         return messageVO;
     }
 
