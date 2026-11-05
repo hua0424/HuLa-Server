@@ -58,6 +58,7 @@ public class AgentCommandService {
         private Long actor;
         private Long tenant;
         private String epoch;
+        private Map<String, Object> context;
         private long deadline;
         private AgentCommand.Result result;
         private Long feedbackMessageId;
@@ -86,6 +87,7 @@ public class AgentCommandService {
         result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation()); result.setStatus("accepted");
         result.setPhase("dispatch");
         pending.setResult(result);
+        pending.setContext(frozenContext(room, human, target, actor, allowed));
         String raw = encode(pending);
         if (!Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, raw, RETENTION))) {
             String winner = redis.opsForValue().get(key);
@@ -95,22 +97,8 @@ public class AgentCommandService {
         if ("invoke".equals(request.getOperation()) && !callable(request.getCapabilityId())) {
             return finish(raw, "unsupported", null, null, "execution_not_connected").getResult();
         }
-        Map<String, Object> context = new LinkedHashMap<>(); context.put("roomType", room.getType());
-        if (room.getType() == 2) {
-            Aiclaw agent = facts.selectAiclaw(target);
-            context.put("counterpartUid", actor.toString());
-            context.put("isOwner", agent != null && Objects.equals(agent.getOwnerUid(), actor));
-            if (human.getAccount() != null) context.put("account", human.getAccount());
-        } else {
-            RoomGroup group = groups.getByRoomIdFromDb(roomId);
-            if (group == null || group.getAccount() == null)
-                return finish(raw, "unknown", null, null, "authorization_changed").getResult();
-            context.put("account", group.getAccount().toString());
-        }
-        if (allowed.getWorkspaceDir() != null) context.put("workspaceDir", allowed.getWorkspaceDir());
-        if (allowed.getAuthorizationEpoch() != null) context.put("authorizationEpoch", allowed.getAuthorizationEpoch());
-        ObjectNode payload = JSON.valueToTree(request); payload.set("context", JSON.valueToTree(context));
-        WsBaseResp<JsonNode> ws = new WsBaseResp<>(); ws.setType("agentCommand"); ws.setData(payload);
+        if (pending.getContext() == null) return finish(raw, "unknown", null, null, "authorization_changed").getResult();
+        WsBaseResp<JsonNode> ws = commandMessage(pending, false);
         try {
             PushSubmission submitted = push.submitPushMsg(ws, target, actor);
             if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED)
@@ -133,7 +121,50 @@ public class AgentCommandService {
         String raw = requiredRaw(tenant, requestId); Pending p = decode(raw);
         if (!Objects.equals(p.getActor(), actor)) throw new BizException("command_not_found");
         requireConversation(actor, tenant, id(p.getRequest().getRoomId()), id(p.getRequest().getAiclawUid()));
-        return settle(raw).getResult();
+        return reconcile(settle(raw));
+    }
+
+    private Map<String, Object> frozenContext(Room room, User human, Long target, Long actor,
+                                               GroupRunAdmissionService.Admission allowed) {
+        Map<String, Object> context = new LinkedHashMap<>(); context.put("roomType", room.getType());
+        if (room.getType() == 2) {
+            Aiclaw agent = facts.selectAiclaw(target);
+            context.put("counterpartUid", actor.toString());
+            context.put("isOwner", agent != null && Objects.equals(agent.getOwnerUid(), actor));
+            if (human.getAccount() != null) context.put("account", human.getAccount());
+        } else {
+            RoomGroup group = groups.getByRoomIdFromDb(room.getId());
+            if (group == null || group.getAccount() == null) return null;
+            context.put("account", group.getAccount().toString());
+        }
+        if (allowed.getWorkspaceDir() != null) context.put("workspaceDir", allowed.getWorkspaceDir());
+        if (allowed.getAuthorizationEpoch() != null) context.put("authorizationEpoch", allowed.getAuthorizationEpoch());
+        return context;
+    }
+
+    private static WsBaseResp<JsonNode> commandMessage(Pending p, boolean reconcileOnly) {
+        ObjectNode payload = JSON.valueToTree(p.getRequest()); payload.set("context", JSON.valueToTree(p.getContext()));
+        if (reconcileOnly) payload.put("reconcileOnly", true); // Internal envelope only, never a public Request field.
+        WsBaseResp<JsonNode> ws = new WsBaseResp<>(); ws.setType("agentCommand"); ws.setData(payload); return ws;
+    }
+
+    private AgentCommand.Result reconcile(Pending pending) {
+        // A callback may have settled while feedback was delivered; never send recovery for a known outcome.
+        Pending p = decode(requiredRaw(pending.getTenant(), pending.getRequest().getRequestId()));
+        if (!execution(p.getRequest()) || !Set.of("accepted", "unknown").contains(p.getResult().getStatus())
+                || "authorization_changed".equals(p.getResult().getError())) return p.getResult();
+        authorize(p); // Recheck the original epoch, never adopt a fresh admission's epoch/context.
+        if (p.getContext() == null || p.getEpoch() == null || !p.getEpoch().equals(p.getContext().get("authorizationEpoch"))) {
+            log.warn("Command reconciliation unavailable: frozen context missing requestId={}", p.getRequest().getRequestId());
+            return p.getResult();
+        }
+        try {
+            push.submitPushMsg(commandMessage(p, true), id(p.getRequest().getAiclawUid()), p.getActor());
+        } catch (RuntimeException failure) {
+            // Recovery delivery is not execution evidence; keep the last receipt and never retry a mutation here.
+            log.warn("Command reconciliation dispatch unresolved requestId={}", p.getRequest().getRequestId());
+        }
+        return decode(requiredRaw(p.getTenant(), p.getRequest().getRequestId())).getResult();
     }
 
     /** Controller first verifies gateway's authenticated agent proof. */
@@ -294,7 +325,7 @@ public class AgentCommandService {
         Pending old = decode(raw);
         if (!Objects.equals(old.getActor(), actor) || !Objects.equals(old.getTenant(), tenant)
                 || !encode(old.getRequest()).equals(encode(request))) throw new BizException("command_request_id_conflict");
-        return settle(raw).getResult();
+        return reconcile(settle(raw));
     }
 
     private Pending settle(String raw) {

@@ -116,6 +116,59 @@ class AgentCommandServiceTest {
         assertThrows(BizException.class, () -> service.submit(request("invoke")));
         verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
     }
+    @Test void getAndReplayDispatchOnlyReadOnlyRecoveryWithPersistedOriginalContext() throws Exception {
+        human.setAccount("original-account");
+        when(admission.admitGroupRun(eq(30L), eq(20L), eq(1L), any())).thenReturn(
+                GroupRunAdmissionService.Admission.builder().outcome("ADMITTED").authorizationEpoch("epoch-1").workspaceDir("/trusted/workspace").build());
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); r.setParameters(Map.of("arguments", "from-server"));
+        service.submit(r);
+        human.setAccount("changed-account");
+        when(admission.admitGroupRun(30L,20L,1L,"epoch-1")).thenReturn(
+                GroupRunAdmissionService.Admission.builder().outcome("ADMITTED").authorizationEpoch("epoch-1").workspaceDir("/changed/workspace").build());
+        pastDeadline();
+        assertEquals("unknown", service.get("req-1").getStatus());
+        assertEquals("unknown", service.get("req-1").getStatus());
+        assertEquals("unknown", service.submit(r).getStatus());
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(4)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        var initial = json.valueToTree(sent.getAllValues().get(0));
+        assertFalse(initial.path("data").has("reconcileOnly"));
+        for (int i = 1; i < sent.getAllValues().size(); i++) {
+            var recovered = json.valueToTree(sent.getAllValues().get(i));
+            assertTrue(recovered.path("data").path("reconcileOnly").asBoolean());
+            ((com.fasterxml.jackson.databind.node.ObjectNode) recovered.path("data")).remove("reconcileOnly");
+            assertEquals(initial, recovered, "GET cannot rebuild context from current configuration or mint a new request");
+        }
+        var envelope = json.valueToTree(sent.getAllValues().get(1));
+        java.nio.file.Files.writeString(java.nio.file.Path.of("target", "agent-command-reconcile-envelope.json"),
+                json.writerWithDefaultPrettyPrinter().writeValueAsString(envelope));
+        verify(admission, times(1)).admitGroupRun(30L,20L,1L,null);
+    }
+    @Test void reconciliationRejectsChangedEpochAndDoesNotDowngradeToNewAdmission() {
+        var r = request("invoke"); r.setCapabilityId("session.reset"); service.submit(r);
+        when(admission.admitGroupRun(30L,20L,1L,"epoch-1")).thenReturn(GroupRunAdmissionService.Admission.builder().outcome("DENIED").build());
+        assertThrows(BizException.class, () -> service.get("req-1"));
+        assertThrows(BizException.class, () -> service.submit(r));
+        verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
+        verify(admission, times(1)).admitGroupRun(30L,20L,1L,null);
+    }
+    @Test void legacyExecutionWithoutFrozenContextNeverReconstructsOrDispatchesRecovery() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.reset"); service.submit(r);
+        String key = storage.keySet().iterator().next();
+        var legacy = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(storage.get(key));
+        legacy.remove("context"); storage.put(key, json.writeValueAsString(legacy));
+        assertEquals("accepted", service.get("req-1").getStatus());
+        assertEquals("accepted", service.submit(r).getStatus());
+        verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
+    }
+    @Test void knownOutcomesAndReadOnlyQueriesDoNotDispatchRecovery() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("model.set"); r.setParameters(Map.of("providerId", "p", "modelId", "m")); service.submit(r);
+        service.complete(nativeCallback("\"status\":\"completed\",\"effect\":{\"kind\":\"model\",\"providerId\":\"p\",\"modelId\":\"m\",\"effective\":\"next_request\"}"));
+        ContextUtil.setUid(11L); assertEquals("completed", service.get("req-1").getStatus()); service.submit(r);
+        var query = request("invoke"); query.setRequestId("query-1"); service.submit(query); service.get("query-1"); service.submit(query);
+        verify(push, times(2)).submitPushMsg(any(), eq(30L), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+    }
     @Test void anotherHumanCannotReadOrReplayRequest() {
         service.submit(request("discover"));
         var other = new User(); other.setTenantId(1L); other.setState(0); other.setUserType(3);
@@ -149,7 +202,8 @@ class AgentCommandServiceTest {
         model.setParameters(parameters); assertEquals("accepted", service.submit(model).getStatus());
         model.setParameters(Map.of("providerId", "provider", "modelId", "org/model"));
         assertEquals("accepted", service.submit(model).getStatus());
-        verify(push, times(2)).submitPushMsg(any(), eq(30L), eq(11L));
+        verify(push, times(2)).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+        verify(push, times(1)).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
     }
     @Test void callbackBindsAgentTenantRoomThenImmutableResultAndFeedback() {
         service.submit(request("invoke")); var c = callback(); ContextUtil.setUid(31L);
@@ -208,7 +262,8 @@ class AgentCommandServiceTest {
         assertNotEquals(messages.getAllValues().get(0).getRequestId(), messages.getAllValues().get(1).getRequestId());
         assertTrue(messages.getAllValues().get(0).getBody().toString().contains("unknown"));
         assertTrue(messages.getAllValues().get(1).getBody().toString().contains("completed"));
-        verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
+        verify(push, times(1)).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+        verify(push, times(1)).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
     }
     @Test void nativeBindingAndSkillParentCannotBeChangedByAnotherHttpCompletion() throws Exception {
         var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
