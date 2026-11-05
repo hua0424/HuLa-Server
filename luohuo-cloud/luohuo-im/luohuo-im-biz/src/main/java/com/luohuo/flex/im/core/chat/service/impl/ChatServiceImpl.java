@@ -103,6 +103,11 @@ public class ChatServiceImpl implements ChatService {
     @Override
     @Transactional
     public Long sendMsg(ChatMessageReq request, Long uid) {
+        if (request.getExtra() != null && request.getExtra().containsKey("commandFeedback")) {
+            Map<String, Object> extra = new HashMap<>(request.getExtra());
+            extra.remove("commandFeedback");
+            request.setExtra(extra);
+        }
         // aichatoverview#3: aiclaw 房间成员校验（先于 checkDeFriend，确保非成员抛正确异常）
         checkAiclawRoomMembership(request, uid);
         // Explicit associations must be verified before any message persistence, even for skip/skipPush.
@@ -225,6 +230,8 @@ public class ChatServiceImpl implements ChatService {
             payload.put("skipPush", request.isSkipPush());
             payload.put("sendTime", request.getSendTime());
             payload.put("clientMsgId", request.getClientMsgId());
+            if (request.getCommandFeedbackRequestId() != null)
+                payload.put("commandFeedback", request.getCommandFeedbackRequestId());
             byte[] bytes = RECEIPT_JSON.writeValueAsBytes(payload);
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (com.fasterxml.jackson.core.JsonProcessingException | NoSuchAlgorithmException e) {

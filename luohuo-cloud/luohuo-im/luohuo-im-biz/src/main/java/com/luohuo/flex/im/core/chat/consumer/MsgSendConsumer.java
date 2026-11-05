@@ -121,6 +121,12 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 			memberUidList.add(roomFriend.getUid2());
 		}
 
+        boolean commandFeedback = message.getExtra() != null && message.getExtra().getCommandFeedback() != null;
+        if (commandFeedback) {
+            memberUidList = memberUidList.stream().filter(uid -> !aiclawParticipant.isAiclaw(uid))
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
 		// 2. 过滤出在线的人员
 		Set<Long> onlineUsersList = onlineService.getOnlineUsersList(memberUidList);
 
@@ -182,13 +188,16 @@ public class MsgSendConsumer implements RocketMQListener<MsgSendMessageDTO> {
 				MessageAdapter.fillRoomType(chatMessageResp, room.getType());
 				// REQ-004 M2-2: 透传 aiclaw extra（thinkingId、autoReply 等）
 				if (dto.getExtra() != null && chatMessageResp.getMessage() != null) {
-					chatMessageResp.getMessage().setExtra(dto.getExtra());
+                    var extra = new java.util.HashMap<>(dto.getExtra());
+                    extra.remove("commandFeedback"); // client metadata is never the authority for this marker
+                    if (commandFeedback) extra.put("commandFeedback", message.getExtra().getCommandFeedback());
+					chatMessageResp.getMessage().setExtra(extra);
 				}
 				WsBaseResp<ChatMessageResp> wsBaseResp = WsAdapter.buildMsgSend(chatMessageResp);
 
 				// 单聊定向投递：若对端是 aiclaw，接缝返回带扩展字段的 payload → 分别推送
 				Optional<AiclawParticipant.DirectChatDelivery> delivery =
-						aiclawParticipant.resolveDirectChatDelivery(message, room, dto);
+						commandFeedback ? Optional.empty() : aiclawParticipant.resolveDirectChatDelivery(message, room, dto);
 				if (delivery.isPresent()) {
 					Long aiclawUid = delivery.get().getTargetUid();
 					WsBaseResp<ChatMessageResp> aiclawWsResp = WsAdapter.buildMsgSend(delivery.get().getPayload());

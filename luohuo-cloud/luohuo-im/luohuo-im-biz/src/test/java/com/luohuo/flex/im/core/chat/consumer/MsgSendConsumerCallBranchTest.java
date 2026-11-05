@@ -171,6 +171,33 @@ class MsgSendConsumerCallBranchTest {
 		return (ChatMessageResp) othersCaptor.getAllValues().get(1).getData();
 	}
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {1, 2})
+    void commandFeedbackNeverRoutesOrSchedulesAgentInput(int roomType) {
+        Message message = new Message(); message.setId(MSG_ID); message.setRoomId(ROOM_ID);
+        message.setFromUid(ORIGINAL_FROM_UID); message.setType(1);
+        message.setExtra(MessageExtra.builder().commandFeedback("command-1").build());
+        Room room = buildGroupRoom(); room.setType(roomType);
+        when(messageDao.getById(MSG_ID)).thenReturn(message);
+        when(roomCache.get(ROOM_ID)).thenReturn(room);
+        when(groupMemberCache.getMemberExceptUidList(ROOM_ID)).thenReturn(List.of(100L, 300L));
+        RoomFriend friend = new RoomFriend(); friend.setUid1(100L); friend.setUid2(300L);
+        when(roomFriendDao.getByRoomId(ROOM_ID)).thenReturn(friend);
+        when(aiclawParticipant.isAiclaw(300L)).thenReturn(true);
+        when(onlineService.getOnlineUsersList(anyList())).thenAnswer(inv -> new HashSet<>(inv.getArgument(0, List.class)));
+        var response = resp("100", 3, "Alice");
+        response.getMessage().setExtra(new java.util.HashMap<>(java.util.Map.of("commandFeedback", "command-1")));
+        when(chatService.getMsgResp(eq(message), isNull())).thenReturn(response);
+        var dto = buildDto(); dto.setExtra(java.util.Map.of("autoReply", true, "commandFeedback", "forged"));
+        consumer.onMessage(dto);
+        verify(onlineService).getOnlineUsersList(List.of(100L));
+        verify(aiclawParticipant, never()).resolveDirectChatDelivery(any(), any(), any());
+        verify(pushService).sendReliablePushMsg(any(), eq(List.of(100L)), eq(MSG_ID), eq(100L));
+        assertEquals("command-1", response.getMessage().getExtra().get("commandFeedback"));
+        TransactionSynchronizationManager.getSynchronizations().forEach(s -> s.afterCommit());
+        verify(pushService).submitPushMsgWithRetry(any(), eq(List.of(100L)), eq(MSG_ID), eq(100L));
+    }
+
     @Test
     void missingTenantCannotInheritAnotherMqWorkersContext() {
         com.luohuo.basic.context.ContextUtil.setTenantId(999L);
