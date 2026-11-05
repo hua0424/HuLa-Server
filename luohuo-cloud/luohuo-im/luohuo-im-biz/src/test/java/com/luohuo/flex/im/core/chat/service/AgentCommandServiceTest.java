@@ -76,7 +76,8 @@ class AgentCommandServiceTest {
     @Test void discoveryIsDeliveredOnlyToAdmittedTargetAndNeverMeansCompletion() {
         assertEquals("accepted", service.submit(request("discover")).getStatus());
         verify(push).submitPushMsg(argThat(ws -> ws.getType().equals("agentCommand") &&
-                json.valueToTree(ws.getData()).path("context").path("counterpartUid").asText().equals("11")), eq(30L), eq(11L));
+                json.valueToTree(ws.getData()).path("context").path("counterpartUid").asText().equals("11") &&
+                json.valueToTree(ws.getData()).path("context").path("authorizationEpoch").asText().equals("epoch-1")), eq(30L), eq(11L));
         verifyNoInteractions(chat);
     }
     @ParameterizedTest @ValueSource(ints={1,2,4,0}) void onlyActiveNormalHumanCanSubmit(int type) {
@@ -115,6 +116,59 @@ class AgentCommandServiceTest {
         assertThrows(BizException.class, () -> service.submit(request("invoke")));
         verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
     }
+    @Test void getAndReplayDispatchOnlyReadOnlyRecoveryWithPersistedOriginalContext() throws Exception {
+        human.setAccount("original-account");
+        when(admission.admitGroupRun(eq(30L), eq(20L), eq(1L), any())).thenReturn(
+                GroupRunAdmissionService.Admission.builder().outcome("ADMITTED").authorizationEpoch("epoch-1").workspaceDir("/trusted/workspace").build());
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); r.setParameters(Map.of("arguments", "from-server"));
+        service.submit(r);
+        human.setAccount("changed-account");
+        when(admission.admitGroupRun(30L,20L,1L,"epoch-1")).thenReturn(
+                GroupRunAdmissionService.Admission.builder().outcome("ADMITTED").authorizationEpoch("epoch-1").workspaceDir("/changed/workspace").build());
+        pastDeadline();
+        assertEquals("unknown", service.get("req-1").getStatus());
+        assertEquals("unknown", service.get("req-1").getStatus());
+        assertEquals("unknown", service.submit(r).getStatus());
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(4)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        var initial = json.valueToTree(sent.getAllValues().get(0));
+        assertFalse(initial.path("data").has("reconcileOnly"));
+        for (int i = 1; i < sent.getAllValues().size(); i++) {
+            var recovered = json.valueToTree(sent.getAllValues().get(i));
+            assertTrue(recovered.path("data").path("reconcileOnly").asBoolean());
+            ((com.fasterxml.jackson.databind.node.ObjectNode) recovered.path("data")).remove("reconcileOnly");
+            assertEquals(initial, recovered, "GET cannot rebuild context from current configuration or mint a new request");
+        }
+        var envelope = json.valueToTree(sent.getAllValues().get(1));
+        java.nio.file.Files.writeString(java.nio.file.Path.of("target", "agent-command-reconcile-envelope.json"),
+                json.writerWithDefaultPrettyPrinter().writeValueAsString(envelope));
+        verify(admission, times(1)).admitGroupRun(30L,20L,1L,null);
+    }
+    @Test void reconciliationRejectsChangedEpochAndDoesNotDowngradeToNewAdmission() {
+        var r = request("invoke"); r.setCapabilityId("session.reset"); service.submit(r);
+        when(admission.admitGroupRun(30L,20L,1L,"epoch-1")).thenReturn(GroupRunAdmissionService.Admission.builder().outcome("DENIED").build());
+        assertThrows(BizException.class, () -> service.get("req-1"));
+        assertThrows(BizException.class, () -> service.submit(r));
+        verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
+        verify(admission, times(1)).admitGroupRun(30L,20L,1L,null);
+    }
+    @Test void legacyExecutionWithoutFrozenContextNeverReconstructsOrDispatchesRecovery() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.reset"); service.submit(r);
+        String key = storage.keySet().iterator().next();
+        var legacy = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(storage.get(key));
+        legacy.remove("context"); storage.put(key, json.writeValueAsString(legacy));
+        assertEquals("accepted", service.get("req-1").getStatus());
+        assertEquals("accepted", service.submit(r).getStatus());
+        verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
+    }
+    @Test void knownOutcomesAndReadOnlyQueriesDoNotDispatchRecovery() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("model.set"); r.setParameters(Map.of("providerId", "p", "modelId", "m")); service.submit(r);
+        service.complete(nativeCallback("\"status\":\"completed\",\"effect\":{\"kind\":\"model\",\"providerId\":\"p\",\"modelId\":\"m\",\"effective\":\"next_request\"}"));
+        ContextUtil.setUid(11L); assertEquals("completed", service.get("req-1").getStatus()); service.submit(r);
+        var query = request("invoke"); query.setRequestId("query-1"); service.submit(query); service.get("query-1"); service.submit(query);
+        verify(push, times(2)).submitPushMsg(any(), eq(30L), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+    }
     @Test void anotherHumanCannotReadOrReplayRequest() {
         service.submit(request("discover"));
         var other = new User(); other.setTenantId(1L); other.setState(0); other.setUserType(3);
@@ -134,8 +188,22 @@ class AgentCommandServiceTest {
     @Test void unknownCapabilitiesAndParametersNeverReachNative() {
         var r = request("invoke"); r.setParameters(Map.of("secret", "bad"));
         assertThrows(BizException.class, () -> service.submit(r));
-        r.setParameters(Map.of()); r.setCapabilityId("skill:arbitrary");
+        r.setParameters(Map.of()); r.setCapabilityId("command:arbitrary");
         assertEquals("unsupported", service.submit(r).getStatus()); verifyNoInteractions(push);
+    }
+    @Test void executionParametersAreCanonicalWithoutRewritingNativeArguments() {
+        var r = request("invoke"); r.setCapabilityId("skill:fixture");
+        r.setParameters(Map.of("arguments", "  https://example.test/<literal>\nvalue  "));
+        assertEquals("accepted", service.submit(r).getStatus());
+        verify(push).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("parameters").path("arguments")
+                .asText().equals("  https://example.test/<literal>\nvalue  ")), eq(30L), eq(11L));
+        var model = request("invoke"); model.setRequestId("model-1"); model.setCapabilityId("model.set");
+        var parameters = new LinkedHashMap<String,Object>(); parameters.put("modelId", "org/model"); parameters.put("providerId", "provider");
+        model.setParameters(parameters); assertEquals("accepted", service.submit(model).getStatus());
+        model.setParameters(Map.of("providerId", "provider", "modelId", "org/model"));
+        assertEquals("accepted", service.submit(model).getStatus());
+        verify(push, times(2)).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+        verify(push, times(1)).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
     }
     @Test void callbackBindsAgentTenantRoomThenImmutableResultAndFeedback() {
         service.submit(request("invoke")); var c = callback(); ContextUtil.setUid(31L);
@@ -155,6 +223,153 @@ class AgentCommandServiceTest {
         ContextUtil.setUid(11L); var r = request("invoke"); r.setRequestId("req-2"); service.submit(r);
         c.setRequestId("req-2"); c.setError("apiKey=secret private host /root"); ContextUtil.setUid(30L);
         assertEquals("native_request_failed",service.complete(c).getError());
+    }
+    private AgentCommand.Callback nativeCallback(String fields) throws Exception {
+        ContextUtil.setUid(30L);
+        return json.readValue("{\"requestId\":\"req-1\",\"roomId\":\"20\"," + fields + "}", AgentCommand.Callback.class);
+    }
+    private void pastDeadline() throws Exception {
+        String key = storage.keySet().iterator().next();
+        var pending = json.readValue(storage.get(key), AgentCommandService.Pending.class);
+        pending.setDeadline(1); storage.put(key, json.writeValueAsString(pending));
+    }
+    @Test void nativeAckKeepsLongSkillAcceptedPastDispatchDeadlineThenCompletes() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\",\"generation\":\"g-old\",\"nativeRef\":{\"sessionId\":\"ses-old\",\"inputId\":\"user-old\"}");
+        assertEquals("accepted", service.complete(ack).getStatus());
+        pastDeadline(); ContextUtil.setUid(11L);
+        assertEquals("accepted", service.get("req-1").getStatus()); verifyNoInteractions(chat);
+        var done = nativeCallback("\"status\":\"completed\",\"phase\":\"outcome\",\"generation\":\"g-old\",\"nativeRef\":{\"sessionId\":\"ses-old\",\"inputId\":\"user-old\",\"messageId\":\"assistant-old\",\"parentId\":\"user-old\"},\"text\":\"done\"");
+        var result = json.valueToTree(service.complete(done));
+        assertEquals("completed", result.path("status").asText()); assertEquals("outcome", result.path("phase").asText());
+        assertEquals(1, result.path("receiptRevision").asInt());
+        assertEquals("ses-old", result.path("nativeRef").path("sessionId").asText());
+        verify(chat, times(1)).sendMsg(any(), eq(11L));
+    }
+    @Test void lostAckUnknownReconcilesOnlyOnceWithMatchingBindingAndSeparateFeedbackReceipt() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r); pastDeadline();
+        assertEquals("unknown", service.get("req-1").getStatus());
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\"}");
+        assertEquals("unknown", service.complete(ack).getStatus());
+        var done = nativeCallback("\"status\":\"completed\",\"phase\":\"outcome\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"},\"text\":\"done\"");
+        assertEquals("unknown", service.complete(done).getStatus(), "uncertainty is not permission to infer completion");
+        done.setReconciled(true);
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus()); assertEquals(2, result.getReceiptRevision()); assertTrue(result.getReconciled());
+        assertEquals("completed", service.complete(done).getStatus());
+        done.setStatus("failed"); assertEquals("completed", service.complete(done).getStatus());
+        var messages = ArgumentCaptor.forClass(ChatMessageReq.class); verify(chat, times(2)).sendMsg(messages.capture(), eq(11L));
+        assertNotEquals(messages.getAllValues().get(0).getRequestId(), messages.getAllValues().get(1).getRequestId());
+        assertTrue(messages.getAllValues().get(0).getBody().toString().contains("unknown"));
+        assertTrue(messages.getAllValues().get(1).getBody().toString().contains("completed"));
+        verify(push, times(1)).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+        verify(push, times(1)).submitPushMsg(argThat(ws -> json.valueToTree(ws.getData()).path("reconcileOnly").asBoolean()), eq(30L), eq(11L));
+    }
+    @Test void nativeBindingAndSkillParentCannotBeChangedByAnotherHttpCompletion() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
+        service.complete(nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\",\"generation\":\"old\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\"}"));
+        var wrongGeneration = nativeCallback("\"status\":\"completed\",\"generation\":\"new\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"}");
+        assertThrows(BizException.class, () -> service.complete(wrongGeneration));
+        var wrongParent = nativeCallback("\"status\":\"completed\",\"generation\":\"old\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"same-http-assistant\",\"parentId\":\"u2\"}");
+        assertThrows(BizException.class, () -> service.complete(wrongParent)); verifyNoInteractions(chat);
+    }
+    @Test void modelSelectionHasTypedNextRequestEffectWithoutInventingNativeSession() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("model.set");
+        r.setParameters(Map.of("providerId", "p", "modelId", "org/model")); service.submit(r);
+        var done = nativeCallback("\"status\":\"completed\",\"effect\":{\"kind\":\"model\",\"providerId\":\"p\",\"modelId\":\"org/model\",\"effective\":\"next_request\",\"sessionId\":\"unrelated\",\"apiKey\":\"discard\"}");
+        var result = json.valueToTree(service.complete(done));
+        assertEquals("next_request", result.path("effect").path("effective").asText());
+        assertEquals("org/model", result.path("effect").path("modelId").asText());
+        assertFalse(result.has("nativeRef")); assertFalse(result.toString().contains("unrelated")); assertFalse(result.toString().contains("discard"));
+    }
+    @Test void resetPublishesNewBindingAndOldSkillCanStillSettleItsOwnRequest() throws Exception {
+        var skill = request("invoke"); skill.setCapabilityId("skill:fixture"); service.submit(skill);
+        service.complete(nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\"}"));
+        ContextUtil.setUid(11L); var reset = request("invoke"); reset.setRequestId("reset-1"); reset.setCapabilityId("session.reset"); service.submit(reset);
+        var resetDone = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\"},\"effect\":{\"kind\":\"reset\",\"sessionId\":\"s2\",\"generation\":\"g2\"}"); resetDone.setRequestId("reset-1");
+        var result = service.complete(resetDone);
+        assertEquals("s1", result.getNativeRef().getSessionId()); assertEquals("s2", result.getEffect().getSessionId());
+        var oldDone = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"}");
+        assertEquals("completed", service.complete(oldDone).getStatus());
+        ContextUtil.setUid(11L); assertEquals("s2", service.get("reset-1").getEffect().getSessionId());
+    }
+    @Test void compactHttpSuccessCannotReplaceSummaryEvidence() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        var noEvidence = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\"}");
+        assertThrows(BizException.class, () -> service.complete(noEvidence));
+        var done = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\"},\"effect\":{\"kind\":\"compact\",\"controlId\":\"c1\",\"summaryId\":\"a1\",\"summary\":true}");
+        assertTrue(service.complete(done).getEffect().getSummary());
+    }
+    @Test void completionRereadsCompetingNativeAckInsteadOfLosingOutcome() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
+        var done = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"}");
+        var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+        doAnswer(i -> {
+            String key = ((List<String>) i.getArgument(1)).get(0);
+            if (first.getAndSet(false)) {
+                var ack = json.readValue(storage.get(key), AgentCommandService.Pending.class);
+                ack.getResult().setPhase("accepted"); ack.getResult().setGeneration("g1");
+                ack.getResult().setNativeRef(json.readValue("{\"sessionId\":\"s1\",\"inputId\":\"u1\"}", AgentCommand.NativeRef.class));
+                storage.put(key, json.writeValueAsString(ack)); return 0L;
+            }
+            return storage.replace(key, i.getArgument(2), i.getArgument(3)) ? 1L : 0L;
+        }).when(redis).execute(any(RedisScript.class), anyList(), anyString(), anyString());
+        assertEquals("completed", service.complete(done).getStatus()); verify(chat, times(1)).sendMsg(any(), eq(11L));
+    }
+    @Test void feedbackCasRaceCannotOverwriteReconciledFinalOrCollideSqlReceipts() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r); pastDeadline();
+        var done = nativeCallback("\"status\":\"completed\",\"reconciled\":true,\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"}");
+        var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+        Map<String,String> receipts = new LinkedHashMap<>();
+        doAnswer(i -> {
+            ChatMessageReq message = i.getArgument(0);
+            String body = message.getBody().toString();
+            String old = receipts.putIfAbsent(message.getRequestId(), body);
+            if (old != null) assertEquals(old, body, "SQL receipt body cannot change under a CAS race");
+            if (first.getAndSet(false)) {
+                ContextUtil.setUid(30L); assertEquals("completed", service.complete(done).getStatus()); ContextUtil.setUid(11L);
+            }
+            return body.contains("completed") ? 124L : 123L;
+        }).when(chat).sendMsg(any(), eq(11L));
+        ContextUtil.setUid(11L); service.get("req-1");
+        assertEquals("completed", service.get("req-1").getStatus());
+        assertEquals(2, receipts.size()); assertTrue(receipts.values().stream().anyMatch(v -> v.contains("unknown")));
+        assertTrue(receipts.values().stream().anyMatch(v -> v.contains("completed")));
+        verify(push, times(1)).submitPushMsg(any(), eq(30L), eq(11L));
+    }
+    @Test void originalAuthorizationEpochCannotBeReplacedDuringUnknownReconciliation() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("model.set"); r.setParameters(Map.of("providerId", "p", "modelId", "m")); service.submit(r);
+        pastDeadline(); assertEquals("unknown", service.get("req-1").getStatus());
+        when(admission.admitGroupRun(30L,20L,1L,"epoch-1")).thenReturn(GroupRunAdmissionService.Admission.builder().outcome("DENIED").build());
+        var done = nativeCallback("\"status\":\"completed\",\"reconciled\":true,\"effect\":{\"kind\":\"model\",\"providerId\":\"p\",\"modelId\":\"m\",\"effective\":\"next_request\"}");
+        assertEquals("unknown", service.complete(done).getStatus());
+        verify(admission, times(1)).admitGroupRun(30L,20L,1L,null);
+        verify(chat, times(1)).sendMsg(any(), eq(11L));
+    }
+    @Test void revokedAuthorizationOutcomeRereadsConcurrentAck() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.reset"); service.submit(r);
+        when(admission.admitGroupRun(30L,20L,1L,"epoch-1")).thenReturn(GroupRunAdmissionService.Admission.builder().outcome("DENIED").build());
+        var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+        doAnswer(i -> {
+            String key = ((List<String>) i.getArgument(1)).get(0);
+            if (first.getAndSet(false)) {
+                var ack = json.readValue(storage.get(key), AgentCommandService.Pending.class);
+                ack.getResult().setPhase("accepted");
+                storage.put(key, json.writeValueAsString(ack)); return 0L;
+            }
+            return storage.replace(key, i.getArgument(2), i.getArgument(3)) ? 1L : 0L;
+        }).when(redis).execute(any(RedisScript.class), anyList(), anyString(), anyString());
+        var result = service.complete(callback());
+        assertEquals("unknown", result.getStatus()); assertEquals("authorization_changed", result.getError());
+        ContextUtil.setUid(11L); assertEquals("unknown", service.get("req-1").getStatus()); verifyNoInteractions(chat);
+    }
+    @Test void ambiguousCompactKeepsSafeDiagnosticWithoutRawNativeErrors() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        var unknown = nativeCallback("\"status\":\"unknown\",\"error\":\"ambiguous_compaction\",\"text\":\"secret private native data\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\"}");
+        var result = service.complete(unknown);
+        assertEquals("ambiguous_compaction", result.getError());
+        assertNotNull(result.getText()); assertTrue(result.getText().contains("无法确认")); assertFalse(result.getText().contains("secret"));
+        verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("无法确认")), eq(11L));
     }
     @Test void overdueCallbackCannotResurrectUnknownOrDispatchAgain() throws Exception {
         service.submit(request("invoke"));
@@ -195,6 +410,57 @@ class AgentCommandServiceTest {
     @Test void redisOutageFailsClosedBeforeDispatch() {
         when(values.setIfAbsent(anyString(),anyString(),any(Duration.class))).thenThrow(new IllegalStateException("unavailable"));
         assertThrows(IllegalStateException.class,()->service.submit(request("invoke"))); verifyNoInteractions(push,chat);
+    }
+    @Test void modelDiscoveryProjectsOnePageAndEnablesOnlySupportedCapabilityKinds() throws Exception {
+        var r = request("discover"); r.setCapabilityId("model.set"); r.setParameters(Map.of("query", "org/", "offset", 100));
+        assertEquals("accepted", service.submit(r).getStatus());
+        var c = callback(); c.setCatalog(json.readTree("""
+                {"version":"full-inventory","framework":"opencode","runtimeVersion":"1.17.9","capabilities":[
+                 {"id":"model.set","kind":"model","name":"Model","supported":true,"executable":true},
+                 {"id":"skill:fixture","kind":"skill","source":"skill","name":"Fixture","supported":true,"executable":true},
+                 {"id":"session.reset","kind":"command","name":"Reset","supported":true,"executable":true},
+                 {"id":"command:reset","kind":"command","name":"Collision","supported":true,"executable":true}],
+                 "models":{"items":[{"providerId":"provider","modelId":"org/model","label":"Model","connected":false,"apiKey":"discard"}],
+                   "total":8944,"offset":100,"nextOffset":101,"privatePath":"discard"}}
+                """));
+        var catalog = service.complete(c).getCatalog();
+        assertTrue(catalog.path("capabilities").get(0).path("executable").asBoolean());
+        assertTrue(catalog.path("capabilities").get(1).path("executable").asBoolean());
+        assertEquals("skill", catalog.path("capabilities").get(1).path("source").asText());
+        assertTrue(catalog.path("capabilities").get(2).path("executable").asBoolean());
+        assertFalse(catalog.path("capabilities").get(3).path("executable").asBoolean());
+        assertEquals(8944, catalog.path("models").path("total").asInt());
+        assertEquals("org/model", catalog.path("models").path("items").get(0).path("modelId").asText());
+        assertFalse(catalog.path("models").path("items").get(0).path("connected").asBoolean());
+        assertFalse(catalog.toString().contains("discard")); verifyNoInteractions(chat);
+    }
+    @Test void invalidParameterTypesAndExtraKeysNeverDispatch() {
+        for (Object value : Arrays.asList(null, List.of("x"), Map.of("x", "y"), 1, "x".repeat(4097), "x\u0000y")) {
+            var r = request("invoke"); r.setCapabilityId("skill:fixture");
+            var params = new HashMap<String,Object>(); params.put("arguments", value); r.setParameters(params);
+            assertThrows(BizException.class, () -> service.submit(r));
+        }
+        for (Object offset : List.of(-1, 1.5, "1", 9007199254740992L)) {
+            var r = request("discover"); r.setCapabilityId("model.set"); r.setParameters(Map.of("offset", offset));
+            assertThrows(BizException.class, () -> service.submit(r));
+        }
+        var r = request("invoke"); r.setCapabilityId("session.reset"); r.setParameters(Map.of("cwd", "/untrusted"));
+        assertThrows(BizException.class, () -> service.submit(r)); verifyNoInteractions(push);
+    }
+    @Test void modelPagesRejectOversizeAndSilentTruncationButAllowOutOfRangeEmptyPage() throws Exception {
+        var r = request("discover"); r.setCapabilityId("model.set"); service.submit(r);
+        var c = callback();
+        var catalog = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree("""
+                {"version":"v1","framework":"opencode","runtimeVersion":"1.17.9","capabilities":[],
+                 "models":{"items":[{"providerId":"p","modelId":"m","label":"m","connected":true}],"total":8944,"offset":0}}
+                """);
+        c.setCatalog(catalog); assertThrows(BizException.class, () -> service.complete(c), "missing nextOffset cannot silently hide remaining inventory");
+        var page = (com.fasterxml.jackson.databind.node.ObjectNode) catalog.path("models");
+        page.put("nextOffset", 101); var items = page.putArray("items");
+        for (int i = 0; i < 101; i++) items.addObject().put("providerId", "p").put("modelId", "m" + i).put("label", "M").put("connected", false);
+        assertThrows(BizException.class, () -> service.complete(c));
+        page.remove("nextOffset"); page.put("offset", 9000); items.removeAll();
+        assertEquals(0, service.complete(c).getCatalog().path("models").path("items").size());
     }
     @Test void catalogPreservesAdvisoryParametersWithoutEnablingExecution() throws Exception {
         service.submit(request("discover")); var c = callback();

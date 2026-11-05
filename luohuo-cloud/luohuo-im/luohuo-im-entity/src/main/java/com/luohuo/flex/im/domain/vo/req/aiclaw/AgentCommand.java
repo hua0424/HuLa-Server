@@ -4,10 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Data;
-import java.util.List;
 import java.util.Map;
 
-/** #502 structured, read-only command lane; no client-supplied actor or workspace. */
+/** Control receipts are independent of turns; identity and native bindings are never client supplied. */
 public final class AgentCommand {
     private AgentCommand() { }
 
@@ -31,7 +30,12 @@ public final class AgentCommand {
         private JsonNode catalog;
         private String text;
         private String error;
-        // nativeResult intentionally not retained: provider data is not public chat content.
+        private String phase;
+        private String generation;
+        private NativeRef nativeRef;
+        private Effect effect;
+        private Boolean reconciled;
+        // receiptRevision and nativeResult intentionally not accepted from the Adapter.
     }
 
     @Data
@@ -45,5 +49,38 @@ public final class AgentCommand {
         private JsonNode catalog;
         private String text;
         private String error;
+        private String phase;
+        private String generation;
+        private NativeRef nativeRef;
+        private Effect effect;
+        private Integer receiptRevision;
+        private Boolean reconciled;
+    }
+
+    @Data
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class NativeRef {
+        private String sessionId;
+        private String inputId;
+        private String messageId;
+        private String parentId;
+        private String turnId;
+    }
+
+    /** Only fields belonging to kind are projected by the service. */
+    @Data
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Effect {
+        private String kind;
+        private String sessionId;
+        private String generation;
+        private String controlId;
+        private String summaryId;
+        private Boolean summary;
+        private String providerId;
+        private String modelId;
+        private String effective;
     }
 }

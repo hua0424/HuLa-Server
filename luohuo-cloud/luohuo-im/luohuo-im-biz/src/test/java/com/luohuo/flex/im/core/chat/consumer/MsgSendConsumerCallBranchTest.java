@@ -180,7 +180,8 @@ class MsgSendConsumerCallBranchTest {
         Room room = buildGroupRoom(); room.setType(roomType);
         when(messageDao.getById(MSG_ID)).thenReturn(message);
         when(roomCache.get(ROOM_ID)).thenReturn(room);
-        when(groupMemberCache.getMemberExceptUidList(ROOM_ID)).thenReturn(List.of(100L, 300L));
+        when(groupMemberCache.getMemberExceptUidList(ROOM_ID)).thenReturn(List.of(100L, 300L, 400L));
+        if (roomType == 1) when(aiclawParticipant.isAiclaw(400L)).thenReturn(true);
         RoomFriend friend = new RoomFriend(); friend.setUid1(100L); friend.setUid2(300L);
         when(roomFriendDao.getByRoomId(ROOM_ID)).thenReturn(friend);
         when(aiclawParticipant.isAiclaw(300L)).thenReturn(true);
