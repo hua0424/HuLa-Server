@@ -41,9 +41,9 @@ import java.util.Set;
  * <p>默认规则为代码常量（DEFAULT_STATE），只存主人的显式覆盖行：
  * 未配置（无行）= 继承默认；明确不开放 = state=closed 的行。读路径必须区分两者。
  *
- * <p>冻结语义（#504 issuecomment-6677394062）：
- * 群覆盖 mode=list 时名单外用户在该群内=不可调用，不回落继承默认；私聊忽略名单；
- * 主人恒过名单，主人调 approval_required = 自批放行（仍受 closed 约束）。
+ * <p>冻结语义（#504 issuecomment-6677394062 + verify F-504-D6）：
+ * 群覆盖 mode=list 时名单外用户在该群内=不可调用，不回落继承默认（含主人，不豁免）；
+ * 私聊忽略名单；名单内主人调 approval_required = 自批放行（仍受 closed 与名单约束）。
  */
 @Slf4j
 @Service
@@ -104,24 +104,25 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 	}
 
 	/**
-	 * #504 行语义：closed 直接拒绝；approval 主人自批、他人挂起；open 走名单（仅群覆盖行 + 非主人）。
+	 * #504 行语义：群覆盖 list 名单先行（含主人）；closed 直接拒绝；
+	 * approval 名单内主人自批、他人挂起；open 放行。
 	 */
 	private static Decision applyRow(AiclawCommandPolicy row, boolean groupScope, Long callerUid, boolean isOwner) {
 		String capabilityId = row.getCapabilityId();
+		// #504 F-504-D6：名单检查先于一切主人特权——名单外用户在该群内一律拒绝（含主人）。
+		if (groupScope && AiclawCommandPolicy.MODE_LIST.equals(row.getMode()) && !allowedUids(row).contains(callerUid))
+			return Decision.of(Verdict.CLOSED,
+					AiclawCommandPolicyService.DENIED_CLOSED + ":offlist:" + capabilityId);
 		switch (String.valueOf(row.getState())) {
 			case AiclawCommandPolicy.STATE_CLOSED:
 				return Decision.of(Verdict.CLOSED,
 						AiclawCommandPolicyService.DENIED_CLOSED + ":closed:" + capabilityId);
 			case AiclawCommandPolicy.STATE_APPROVAL:
-				// 主人是审批权持有者，自调即自批；他人调用本票拒绝终态（不执行、不降级放行）。
+				// 主人是审批权持有者，名单内自调即自批；他人调用本票拒绝终态（不执行、不降级放行）。
 				if (isOwner) return Decision.of(Verdict.OPEN, "command_policy_owner_self_approved:" + capabilityId);
 				return Decision.of(Verdict.APPROVAL_REQUIRED,
 						AiclawCommandPolicyService.DENIED_APPROVAL + "_required:" + capabilityId);
 			case AiclawCommandPolicy.STATE_OPEN:
-				if (groupScope && AiclawCommandPolicy.MODE_LIST.equals(row.getMode()) && !isOwner
-						&& !allowedUids(row).contains(callerUid))
-					return Decision.of(Verdict.CLOSED,
-							AiclawCommandPolicyService.DENIED_CLOSED + ":offlist:" + capabilityId);
 				return Decision.of(Verdict.OPEN, "command_policy_open:" + capabilityId);
 			default:
 				return Decision.of(Verdict.CLOSED,
