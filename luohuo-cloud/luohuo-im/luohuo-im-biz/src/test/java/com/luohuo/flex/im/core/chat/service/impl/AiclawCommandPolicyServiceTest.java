@@ -28,6 +28,7 @@ import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Map;
@@ -57,6 +58,13 @@ class AiclawCommandPolicyServiceTest {
 
 	@InjectMocks
 	private AiclawCommandPolicyServiceImpl service;
+
+	@Test
+	@DisplayName("#504 mapper 必须带 @Repository，否则线上 MapperScan 不注册（单测扫描器会掩盖此缺陷）")
+	void mapperCarriesRepositoryForProductionScan() {
+		assertTrue(AiclawCommandPolicyMapper.class.isAnnotationPresent(Repository.class),
+				"MybatisAutoConfiguration 只注册 @Repository mapper");
+	}
 
 	private static final Long AGENT = 30L;
 	private static final Long OWNER = 11L;

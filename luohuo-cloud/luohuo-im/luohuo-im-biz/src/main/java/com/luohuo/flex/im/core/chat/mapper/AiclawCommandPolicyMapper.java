@@ -2,14 +2,19 @@ package com.luohuo.flex.im.core.chat.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.luohuo.flex.im.domain.entity.AiclawCommandPolicy;
-import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Update;
+import org.springframework.stereotype.Repository;
 
 /**
  * aichatoverview#504 Agent 命令调用权限 mapper。
+ *
+ * 注意：本项目 mapper 由 MybatisAutoConfiguration 以
+ * {@code @MapperScan(annotationClass = Repository.class)} 注册，
+ * 必须用 Spring {@code @Repository} 而非 MyBatis {@code @Mapper}，
+ * 否则单测（MapperTestApp 全量扫描）通过但线上 im 无法启动。
  */
-@Mapper
+@Repository
 public interface AiclawCommandPolicyMapper extends BaseMapper<AiclawCommandPolicy> {
 
 	/**
