@@ -514,17 +514,17 @@ class AgentCommandServiceTest {
     }
     @Test void policyClosedInvokeDeniedBeforeDispatch() {
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
-                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.CLOSED, "command_policy_denied:closed:model.list"));
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.CLOSED, AiclawCommandPolicyService.DENIED_CLOSED + ":model.list"));
         var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
-        assertTrue(failure.getMessage().contains("command_policy_denied"));
+        assertTrue(failure.getMessage().contains(AiclawCommandPolicyService.DENIED_CLOSED));
         verifyNoInteractions(push, chat);
         assertTrue(storage.isEmpty(), "denied invoke writes no receipt");
     }
     @Test void policyApprovalRequiredDeniedForNonOwnerButOwnerSelfApproves() {
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
-                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "command_policy_denied:approval_required:model.list"));
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, AiclawCommandPolicyService.DENIED_APPROVAL + "_required:model.list"));
         var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
-        assertTrue(failure.getMessage().contains("approval_required"));
+        assertTrue(failure.getMessage().contains(AiclawCommandPolicyService.DENIED_APPROVAL));
         when(ownerCache.getOwnerUid(30L)).thenReturn(11L);
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(true))).thenReturn(
                 AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.OPEN, "command_policy_owner_self_approved:model.list"));

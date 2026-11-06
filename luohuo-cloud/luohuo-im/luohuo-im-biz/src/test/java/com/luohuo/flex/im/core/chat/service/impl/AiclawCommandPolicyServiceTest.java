@@ -5,12 +5,16 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.config.AiclawProperties;
+import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawCommandPolicyMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawCommandPolicyService;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
+import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.entity.AiclawCommandPolicy;
+import com.luohuo.flex.im.domain.entity.GroupMember;
+import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCommandPolicyUpdateReq;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.ibatis.session.Configuration;
@@ -44,6 +48,8 @@ class AiclawCommandPolicyServiceTest {
 	@Mock private AiclawCommandPolicyMapper mapper;
 	@Mock private AiclawOwnerCache ownerCache;
 	@Mock private GroupMemberCache memberCache;
+	@Mock private RoomGroupCache roomGroupCache;
+	@Mock private GroupMemberDao groupMemberDao;
 	@Mock private PushService pushService;
 	@Mock private StringRedisTemplate stringRedisTemplate;
 	@Mock private ValueOperations<String, String> valueOps;
@@ -169,6 +175,13 @@ class AiclawCommandPolicyServiceTest {
 	@DisplayName("#504 主人新建行 + 版本冲突拒绝")
 	void ownerCreate_thenStaleVersionConflict() {
 		when(ownerCache.getOwnerUid(AGENT)).thenReturn(OWNER);
+		// P1-3 群覆盖写 membership：群存在 + 操作者在群 + Agent 在群（直查 DB 范式）。
+		RoomGroup rg = mock(RoomGroup.class);
+		when(rg.getId()).thenReturn(7L);
+		when(roomGroupCache.getByRoomIdFromDb(GROUP)).thenReturn(rg);
+		GroupMember anyone = mock(GroupMember.class);
+		when(groupMemberDao.getMemberByGroupId(7L, OWNER)).thenReturn(anyone);
+		when(groupMemberDao.getMemberByGroupId(7L, AGENT)).thenReturn(anyone);
 		// 更新路径不读缓存（写后直接驱逐），此处无需 stub redis。
 		AiclawCommandPolicyUpdateReq.Item item = new AiclawCommandPolicyUpdateReq.Item();
 		item.setCapabilityId("skill:x");
@@ -199,6 +212,56 @@ class AiclawCommandPolicyServiceTest {
 		// 正常更新。
 		when(mapper.updateStateCas(any(), any(), any(), any(), any())).thenReturn(1);
 		service.updateForOwner(OWNER, req);
+	}
+
+	@Test
+	@DisplayName("#504 P1-3：非群 roomId 拒绝（与既有写路径风格一致）")
+	void groupWrite_nonGroupRoom_rejected() {
+		when(ownerCache.getOwnerUid(AGENT)).thenReturn(OWNER);
+		when(roomGroupCache.getByRoomIdFromDb(GROUP)).thenReturn(null);
+		BizException failure = assertThrows(BizException.class, () -> service.updateForOwner(OWNER, groupScopeReq()));
+		assertEquals("该AI助理不在此群中", failure.getMessage());
+		verifyNoInteractions(mapper);
+	}
+
+	@Test
+	@DisplayName("#504 P1-3：操作者非群成员拒绝")
+	void groupWrite_operatorNotMember_rejected() {
+		when(ownerCache.getOwnerUid(AGENT)).thenReturn(OWNER);
+		RoomGroup rg = mock(RoomGroup.class);
+		when(rg.getId()).thenReturn(7L);
+		when(roomGroupCache.getByRoomIdFromDb(GROUP)).thenReturn(rg);
+		when(groupMemberDao.getMemberByGroupId(7L, OWNER)).thenReturn(null);
+		BizException failure = assertThrows(BizException.class, () -> service.updateForOwner(OWNER, groupScopeReq()));
+		assertTrue(failure.getMessage().contains("无法修改命令权限"));
+		verifyNoInteractions(mapper);
+	}
+
+	@Test
+	@DisplayName("#504 P1-3：Agent 已退群拒绝")
+	void groupWrite_agentNotMember_rejected() {
+		when(ownerCache.getOwnerUid(AGENT)).thenReturn(OWNER);
+		RoomGroup rg = mock(RoomGroup.class);
+		when(rg.getId()).thenReturn(7L);
+		when(roomGroupCache.getByRoomIdFromDb(GROUP)).thenReturn(rg);
+		when(groupMemberDao.getMemberByGroupId(7L, OWNER)).thenReturn(mock(GroupMember.class));
+		when(groupMemberDao.getMemberByGroupId(7L, AGENT)).thenReturn(null);
+		BizException failure = assertThrows(BizException.class, () -> service.updateForOwner(OWNER, groupScopeReq()));
+		assertEquals("该AI助理不在此群中", failure.getMessage());
+		verifyNoInteractions(mapper);
+	}
+
+	private static AiclawCommandPolicyUpdateReq groupScopeReq() {
+		AiclawCommandPolicyUpdateReq.Item item = new AiclawCommandPolicyUpdateReq.Item();
+		item.setCapabilityId("skill:x");
+		item.setState("open");
+		item.setMode("list");
+		item.setAllowedUids(List.of(MEMBER));
+		AiclawCommandPolicyUpdateReq req = new AiclawCommandPolicyUpdateReq();
+		req.setAiclawUid(AGENT);
+		req.setRoomId(GROUP);
+		req.setItems(List.of(item));
+		return req;
 	}
 
 	@Test

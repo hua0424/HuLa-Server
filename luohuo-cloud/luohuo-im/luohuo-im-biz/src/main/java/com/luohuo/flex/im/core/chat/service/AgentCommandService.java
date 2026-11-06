@@ -89,9 +89,9 @@ public class AgentCommandService {
             long scope = room.getType() == 2 ? 0L : roomId;
             var decision = policies.decide(target, scope, request.getCapabilityId(), actor, owner);
             if (decision == null || decision.getVerdict() == AiclawCommandPolicyService.Verdict.CLOSED)
-                throw new BizException("command_policy_denied:" + request.getCapabilityId());
+                throw new BizException(AiclawCommandPolicyService.DENIED_CLOSED + ":" + request.getCapabilityId());
             if (decision.getVerdict() == AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
-                throw new BizException("command_policy_denied:approval_required:" + request.getCapabilityId());
+                throw new BizException(AiclawCommandPolicyService.DENIED_APPROVAL + ":" + request.getCapabilityId());
         }
         Pending pending = new Pending(); pending.setRequest(request); pending.setActor(actor); pending.setTenant(tenant);
         pending.setEpoch(allowed.getAuthorizationEpoch()); pending.setDeadline(System.currentTimeMillis() + DEADLINE_MS);

@@ -4,14 +4,17 @@ import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.constant.AiclawRedisKeys;
+import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.AiclawCommandPolicyMapper;
 import com.luohuo.flex.im.core.chat.service.AiclawCommandPolicyService;
 import com.luohuo.flex.common.config.AiclawProperties;
 import com.luohuo.flex.im.core.chat.service.cache.GroupMemberCache;
+import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
 import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.entity.AiclawCommandPolicy;
+import com.luohuo.flex.im.domain.entity.RoomGroup;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AiclawCommandPolicyUpdateReq;
 import com.luohuo.flex.im.domain.vo.resp.aiclaw.AiclawCommandPolicyResp;
 import com.luohuo.flex.model.entity.ws.WSCommandPolicyChange;
@@ -54,6 +57,8 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 	private final AiclawCommandPolicyMapper mapper;
 	private final AiclawOwnerCache ownerCache;
 	private final GroupMemberCache memberCache;
+	private final RoomGroupCache roomGroupCache;
+	private final GroupMemberDao groupMemberDao;
 	private final StringRedisTemplate stringRedisTemplate;
 	private final PushService pushService;
 	private final AiclawProperties aiclawProperties;
@@ -84,7 +89,8 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 	 */
 	private static Decision resolve(List<AiclawCommandPolicy> rows, long roomScope, String capabilityId,
 			Long callerUid, boolean isOwner) {
-		if (capabilityId == null || capabilityId.isBlank()) return Decision.of(Verdict.CLOSED, "command_policy_denied:blank");
+		if (capabilityId == null || capabilityId.isBlank())
+			return Decision.of(Verdict.CLOSED, AiclawCommandPolicyService.DENIED_CLOSED + ":blank");
 		AiclawCommandPolicy groupRow = null, defaultRow = null;
 		for (AiclawCommandPolicy row : rows) {
 			if (!capabilityId.equals(row.getCapabilityId())) continue;
@@ -94,7 +100,7 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 		if (groupRow != null) return applyRow(groupRow, true, callerUid, isOwner);
 		if (defaultRow != null) return applyRow(defaultRow, false, callerUid, isOwner);
 		if (isOpenByDefault(capabilityId)) return Decision.of(Verdict.OPEN, "command_policy_default_open");
-		return Decision.of(Verdict.CLOSED, "command_policy_denied:default_closed:" + capabilityId);
+		return Decision.of(Verdict.CLOSED, AiclawCommandPolicyService.DENIED_CLOSED + ":default_closed:" + capabilityId);
 	}
 
 	/**
@@ -104,18 +110,22 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 		String capabilityId = row.getCapabilityId();
 		switch (String.valueOf(row.getState())) {
 			case AiclawCommandPolicy.STATE_CLOSED:
-				return Decision.of(Verdict.CLOSED, "command_policy_denied:closed:" + capabilityId);
+				return Decision.of(Verdict.CLOSED,
+						AiclawCommandPolicyService.DENIED_CLOSED + ":closed:" + capabilityId);
 			case AiclawCommandPolicy.STATE_APPROVAL:
 				// 主人是审批权持有者，自调即自批；他人调用本票拒绝终态（不执行、不降级放行）。
 				if (isOwner) return Decision.of(Verdict.OPEN, "command_policy_owner_self_approved:" + capabilityId);
-				return Decision.of(Verdict.APPROVAL_REQUIRED, "command_policy_denied:approval_required:" + capabilityId);
+				return Decision.of(Verdict.APPROVAL_REQUIRED,
+						AiclawCommandPolicyService.DENIED_APPROVAL + "_required:" + capabilityId);
 			case AiclawCommandPolicy.STATE_OPEN:
 				if (groupScope && AiclawCommandPolicy.MODE_LIST.equals(row.getMode()) && !isOwner
 						&& !allowedUids(row).contains(callerUid))
-					return Decision.of(Verdict.CLOSED, "command_policy_denied:offlist:" + capabilityId);
+					return Decision.of(Verdict.CLOSED,
+							AiclawCommandPolicyService.DENIED_CLOSED + ":offlist:" + capabilityId);
 				return Decision.of(Verdict.OPEN, "command_policy_open:" + capabilityId);
 			default:
-				return Decision.of(Verdict.CLOSED, "command_policy_denied:unknown_state:" + capabilityId);
+				return Decision.of(Verdict.CLOSED,
+					AiclawCommandPolicyService.DENIED_CLOSED + ":unknown_state:" + capabilityId);
 		}
 	}
 
@@ -169,6 +179,7 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 		requireOwner(operatorUid, req.getAiclawUid());
 		long scope = req.getRoomId() == null ? AiclawCommandPolicy.SCOPE_DEFAULT : req.getRoomId();
 		if (scope < 0) throw new BizException("invalid_command_policy");
+		if (scope != AiclawCommandPolicy.SCOPE_DEFAULT) requireGroupScope(operatorUid, req.getAiclawUid(), scope);
 		Set<String> seen = new HashSet<>();
 		for (AiclawCommandPolicyUpdateReq.Item item : req.getItems()) {
 			validateItem(item, scope, seen);
@@ -234,6 +245,20 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 		if (operatorUid == null || aiclawUid == null) throw new BizException("command_policy_forbidden");
 		Long ownerUid = ownerCache.getOwnerUid(aiclawUid);
 		if (!operatorUid.equals(ownerUid)) throw new BizException("command_policy_forbidden");
+	}
+
+	/**
+	 * #504 P1-3：群覆盖写 membership 校验，沿用
+	 * {@code AiclawGroupConfigServiceImpl:86-99} 既有范式（直查 DB，不经缓存）：
+	 * 群存在 → 操作者在群 → 该 Agent 仍在群。拒绝信息与既有写路径风格一致。
+	 */
+	private void requireGroupScope(Long operatorUid, Long aiclawUid, long scope) {
+		RoomGroup roomGroup = roomGroupCache.getByRoomIdFromDb(scope);
+		if (roomGroup == null) throw new BizException("该AI助理不在此群中");
+		if (groupMemberDao.getMemberByGroupId(roomGroup.getId(), operatorUid) == null)
+			throw new BizException("您不在该群(roomId=" + scope + ")中，无法修改命令权限");
+		if (groupMemberDao.getMemberByGroupId(roomGroup.getId(), aiclawUid) == null)
+			throw new BizException("该AI助理不在此群中");
 	}
 
 	private List<AiclawCommandPolicy> loadRows(Long aiclawUid) {

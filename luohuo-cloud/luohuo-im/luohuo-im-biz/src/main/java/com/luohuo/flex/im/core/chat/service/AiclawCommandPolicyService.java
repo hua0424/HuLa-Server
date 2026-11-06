@@ -14,6 +14,16 @@ import java.util.Map;
  */
 public interface AiclawCommandPolicyService {
 
+	/**
+	 * #504 P1-2：门控拒绝码（下划线风格）。
+	 *
+	 * <p>唯一字面量源：前端 {@code frontend/src/hooks/useAgentCommands.ts} 以
+	 * {@code includes('command_policy_denied_approval'/'command_policy_denied_closed')} 匹配，
+	 * 后缀 {@code :capabilityId} 不影响匹配；改动本常量必须同步前端与两侧测试桩。
+	 */
+	String DENIED_CLOSED = "command_policy_denied_closed";
+	String DENIED_APPROVAL = "command_policy_denied_approval";
+
 	/** #504 判定终态：放行 / 需主人审批 / 拒绝。 */
 	enum Verdict {
 		OPEN,

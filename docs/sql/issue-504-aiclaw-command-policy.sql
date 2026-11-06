@@ -30,13 +30,20 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_command_policy`
     `version`       INT          NOT NULL DEFAULT 0 COMMENT '#504: 乐观锁版本，写时 +1',
     `is_del`        TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '逻辑删除（0=有效，1=已删除）',
     `create_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    `create_by`     BIGINT       DEFAULT NULL COMMENT '创建人',
     `update_time`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    `update_by`     BIGINT       DEFAULT NULL COMMENT '更新人',
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_aiclaw_room_cap` (`aiclaw_uid`, `room_id`, `capability_id`),
     KEY `idx_aiclaw_room` (`aiclaw_uid`, `room_id`)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = 'aichatoverview#504 Agent 命令调用权限（默认规则+群覆盖+指定名单）';
+
+-- 幂等重放：已用旧版 DDL 建表的实例补列（ADD COLUMN IF NOT EXISTS 可重跑；新建表时为 no-op）
+ALTER TABLE `im_aiclaw_command_policy`
+    ADD COLUMN IF NOT EXISTS `create_by` BIGINT DEFAULT NULL COMMENT '创建人',
+    ADD COLUMN IF NOT EXISTS `update_by` BIGINT DEFAULT NULL COMMENT '更新人';
 
 -- 验证（部署后 DB 断言）：
 --   SELECT COUNT(*) FROM im_aiclaw_command_policy WHERE is_del = 0;  -- 首发期望 0（默认规则为代码常量）
