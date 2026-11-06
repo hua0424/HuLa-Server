@@ -40,8 +40,8 @@ import static org.mockito.Mockito.*;
 /**
  * aichatoverview#504 主人命令权限判定矩阵。
  *
- * <p>冻结语义：群覆盖 mode=list 名单外=该群不可调用（不回落默认）；私聊忽略名单；
- * 主人恒过名单，主人调 approval_required=自批放行。
+ * <p>冻结语义：群覆盖 mode=list 名单外=该群不可调用（不回落默认，含主人）；私聊忽略名单；
+ * 名单内主人调 approval_required=自批放行。
  */
 @ExtendWith(MockitoExtension.class)
 class AiclawCommandPolicyServiceTest {
@@ -136,16 +136,37 @@ class AiclawCommandPolicyServiceTest {
 	}
 
 	@Test
-	@DisplayName("#504 群覆盖 open+list：名单外拒绝且不回落默认；主人恒过；私聊忽略名单")
+	@DisplayName("#504 群覆盖 open+list：名单外拒绝且不回落默认（含主人）；私聊忽略名单")
 	void groupRowList_offlistDenied_ownerPasses_dmIgnoresList() {
 		rows(row(GROUP, "skill:x", "open", "list", "[22]"));
 		assertTrue(service.decide(AGENT, GROUP, "skill:x", MEMBER, false).isOpen());
 		AiclawCommandPolicyService.Decision off = service.decide(AGENT, GROUP, "skill:x", OUTSIDER, false);
 		assertEquals(AiclawCommandPolicyService.Verdict.CLOSED, off.getVerdict());
 		assertTrue(off.getReason().contains("offlist"));
-		assertTrue(service.decide(AGENT, GROUP, "skill:x", OWNER, true).isOpen());
+		// F-504-D6：主人名单外同样拒绝（不豁免、不回落默认）。
+		AiclawCommandPolicyService.Decision ownerOff = service.decide(AGENT, GROUP, "skill:x", OWNER, true);
+		assertEquals(AiclawCommandPolicyService.Verdict.CLOSED, ownerOff.getVerdict());
+		assertTrue(ownerOff.getReason().contains("offlist"));
 		// 私聊忽略名单：非名单用户仍按默认开放。
 		assertTrue(service.decide(AGENT, 0, "skill:x", OUTSIDER, false).isOpen());
+	}
+
+	@Test
+	@DisplayName("#504 群覆盖 approval+list：名单外主人也拒绝；名单内主人自批、他人挂起")
+	void groupApprovalList_offlistDeniedEvenOwner_inlistOwnerSelfApproves() {
+		rows(row(GROUP, "session.reset", "approval_required", "list", "[22]"));
+		// 名单外主人：先过名单 → 拒绝（自批不豁免名单）。
+		AiclawCommandPolicyService.Decision ownerOff = service.decide(AGENT, GROUP, "session.reset", OWNER, true);
+		assertEquals(AiclawCommandPolicyService.Verdict.CLOSED, ownerOff.getVerdict());
+		assertTrue(ownerOff.getReason().contains("offlist"));
+		// 名单外他人：同样拒绝。
+		assertEquals(AiclawCommandPolicyService.Verdict.CLOSED,
+				service.decide(AGENT, GROUP, "session.reset", OUTSIDER, false).getVerdict());
+		// 名单内主人：自批放行。
+		assertTrue(service.decide(AGENT, GROUP, "session.reset", MEMBER, true).isOpen());
+		// 名单内他人：挂起（本票拒绝终态）。
+		assertEquals(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED,
+				service.decide(AGENT, GROUP, "session.reset", MEMBER, false).getVerdict());
 	}
 
 	@Test

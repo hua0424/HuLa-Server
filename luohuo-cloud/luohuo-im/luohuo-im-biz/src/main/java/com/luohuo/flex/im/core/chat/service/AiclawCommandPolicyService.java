@@ -67,7 +67,7 @@ public interface AiclawCommandPolicyService {
 	 * @param roomScope    0=默认规则/私聊；&gt;0=群 room_id（覆盖语义）
 	 * @param capabilityId 能力精确 id
 	 * @param callerUid    调用人类 uid
-	 * @param isOwner      调用人是否为该 Agent 主人（主人恒过名单；主人调 approval=自批放行）
+	 * @param isOwner      调用人是否为该 Agent 主人（名单先行含主人；名单内主人调 approval=自批放行）
 	 * @return 判定（open / approval_required / closed + 原因码）
 	 */
 	Decision decide(Long aiclawUid, long roomScope, String capabilityId, Long callerUid, boolean isOwner);
