@@ -10,6 +10,10 @@
 --   默认规则（代码常量，不落库）：skill:*→open；session.reset/session.compact/model.list/model.set→open；其余 command→closed。
 --   无存量数据，无需 grandfather 回填。
 --
+-- 幂等语义（MySQL 5.7/8.0 兼容）：整表 CREATE TABLE IF NOT EXISTS，
+-- 表已存在即整表跳过，不做列级 ALTER；本表为 #504 新引入表，无旧表缺列场景，
+-- 故不设 ADD COLUMN 重放守卫（MySQL 不支持 ADD COLUMN IF NOT EXISTS）。
+--
 -- ===========================================================================
 -- 部署顺序（务必按序执行）：
 --   1) DDL（CREATE TABLE IF NOT EXISTS，幂等，可重跑）
@@ -39,11 +43,6 @@ CREATE TABLE IF NOT EXISTS `im_aiclaw_command_policy`
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = 'aichatoverview#504 Agent 命令调用权限（默认规则+群覆盖+指定名单）';
-
--- 幂等重放：已用旧版 DDL 建表的实例补列（ADD COLUMN IF NOT EXISTS 可重跑；新建表时为 no-op）
-ALTER TABLE `im_aiclaw_command_policy`
-    ADD COLUMN IF NOT EXISTS `create_by` BIGINT DEFAULT NULL COMMENT '创建人',
-    ADD COLUMN IF NOT EXISTS `update_by` BIGINT DEFAULT NULL COMMENT '更新人';
 
 -- 验证（部署后 DB 断言）：
 --   SELECT COUNT(*) FROM im_aiclaw_command_policy WHERE is_del = 0;  -- 首发期望 0（默认规则为代码常量）
