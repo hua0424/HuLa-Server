@@ -73,6 +73,7 @@ public enum WSRespTypeEnum {
 	THINKING_DELTA("thinkingDelta", "thinking 增量", WSThinkingDelta.class), // S4 起废弃，不再广播、不复用
 	THINKING_END("thinkingEnd", "thinking 结束", WSThinkingEnd.class),
 	GROUP_CONFIG_CHANGE("groupConfigChange", "群配置变更", WSGroupConfigChange.class),
+	COMMAND_POLICY_CHANGE("commandPolicyChange", "aichatoverview#504 命令权限变更", WSCommandPolicyChange.class),
 
 	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class),
 	AICLAW_PERSONA_CHANGED("aiclawPersonaChanged", "AI助理人设变更", WSAiclawPersonaChanged.class),

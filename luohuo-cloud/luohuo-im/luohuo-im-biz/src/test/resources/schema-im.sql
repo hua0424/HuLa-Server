@@ -141,6 +141,27 @@ CREATE TABLE `im_aiclaw_group_config` (
   INDEX `idx_room_id` (`room_id`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'aiclaw 群聊配置表' ROW_FORMAT = Dynamic;
 
+-- aichatoverview#504: 主人命令权限表（默认规则+群覆盖+指定名单；默认规则为代码常量不落库）
+CREATE TABLE `im_aiclaw_command_policy` (
+  `id`            BIGINT NOT NULL COMMENT '主键（雪花ID）',
+  `tenant_id`     BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID',
+  `aiclaw_uid`    BIGINT NOT NULL COMMENT 'Agent 的 uid',
+  `room_id`       BIGINT NOT NULL DEFAULT 0 COMMENT '#504: 0=默认规则；>0=群 room_id 覆盖',
+  `capability_id` VARCHAR(128) NOT NULL COMMENT '#504: 能力标识（精确 id）',
+  `state`         VARCHAR(32) NOT NULL COMMENT '#504: open/closed/approval_required',
+  `mode`          VARCHAR(16) NULL DEFAULT NULL COMMENT '#504: 群覆盖名单模式 all/list',
+  `allowed_uids`  TEXT NULL DEFAULT NULL COMMENT '#504: mode=list 时的 uid JSON 数组',
+  `version`       INT NOT NULL DEFAULT 0 COMMENT '#504: 乐观锁版本',
+  `is_del`        TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除',
+  `create_time`   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `create_by`     BIGINT DEFAULT NULL COMMENT '创建人',
+  `update_time`   DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  `update_by`     BIGINT DEFAULT NULL COMMENT '更新人',
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `uk_aiclaw_room_cap` (`aiclaw_uid`, `room_id`, `capability_id`) USING BTREE,
+  INDEX `idx_aiclaw_room` (`aiclaw_uid`, `room_id`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = 'aichatoverview#504 Agent 命令权限表' ROW_FORMAT = Dynamic;
+
 CREATE TABLE `im_aiclaw_thinking` (
   `id`             BIGINT NOT NULL COMMENT '主键（雪花ID）',
   `tenant_id`      BIGINT NOT NULL DEFAULT 1 COMMENT '租户ID',

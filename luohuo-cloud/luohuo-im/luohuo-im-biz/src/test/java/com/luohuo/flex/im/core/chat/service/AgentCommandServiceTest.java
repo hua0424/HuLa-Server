@@ -6,6 +6,7 @@ import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.GroupRunAdmissionMapper;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
+import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.entity.*;
@@ -32,7 +33,9 @@ class AgentCommandServiceTest {
     private final GroupMemberDao members = mock(GroupMemberDao.class);
     private final GroupRunAdmissionService admission = mock(GroupRunAdmissionService.class);
     private final RoomGroupCache groups = mock(RoomGroupCache.class);
-    private final AgentCommandService service = new AgentCommandService(facts, admission, members, groups, redis, push, chat);
+    private final AiclawCommandPolicyService policies = mock(AiclawCommandPolicyService.class);
+    private final AiclawOwnerCache ownerCache = mock(AiclawOwnerCache.class);
+    private final AgentCommandService service = new AgentCommandService(facts, admission, members, groups, redis, push, chat, policies, ownerCache);
     private final Map<String,String> storage = new HashMap<>();
     private final ObjectMapper json = new ObjectMapper();
     private User human;
@@ -60,6 +63,15 @@ class AgentCommandServiceTest {
         when(push.submitPushMsg(any(), eq(30L), eq(11L))).thenReturn(PushSubmission.resolved(
                 PushSubmission.targetsOf("node", Map.of("device", 30L))));
         when(chat.sendMsg(any(), eq(11L))).thenReturn(123L);
+        // aichatoverview#504: 默认放行（各用例按需覆盖具体判定）。
+        lenient().when(policies.decide(any(), anyLong(), any(), any(), anyBoolean())).thenReturn(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.OPEN, "test-open"));
+        lenient().when(policies.permissionsFor(any(), anyLong(), any(), anyBoolean(), any())).thenAnswer(inv -> {
+            Map<String, String> permissions = new LinkedHashMap<>();
+            Collection<String> ids = inv.getArgument(4);
+            if (ids != null) for (String id : ids) permissions.put(id, "open");
+            return permissions;
+        });
     }
     @AfterEach void cleanup() { service.close(); ContextUtil.remove(); ContextUtil.clearTenantContext(); }
     private AgentCommand.Request request(String operation) {
@@ -414,6 +426,13 @@ class AgentCommandServiceTest {
     @Test void modelDiscoveryProjectsOnePageAndEnablesOnlySupportedCapabilityKinds() throws Exception {
         var r = request("discover"); r.setCapabilityId("model.set"); r.setParameters(Map.of("query", "org/", "offset", 100));
         assertEquals("accepted", service.submit(r).getStatus());
+        // aichatoverview#504: 真实判定形状——command:reset 默认 closed，从目录移除（ plumbing 由 map 驱动，判定矩阵见 AiclawCommandPolicyServiceTest）。
+        when(policies.permissionsFor(eq(30L), eq(0L), eq(11L), eq(false), any())).thenAnswer(inv -> {
+            Map<String, String> permissions = new LinkedHashMap<>();
+            for (String id : (Collection<String>) inv.getArgument(4))
+                if (!id.equals("command:reset")) permissions.put(id, "open");
+            return permissions;
+        });
         var c = callback(); c.setCatalog(json.readTree("""
                 {"version":"full-inventory","framework":"opencode","runtimeVersion":"1.17.9","capabilities":[
                  {"id":"model.set","kind":"model","name":"Model","supported":true,"executable":true},
@@ -424,11 +443,14 @@ class AgentCommandServiceTest {
                    "total":8944,"offset":100,"nextOffset":101,"privatePath":"discard"}}
                 """));
         var catalog = service.complete(c).getCatalog();
+        // aichatoverview#504: closed 条目从目录移除（command:reset 默认 closed），其余标注 permission=open。
+        assertEquals(3, catalog.path("capabilities").size());
         assertTrue(catalog.path("capabilities").get(0).path("executable").asBoolean());
         assertTrue(catalog.path("capabilities").get(1).path("executable").asBoolean());
         assertEquals("skill", catalog.path("capabilities").get(1).path("source").asText());
+        assertEquals("open", catalog.path("capabilities").get(1).path("permission").asText());
         assertTrue(catalog.path("capabilities").get(2).path("executable").asBoolean());
-        assertFalse(catalog.path("capabilities").get(3).path("executable").asBoolean());
+        assertFalse(catalog.toString().contains("command:reset"));
         assertEquals(8944, catalog.path("models").path("total").asInt());
         assertEquals("org/model", catalog.path("models").path("items").get(0).path("modelId").asText());
         assertFalse(catalog.path("models").path("items").get(0).path("connected").asBoolean());
@@ -464,7 +486,7 @@ class AgentCommandServiceTest {
     }
     @Test void catalogPreservesAdvisoryParametersWithoutEnablingExecution() throws Exception {
         service.submit(request("discover")); var c = callback();
-        c.setCatalog(json.readTree("{\"version\":\"v1\",\"framework\":\"opencode\",\"runtimeVersion\":\"1\",\"capabilities\":[{\"id\":\"command:reset\",\"kind\":\"command\",\"name\":\"Reset\",\"supported\":true,\"executable\":true,\"parameters\":[{\"name\":\"mode\",\"type\":\"string\",\"required\":false,\"private\":\"discard\"}]}]}"));
+        c.setCatalog(json.readTree("{\"version\":\"v1\",\"framework\":\"opencode\",\"runtimeVersion\":\"1\",\"capabilities\":[{\"id\":\"skill:advisory\",\"kind\":\"skill\",\"name\":\"Advisory\",\"source\":\"command\",\"supported\":true,\"executable\":true,\"parameters\":[{\"name\":\"mode\",\"type\":\"string\",\"required\":false,\"private\":\"discard\"}]}]}"));
         var entry = service.complete(c).getCatalog().path("capabilities").get(0);
         assertFalse(entry.path("executable").asBoolean());
         assertEquals(json.readTree("[{\"name\":\"mode\",\"type\":\"string\",\"required\":false}]"), entry.path("parameters"));
@@ -485,9 +507,27 @@ class AgentCommandServiceTest {
     }
     @Test void discoveryWhitelistsMetadataAndCannotAdvertiseExtraExecutables() throws Exception {
         service.submit(request("discover")); var c=callback();
-        c.setCatalog(json.readTree("{\"version\":\"v1\",\"framework\":\"opencode\",\"runtimeVersion\":\"1\",\"privatePath\":\"/secret\",\"capabilities\":[{\"id\":\"command:reset\",\"kind\":\"command\",\"name\":\"Reset\",\"supported\":true,\"executable\":true,\"defaultVisibility\":\"public\",\"scope\":\"workspace\",\"parameters\":[]}]}"));
+        c.setCatalog(json.readTree("{\"version\":\"v1\",\"framework\":\"opencode\",\"runtimeVersion\":\"1\",\"privatePath\":\"/secret\",\"capabilities\":[{\"id\":\"skill:advisory\",\"kind\":\"skill\",\"name\":\"Advisory\",\"supported\":true,\"executable\":true,\"defaultVisibility\":\"public\",\"scope\":\"workspace\",\"parameters\":[]}]}"));
         var catalog=service.complete(c).getCatalog();
         assertFalse(catalog.has("privatePath")); assertFalse(catalog.path("capabilities").get(0).path("executable").asBoolean());
         verifyNoInteractions(chat);
+    }
+    @Test void policyClosedInvokeDeniedBeforeDispatch() {
+        when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.CLOSED, "command_policy_denied:closed:model.list"));
+        var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
+        assertTrue(failure.getMessage().contains("command_policy_denied"));
+        verifyNoInteractions(push, chat);
+        assertTrue(storage.isEmpty(), "denied invoke writes no receipt");
+    }
+    @Test void policyApprovalRequiredDeniedForNonOwnerButOwnerSelfApproves() {
+        when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "command_policy_denied:approval_required:model.list"));
+        var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
+        assertTrue(failure.getMessage().contains("approval_required"));
+        when(ownerCache.getOwnerUid(30L)).thenReturn(11L);
+        when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(true))).thenReturn(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.OPEN, "command_policy_owner_self_approved:model.list"));
+        assertEquals("accepted", service.submit(request("invoke")).getStatus());
     }
 }

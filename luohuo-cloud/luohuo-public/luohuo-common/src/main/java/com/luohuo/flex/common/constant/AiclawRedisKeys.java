@@ -8,4 +8,6 @@ public final class AiclawRedisKeys {
     private AiclawRedisKeys() {}
     /** aiclaw 群配置缓存 key 前缀 */
     public static final String GROUP_CONFIG_PREFIX = "im:aiclaw:group:config:";
+    /** aichatoverview#504 命令权限缓存 key 前缀（值：该 Agent 显式覆盖行 JSON 数组） */
+    public static final String COMMAND_POLICY_PREFIX = "im:aiclaw:command:policy:";
 }
