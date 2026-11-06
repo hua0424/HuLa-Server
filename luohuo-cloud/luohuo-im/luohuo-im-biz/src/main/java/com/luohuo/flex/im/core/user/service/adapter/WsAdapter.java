@@ -123,6 +123,16 @@ public class WsAdapter {
 	}
 
 	/**
+	 * aichatoverview#504: 命令权限变更 WS 推送（失效通知；收到后重拉权限视图/目录）
+	 */
+	public static WsBaseResp<WSCommandPolicyChange> buildCommandPolicyChange(WSCommandPolicyChange change) {
+		WsBaseResp<WSCommandPolicyChange> wsBaseResp = new WsBaseResp<>();
+		wsBaseResp.setType(WSRespTypeEnum.COMMAND_POLICY_CHANGE.getType());
+		wsBaseResp.setData(change);
+		return wsBaseResp;
+	}
+
+	/**
 	 * #188 F2: aiclaw 人设变更 WS 推送（失效通知；plugins 收到后应重拉 self/persona）
 	 */
 	public static WsBaseResp<WSAiclawPersonaChanged> buildAiclawPersonaChanged(WSAiclawPersonaChanged change) {

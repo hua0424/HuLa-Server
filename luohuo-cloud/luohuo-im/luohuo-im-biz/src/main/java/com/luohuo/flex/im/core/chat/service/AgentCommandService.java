@@ -8,6 +8,7 @@ import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.GroupRunAdmissionMapper;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
+import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
 import com.luohuo.flex.im.domain.entity.*;
@@ -47,6 +48,9 @@ public class AgentCommandService {
     private final StringRedisTemplate redis;
     private final PushService push;
     private final ChatService chat;
+    // aichatoverview#504: 主人命令权限门控（server 公共层唯一判定点）。
+    private final AiclawCommandPolicyService policies;
+    private final AiclawOwnerCache ownerCache;
     // ponytail: one short-lived timer per accepted request; Redis remains authoritative after restart.
     private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "agent-command-deadline"); t.setDaemon(true); return t;
@@ -78,6 +82,17 @@ public class AgentCommandService {
         if (previous != null) return replay(previous, request, actor, tenant);
         var allowed = admission.admitGroupRun(target, roomId, tenant, null);
         if (allowed == null || !allowed.admitted()) throw new BizException("command_forbidden");
+        // aichatoverview#504: invoke 走主人权限门控（默认放行入口能力；名单外/关闭/他人审批在此拒绝）。
+        // discover 不拦截：目录在 complete() 过滤+标注，未放行能力不下发。
+        if ("invoke".equals(request.getOperation())) {
+            boolean owner = Objects.equals(ownerCache.getOwnerUid(target), actor);
+            long scope = room.getType() == 2 ? 0L : roomId;
+            var decision = policies.decide(target, scope, request.getCapabilityId(), actor, owner);
+            if (decision == null || decision.getVerdict() == AiclawCommandPolicyService.Verdict.CLOSED)
+                throw new BizException(AiclawCommandPolicyService.DENIED_CLOSED + ":" + request.getCapabilityId());
+            if (decision.getVerdict() == AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
+                throw new BizException(AiclawCommandPolicyService.DENIED_APPROVAL + ":" + request.getCapabilityId());
+        }
         Pending pending = new Pending(); pending.setRequest(request); pending.setActor(actor); pending.setTenant(tenant);
         pending.setEpoch(allowed.getAuthorizationEpoch()); pending.setDeadline(System.currentTimeMillis() + DEADLINE_MS);
         // A private stable receipt cannot be preoccupied through a client-chosen ordinary message ID.
@@ -210,7 +225,7 @@ public class AgentCommandService {
                     p.setFeedbackMessageId(null); p.getResult().setReconciled(true);
                 }
                 JsonNode catalog = "discover".equals(p.getRequest().getOperation()) && "completed".equals(callback.getStatus())
-                        ? catalog(callback.getCatalog()) : null;
+                        ? policyCatalog(p, callback.getCatalog()) : null;
                 outcome(p, callback.getStatus(), catalog,
                         Set.of("completed", "noop").contains(callback.getStatus()) ? safeText(callback.getText(), 2000)
                                 : "unknown".equals(callback.getStatus()) && "ambiguous_compaction".equals(callback.getError())
@@ -588,6 +603,31 @@ public class AgentCommandService {
                         .put("label", safeText(model.path("label").asText(), 256)).put("connected", model.path("connected").asBoolean());
             }
         }
+        return out;
+    }
+    /**
+     * aichatoverview#504: 目录过滤+标注。先走 #503 消毒，再按主人权限：
+     * closed 条目移除（菜单不可见）；open/approval_required 标注 permission（菜单渲染与审批标记用）。
+     */
+    private JsonNode policyCatalog(Pending p, JsonNode nodeCatalog) {
+        JsonNode sanitized = catalog(nodeCatalog);
+        if (!(sanitized instanceof ObjectNode out) || !sanitized.path("capabilities").isArray()) return sanitized;
+        Long target = id(p.getRequest().getAiclawUid());
+        long roomId = id(p.getRequest().getRoomId());
+        Object roomType = p.getContext() == null ? null : p.getContext().get("roomType");
+        long scope = roomType instanceof Number type && type.intValue() == 2 ? 0L : roomId;
+        boolean owner = Objects.equals(ownerCache.getOwnerUid(target), p.getActor());
+        List<String> ids = new ArrayList<>();
+        for (JsonNode c : sanitized.path("capabilities")) ids.add(c.path("id").asText());
+        Map<String, String> permissions = policies.permissionsFor(target, scope, p.getActor(), owner, ids);
+        var kept = JSON.createArrayNode();
+        for (JsonNode c : sanitized.path("capabilities")) {
+            String permission = permissions.get(c.path("id").asText());
+            if (permission == null) continue; // closed → 目录过滤移除。
+            ((ObjectNode) c).put("permission", permission);
+            kept.add(c);
+        }
+        out.set("capabilities", kept);
         return out;
     }
     private static long catalogInteger(JsonNode node) {
