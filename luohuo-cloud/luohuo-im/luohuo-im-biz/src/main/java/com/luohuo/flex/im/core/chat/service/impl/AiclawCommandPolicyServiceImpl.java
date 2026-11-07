@@ -1,6 +1,7 @@
 package com.luohuo.flex.im.core.chat.service.impl;
 
 import cn.hutool.json.JSONUtil;
+import cn.hutool.crypto.digest.DigestUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.common.constant.AiclawRedisKeys;
@@ -66,6 +67,27 @@ public class AiclawCommandPolicyServiceImpl implements AiclawCommandPolicyServic
 	@Override
 	public Decision decide(Long aiclawUid, long roomScope, String capabilityId, Long callerUid, boolean isOwner) {
 		return resolve(loadRows(aiclawUid), roomScope, capabilityId, callerUid, isOwner);
+	}
+
+	@Override
+	public AiclawCommandPolicyService.Snapshot snapshot(Long aiclawUid, long roomScope, String capabilityId,
+			Long callerUid, boolean isOwner) {
+		// #505: 审批冻结/下发前复核必须读权威行，不能接受缓存中的旧版本。
+		List<AiclawCommandPolicy> rows = aiclawUid == null || aiclawUid <= 0 ? List.of()
+				: mapper.selectList(new LambdaQueryWrapper<AiclawCommandPolicy>()
+						.eq(AiclawCommandPolicy::getAiclawUid, aiclawUid));
+		Decision decision = resolve(rows, roomScope, capabilityId, callerUid, isOwner);
+		StringBuilder canonical = new StringBuilder("policy-v1");
+		for (AiclawCommandPolicy row : rows) {
+			if (!Objects.equals(capabilityId, row.getCapabilityId())) continue;
+			long rowScope = row.getRoomId() == null ? AiclawCommandPolicy.SCOPE_DEFAULT : row.getRoomId();
+			if (rowScope != AiclawCommandPolicy.SCOPE_DEFAULT && rowScope != roomScope) continue;
+			canonical.append('|').append(row.getId()).append(':').append(rowScope).append(':')
+					.append(row.getState()).append(':').append(row.getMode()).append(':')
+					.append(row.getAllowedUids()).append(':').append(row.getVersion()).append(':')
+					.append(row.getUpdateTime());
+		}
+		return new AiclawCommandPolicyService.Snapshot(decision, DigestUtil.sha256Hex(canonical.toString()));
 	}
 
 	@Override

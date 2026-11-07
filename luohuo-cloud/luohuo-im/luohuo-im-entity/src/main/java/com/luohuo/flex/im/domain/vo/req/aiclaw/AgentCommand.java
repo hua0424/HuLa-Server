@@ -55,6 +55,22 @@ public final class AgentCommand {
         private Effect effect;
         private Integer receiptRevision;
         private Boolean reconciled;
+        // aichatoverview#505: approval state is independent of execution state.
+        private String approvalStatus;
+        private Long expiresAt;
+    }
+
+    /** aichatoverview#505: owner-scoped pending approval view. */
+    @Data
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public static class Approval {
+        private String requestId;
+        private String roomId;
+        private String aiclawUid;
+        private String capabilityId;
+        private Map<String, Object> parameters;
+        private String callerUid;
+        private Long expiresAt;
     }
 
     @Data

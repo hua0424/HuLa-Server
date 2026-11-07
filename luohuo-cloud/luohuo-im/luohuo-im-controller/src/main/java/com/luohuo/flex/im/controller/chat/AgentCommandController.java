@@ -8,6 +8,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @RestController
 @RequestMapping("/aiclaw/commands")
 @RequiredArgsConstructor
@@ -23,6 +25,24 @@ public class AgentCommandController {
     @GetMapping("/{requestId}")
     public R<AgentCommand.Result> get(@PathVariable String requestId) {
         return R.success(commands.get(requestId));
+    }
+
+    /** #505: 主人待审批列表；tenant 与 owner 由当前登录身份绑定。 */
+    @GetMapping("/approvals")
+    public R<List<AgentCommand.Approval>> approvals() {
+        return R.success(commands.approvals());
+    }
+
+    /** #505: 空 body 批准冻结请求；只能由该 Agent 主人调用，重复批准幂等。 */
+    @PostMapping("/{requestId}/approve")
+    public R<AgentCommand.Result> approve(@PathVariable String requestId) {
+        return R.success(commands.approve(requestId));
+    }
+
+    /** #505: 空 body 拒绝；不执行，立即解锁发起人当前输入框。 */
+    @PostMapping("/{requestId}/reject")
+    public R<AgentCommand.Result> reject(@PathVariable String requestId) {
+        return R.success(commands.reject(requestId));
     }
 
     @PostMapping("/result")

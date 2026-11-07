@@ -74,6 +74,8 @@ public enum WSRespTypeEnum {
 	THINKING_END("thinkingEnd", "thinking 结束", WSThinkingEnd.class),
 	GROUP_CONFIG_CHANGE("groupConfigChange", "群配置变更", WSGroupConfigChange.class),
 	COMMAND_POLICY_CHANGE("commandPolicyChange", "aichatoverview#504 命令权限变更", WSCommandPolicyChange.class),
+	COMMAND_APPROVAL_REQUEST("commandApprovalRequest", "aichatoverview#505 主人待审批命令", WSCommandApproval.class),
+	COMMAND_APPROVAL_RESULT("commandApprovalResult", "aichatoverview#505 审批结果（解锁发起人输入框）", WSCommandApproval.class),
 
 	AICLAW_AUTH_REQUEST("aiclawAuthRequest", "AI助理授权请求", WSAiclawAuthRequest.class),
 	AICLAW_PERSONA_CHANGED("aiclawPersonaChanged", "AI助理人设变更", WSAiclawPersonaChanged.class),

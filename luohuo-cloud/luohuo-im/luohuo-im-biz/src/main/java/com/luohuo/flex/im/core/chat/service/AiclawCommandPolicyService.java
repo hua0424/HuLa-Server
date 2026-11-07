@@ -73,6 +73,18 @@ public interface AiclawCommandPolicyService {
 	Decision decide(Long aiclawUid, long roomScope, String capabilityId, Long callerUid, boolean isOwner);
 
 	/**
+	 * #505: 审批冻结快照。fingerprint 覆盖决定该能力的有效行（含版本/更新时间/名单）；
+	 * 判定即便不变，行内容变化也会使旧待审失效。
+	 */
+	record Snapshot(Decision decision, String fingerprint) {
+	}
+
+	/**
+	 * #505: 绕过 Redis 缓存，直接从权威表读取并计算判定 + 指纹。
+	 */
+	Snapshot snapshot(Long aiclawUid, long roomScope, String capabilityId, Long callerUid, boolean isOwner);
+
+	/**
 	 * #504: 批量判定（目录过滤/标注用）。返回 capabilityId -&gt; permission（open/approval_required）；
 	 * closed 项不在 map 中（调用方移除）。
 	 */
