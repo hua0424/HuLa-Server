@@ -133,6 +133,26 @@ public class WsAdapter {
 	}
 
 	/**
+	 * aichatoverview#505: 新待审批命令推给主人。
+	 */
+	public static WsBaseResp<WSCommandApproval> buildCommandApprovalRequest(WSCommandApproval approval) {
+		WsBaseResp<WSCommandApproval> wsBaseResp = new WsBaseResp<>();
+		wsBaseResp.setType(WSRespTypeEnum.COMMAND_APPROVAL_REQUEST.getType());
+		wsBaseResp.setData(approval);
+		return wsBaseResp;
+	}
+
+	/**
+	 * aichatoverview#505: 审批终态推给发起人，仅用于立即解除当前房间输入框等待。
+	 */
+	public static WsBaseResp<WSCommandApproval> buildCommandApprovalResult(WSCommandApproval approval) {
+		WsBaseResp<WSCommandApproval> wsBaseResp = new WsBaseResp<>();
+		wsBaseResp.setType(WSRespTypeEnum.COMMAND_APPROVAL_RESULT.getType());
+		wsBaseResp.setData(approval);
+		return wsBaseResp;
+	}
+
+	/**
 	 * #188 F2: aiclaw 人设变更 WS 推送（失效通知；plugins 收到后应重拉 self/persona）
 	 */
 	public static WsBaseResp<WSAiclawPersonaChanged> buildAiclawPersonaChanged(WSAiclawPersonaChanged change) {

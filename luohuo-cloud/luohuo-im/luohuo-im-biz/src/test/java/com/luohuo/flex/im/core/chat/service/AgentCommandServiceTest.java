@@ -17,6 +17,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.SetOperations;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.RedisScript;
 import java.time.Duration;
@@ -28,6 +29,7 @@ class AgentCommandServiceTest {
     private final GroupRunAdmissionMapper facts = mock(GroupRunAdmissionMapper.class);
     private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
     private final ValueOperations<String,String> values = mock(ValueOperations.class);
+    private final SetOperations<String,String> sets = mock(SetOperations.class);
     private final PushService push = mock(PushService.class);
     private final ChatService chat = mock(ChatService.class);
     private final GroupMemberDao members = mock(GroupMemberDao.class);
@@ -53,6 +55,8 @@ class AgentCommandServiceTest {
         when(admission.admitGroupRun(eq(30L), eq(20L), eq(1L), any())).thenReturn(
                 GroupRunAdmissionService.Admission.builder().outcome("ADMITTED").authorizationEpoch("epoch-1").build());
         when(redis.opsForValue()).thenReturn(values);
+        when(redis.opsForSet()).thenReturn(sets);
+        when(sets.add(anyString(), anyString())).thenReturn(1L);
         when(values.get(anyString())).thenAnswer(i -> storage.get(i.getArgument(0)));
         when(values.setIfAbsent(anyString(), anyString(), eq(Duration.ofHours(24))))
                 .thenAnswer(i -> storage.putIfAbsent(i.getArgument(0), i.getArgument(1)) == null);
@@ -520,14 +524,133 @@ class AgentCommandServiceTest {
         verifyNoInteractions(push, chat);
         assertTrue(storage.isEmpty(), "denied invoke writes no receipt");
     }
-    @Test void policyApprovalRequiredDeniedForNonOwnerButOwnerSelfApproves() {
+    @Test void policyApprovalRequiredReturnsPendingForOtherOwnerAndSelfApproves() {
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
                 AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, AiclawCommandPolicyService.DENIED_APPROVAL + "_required:model.list"));
-        var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
-        assertTrue(failure.getMessage().contains(AiclawCommandPolicyService.DENIED_APPROVAL));
+        when(ownerCache.getOwnerUid(30L)).thenReturn(99L);
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                new AiclawCommandPolicyService.Snapshot(
+                        AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"), "fp-1"));
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        assertEquals("pending", pending.getApprovalStatus());
+        assertTrue(pending.getExpiresAt() >= System.currentTimeMillis() + 59_000);
+        verify(push, times(1)).submitPushMsg(any(), eq(99L), eq(11L));
+        verify(push, never()).submitPushMsg(any(), eq(30L), eq(11L));
+        // 主人自己命中的是 #504 自批快速路径，不产生待审批。
         when(ownerCache.getOwnerUid(30L)).thenReturn(11L);
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(true))).thenReturn(
                 AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.OPEN, "command_policy_owner_self_approved:model.list"));
-        assertEquals("accepted", service.submit(request("invoke")).getStatus());
+        var direct = request("invoke"); direct.setRequestId("req-owner");
+        assertEquals("accepted", service.submit(direct).getStatus());
+    }
+
+    @Test void ownerApprovesFrozenRequestExactlyOnceAndUnlocksViaWsAndMessage() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        asOwner();
+        assertEquals("accepted", service.approve("req-1").getStatus());
+        assertEquals("approved", service.approve("req-1").getApprovalStatus());
+        // approve 只允许一次真实下发：第二次是幂等读。
+        assertEquals("approved", service.approve("req-1").getApprovalStatus());
+        verify(push, times(1)).submitPushMsg(argThat(ws -> !ws.getType().equals("commandApprovalRequest")
+                && !ws.getType().equals("commandApprovalResult")), eq(30L), eq(11L));
+        verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
+    }
+
+    @Test void ownerRejectExpiresNeverDispatchAndNewRequestNeedsNewId() throws Exception {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        asOwner();
+        assertEquals("noop", service.reject("req-1").getStatus());
+        assertEquals("rejected", service.reject("req-1").getApprovalStatus());
+        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+        ContextUtil.setUid(11L);
+        var again = request("invoke"); again.setRequestId("req-2");
+        assertEquals("pending", service.submit(again).getStatus());
+        // 过期：真实时钟越过冻结的 expiresAt，GET 只做 CAS 收敛，不执行。
+        String key = storage.keySet().stream().filter(k -> k.endsWith(":req-2")).findFirst().orElseThrow();
+        var pending = json.readValue(storage.get(key), AgentCommandService.Pending.class);
+        pending.setExpiresAt(1L); storage.put(key, json.writeValueAsString(pending));
+        var expired = service.get("req-2");
+        assertEquals("noop", expired.getStatus());
+        assertEquals("expired", expired.getApprovalStatus());
+        assertEquals("expired", service.get("req-2").getApprovalStatus());
+        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+    }
+
+    @Test void ownerCanApproveExactlyAtDeadlineButNotAfterAndDuplicateNeverDispatchesTwice() throws Exception {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        String key = storage.keySet().iterator().next();
+        var pending = json.readValue(storage.get(key), AgentCommandService.Pending.class);
+        pending.setExpiresAt(1L); storage.put(key, json.writeValueAsString(pending));
+        asOwner();
+        assertEquals("expired", service.approve("req-1").getApprovalStatus());
+        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+    }
+
+    @Test void policyFingerprintChangeInvalidatesEvenWhenVerdictStaysApprovalRequired() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                new AiclawCommandPolicyService.Snapshot(
+                        AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"), "fp-2"));
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("noop", result.getStatus());
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+    }
+
+    @Test void thirdPartyCannotListReadApproveOrRejectAnotherOwnersRequest() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        when(sets.members("aiclaw:approval:pending:1:99")).thenReturn(new LinkedHashSet<>(List.of("req-1")));
+        var other = new User(); other.setId(12L); other.setTenantId(1L); other.setState(0); other.setUserType(3);
+        when(facts.selectUser(12L)).thenReturn(other);
+        ContextUtil.setUid(12L);
+        assertThrows(BizException.class, () -> service.get("req-1"));
+        assertThrows(BizException.class, () -> service.approve("req-1"));
+        assertThrows(BizException.class, () -> service.reject("req-1"));
+        assertTrue(service.approvals().isEmpty());
+        asOwner();
+        assertEquals(1, service.approvals().size());
+        assertEquals("req-1", service.approvals().get(0).getRequestId());
+    }
+
+    @Test void ownerListReReadsAndDropsMissingOrTerminalEntriesWithoutHidingLaterRequests() throws Exception {
+        when(sets.members("aiclaw:approval:pending:1:99")).thenReturn(new LinkedHashSet<>(List.of("gone-1", "req-1")));
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        asOwner();
+        var list = service.approvals();
+        assertEquals(1, list.size());
+        assertEquals("req-1", list.get(0).getRequestId());
+        verify(sets).remove("aiclaw:approval:pending:1:99", "gone-1");
+    }
+
+    private void asOwner() {
+        ContextUtil.setUid(99L);
+        when(facts.selectUser(99L)).thenReturn(owner());
+    }
+
+    private User owner() {
+        User owner = new User();
+        owner.setId(99L);
+        owner.setTenantId(1L);
+        owner.setState(0);
+        owner.setUserType(3);
+        return owner;
+    }
+
+    private void approvalPending(String fingerprint) {
+        when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"));
+        when(ownerCache.getOwnerUid(30L)).thenReturn(99L);
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                new AiclawCommandPolicyService.Snapshot(
+                        AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"), fingerprint));
     }
 }

@@ -9,6 +9,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.List;
 import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -53,5 +55,28 @@ class AgentCommandControllerTest {
                 .header(ThinkingInternalAuth.ACTOR, "30").header(ContextConstants.HEADER_TENANT_ID, "1"))
                 .andExpect(status().isOk());
         verify(service).complete(any());
+    }
+
+    @Test void approvalEndpointsStayOwnerScopedAndLiterallyRouted() throws Exception {
+        var service = mock(AgentCommandService.class); var auth = new ThinkingInternalAuth();
+        var mvc = MockMvcBuilders.standaloneSetup(new AgentCommandController(service, auth)).build();
+        var approval = new AgentCommand.Approval();
+        approval.setRequestId("req-1"); approval.setRoomId("20"); approval.setAiclawUid("30");
+        approval.setCapabilityId("model.list"); approval.setCallerUid("11"); approval.setExpiresAt(60_000L);
+        when(service.approvals()).thenReturn(List.of(approval));
+        var approved = new AgentCommand.Result(); approved.setRequestId("req-1"); approved.setApprovalStatus("approved");
+        when(service.approve("req-1")).thenReturn(approved);
+        var rejected = new AgentCommand.Result(); rejected.setRequestId("req-1"); rejected.setApprovalStatus("rejected");
+        when(service.reject("req-1")).thenReturn(rejected);
+
+        mvc.perform(get("/aiclaw/commands/approvals"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].callerUid").value("11"));
+        verify(service, never()).get("approvals");
+        mvc.perform(post("/aiclaw/commands/req-1/approve").contentType("application/json"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.approvalStatus").value("approved"));
+        mvc.perform(post("/aiclaw/commands/req-1/reject").contentType("application/json"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.approvalStatus").value("rejected"));
+        verify(service).approve("req-1");
+        verify(service).reject("req-1");
     }
 }

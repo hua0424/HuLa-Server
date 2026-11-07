@@ -8,6 +8,7 @@ import com.luohuo.basic.exception.BizException;
 import com.luohuo.flex.im.core.chat.dao.GroupMemberDao;
 import com.luohuo.flex.im.core.chat.mapper.GroupRunAdmissionMapper;
 import com.luohuo.flex.im.core.chat.service.cache.RoomGroupCache;
+import com.luohuo.flex.im.core.user.service.adapter.WsAdapter;
 import com.luohuo.flex.im.core.user.service.cache.AiclawOwnerCache;
 import com.luohuo.flex.im.core.user.service.dto.PushSubmission;
 import com.luohuo.flex.im.core.user.service.impl.PushService;
@@ -15,6 +16,7 @@ import com.luohuo.flex.im.domain.entity.*;
 import com.luohuo.flex.im.domain.vo.req.aiclaw.AgentCommand;
 import com.luohuo.flex.im.domain.vo.request.ChatMessageReq;
 import com.luohuo.flex.model.entity.WsBaseResp;
+import com.luohuo.flex.model.entity.ws.WSCommandApproval;
 import jakarta.annotation.PreDestroy;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -37,6 +39,9 @@ public class AgentCommandService {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration RETENTION = Duration.ofHours(24);
     private static final long DEADLINE_MS = 20_000;
+    /** aichatoverview#505: 主人审批窗口固定 60s，不因重复提交/刷新/GET 续期。 */
+    private static final long APPROVAL_MS = 60_000;
+    private static final String APPROVAL_PENDING = "pending";
     private static final DefaultRedisScript<Long> CAS = new DefaultRedisScript<>(
             "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end " +
             "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
@@ -69,6 +74,14 @@ public class AgentCommandService {
         private String feedbackReceiptId;
         private AgentCommand.Result previousResult;
         private Long previousFeedbackMessageId;
+        // aichatoverview#505: approval_pending 是独立于执行态的前置态。
+        private String approvalStatus;
+        private Long expiresAt;
+        private Long ownerUid;
+        private String policyFingerprint;
+        private String generation;
+        private Long approvalFeedbackMessageId;
+        private String approvalFeedbackReceiptId;
     }
 
     public AgentCommand.Result submit(AgentCommand.Request request) {
@@ -84,23 +97,57 @@ public class AgentCommandService {
         if (allowed == null || !allowed.admitted()) throw new BizException("command_forbidden");
         // aichatoverview#504: invoke 走主人权限门控（默认放行入口能力；名单外/关闭/他人审批在此拒绝）。
         // discover 不拦截：目录在 complete() 过滤+标注，未放行能力不下发。
+        boolean needsApproval = false;
+        Long ownerUid = null;
+        String policyFingerprint = null;
+        String expectedGeneration = null;
         if ("invoke".equals(request.getOperation())) {
             boolean owner = Objects.equals(ownerCache.getOwnerUid(target), actor);
             long scope = room.getType() == 2 ? 0L : roomId;
             var decision = policies.decide(target, scope, request.getCapabilityId(), actor, owner);
             if (decision == null || decision.getVerdict() == AiclawCommandPolicyService.Verdict.CLOSED)
                 throw new BizException(AiclawCommandPolicyService.DENIED_CLOSED + ":" + request.getCapabilityId());
-            if (decision.getVerdict() == AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
-                throw new BizException(AiclawCommandPolicyService.DENIED_APPROVAL + ":" + request.getCapabilityId());
+            if (decision.getVerdict() == AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED) {
+                // #505: 他人调用进入 60s 审批前置态；冻结权威策略行指纹与最后已知会话代次。
+                ownerUid = ownerCache.getOwnerUid(target);
+                var snapshot = ownerUid == null ? null
+                        : policies.snapshot(target, scope, request.getCapabilityId(), actor, owner);
+                if (snapshot == null || snapshot.decision().getVerdict()
+                        != AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
+                    throw new BizException(AiclawCommandPolicyService.DENIED_APPROVAL + ":" + request.getCapabilityId());
+                needsApproval = true;
+                policyFingerprint = snapshot.fingerprint();
+                expectedGeneration = generation(tenant, target, roomId);
+            }
         }
         Pending pending = new Pending(); pending.setRequest(request); pending.setActor(actor); pending.setTenant(tenant);
-        pending.setEpoch(allowed.getAuthorizationEpoch()); pending.setDeadline(System.currentTimeMillis() + DEADLINE_MS);
+        long now = System.currentTimeMillis();
+        pending.setEpoch(allowed.getAuthorizationEpoch());
         // A private stable receipt cannot be preoccupied through a client-chosen ordinary message ID.
         pending.setFeedbackReceiptId("command:" + UUID.randomUUID());
+        // 审批只对真实可执行的能力有意义；不可执行能力不进入 pending，避免审批通过后才失败。
+        if (needsApproval && !callable(request.getCapabilityId()))
+            throw new BizException("execution_not_connected");
         AgentCommand.Result result = new AgentCommand.Result();
         result.setRequestId(request.getRequestId()); result.setRoomId(request.getRoomId());
-        result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation()); result.setStatus("accepted");
-        result.setPhase("dispatch");
+        result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation());
+        if (needsApproval) {
+            pending.setApprovalStatus(APPROVAL_PENDING);
+            pending.setExpiresAt(now + APPROVAL_MS);
+            pending.setOwnerUid(ownerUid);
+            pending.setPolicyFingerprint(policyFingerprint);
+            pending.setGeneration(expectedGeneration);
+            pending.setApprovalFeedbackReceiptId("approval:" + UUID.randomUUID());
+            // 审批期间不能触发执行超时；批准时再重置为执行 deadline。
+            pending.setDeadline(now + APPROVAL_MS + DEADLINE_MS);
+            result.setStatus("pending");
+            result.setApprovalStatus(APPROVAL_PENDING);
+            result.setExpiresAt(pending.getExpiresAt());
+        } else {
+            pending.setDeadline(now + DEADLINE_MS);
+            result.setStatus("accepted");
+            result.setPhase("dispatch");
+        }
         pending.setResult(result);
         pending.setContext(frozenContext(room, human, target, actor, allowed));
         String raw = encode(pending);
@@ -112,10 +159,22 @@ public class AgentCommandService {
         if ("invoke".equals(request.getOperation()) && !callable(request.getCapabilityId())) {
             return finish(raw, "unsupported", null, null, "execution_not_connected").getResult();
         }
+        if (needsApproval) {
+            indexApproval(pending);
+            notifyApproval(pending, true);
+            // deadline 同时承担审批过期采样；真实 expire 由 CAS 决定唯一赢家。
+            deadlines.schedule(() -> expire(tenant, request.getRequestId()), APPROVAL_MS, TimeUnit.MILLISECONDS);
+            return result;
+        }
+        return dispatch(pending, raw);
+    }
+
+    /** #505: 审批通过后的唯一一次真实下发；调用方必须已赢得 approved CAS。 */
+    private AgentCommand.Result dispatch(Pending pending, String raw) {
         if (pending.getContext() == null) return finish(raw, "unknown", null, null, "authorization_changed").getResult();
         WsBaseResp<JsonNode> ws = commandMessage(pending, false);
         try {
-            PushSubmission submitted = push.submitPushMsg(ws, target, actor);
+            PushSubmission submitted = push.submitPushMsg(ws, id(pending.getRequest().getAiclawUid()), pending.getActor());
             if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED)
                 return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
             if (submitted.getRouteStatus() == PushSubmission.RouteStatus.NO_TARGET)
@@ -126,17 +185,302 @@ public class AgentCommandService {
             // A throwing transport can have submitted already. Never resend a native command.
             return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
         }
-        deadlines.schedule(() -> expire(tenant, request.getRequestId()), DEADLINE_MS, TimeUnit.MILLISECONDS);
-        return result; // Submission is not delivery, much less native completion.
+        long tenant = pending.getTenant();
+        deadlines.schedule(() -> expire(tenant, pending.getRequest().getRequestId()), DEADLINE_MS, TimeUnit.MILLISECONDS);
+        return pending.getResult();
     }
 
     public AgentCommand.Result get(String requestId) {
         Long actor = ContextUtil.getUid(), tenant = ContextUtil.getTenantId();
         requireHuman(actor, tenant); validRequestId(requestId);
         String raw = requiredRaw(tenant, requestId); Pending p = decode(raw);
-        if (!Objects.equals(p.getActor(), actor)) throw new BizException("command_not_found");
-        requireConversation(actor, tenant, id(p.getRequest().getRoomId()), id(p.getRequest().getAiclawUid()));
-        return reconcile(settle(raw));
+        boolean caller = Objects.equals(p.getActor(), actor);
+        // #505: owner may read/approve without being a member of the caller's conversation.
+        if (!caller && (!Objects.equals(p.getOwnerUid(), actor)
+                || !Objects.equals(ownerCache.getOwnerUid(id(p.getRequest().getAiclawUid())), actor)))
+            throw new BizException("command_not_found");
+        if (caller) requireConversation(actor, tenant, id(p.getRequest().getRoomId()), id(p.getRequest().getAiclawUid()));
+        Pending settled = settle(raw);
+        return caller ? reconcile(settled) : settled.getResult();
+    }
+
+    /** #505: 主人批准；空 body，只能作用于冻结的请求，重复批准幂等。 */
+    public AgentCommand.Result approve(String requestId) {
+        return decide(requestId, true);
+    }
+
+    /** #505: 主人拒绝；不执行，立即解锁发起人当前输入框。 */
+    public AgentCommand.Result reject(String requestId) {
+        return decide(requestId, false);
+    }
+
+    /** #505: 主人待审批列表（tenant + owner 隔离；知道 requestId 不等于有权限）。 */
+    public List<AgentCommand.Approval> approvals() {
+        Long actor = ContextUtil.getUid(), tenant = ContextUtil.getTenantId();
+        requireHuman(actor, tenant);
+        String index = approvalIndexKey(tenant, actor);
+        Set<String> ids;
+        try {
+            ids = redis.opsForSet().members(index);
+        } catch (RuntimeException e) {
+            throw new BizException("command_store_unavailable");
+        }
+        List<AgentCommand.Approval> result = new ArrayList<>();
+        if (ids == null) return result;
+        long now = System.currentTimeMillis();
+        for (String requestId : ids) {
+            try { validRequestId(requestId); } catch (BizException invalid) { removeApprovalIndex(tenant, actor, requestId); continue; }
+            String raw = redis.opsForValue().get(key(tenant, requestId));
+            if (raw == null) { removeApprovalIndex(tenant, actor, requestId); continue; }
+            Pending p = decode(raw);
+            if (!Objects.equals(p.getOwnerUid(), actor) || !APPROVAL_PENDING.equals(p.getApprovalStatus())
+                    || !Objects.equals(ownerCache.getOwnerUid(id(p.getRequest().getAiclawUid())), actor)) {
+                removeApprovalIndex(tenant, actor, requestId); continue;
+            }
+            if (now >= p.getExpiresAt()) { expireApproval(raw, p); continue; }
+            AgentCommand.Approval view = new AgentCommand.Approval();
+            view.setRequestId(requestId); view.setRoomId(p.getRequest().getRoomId());
+            view.setAiclawUid(p.getRequest().getAiclawUid()); view.setCapabilityId(p.getRequest().getCapabilityId());
+            view.setParameters(p.getRequest().getParameters());
+            view.setCallerUid(String.valueOf(p.getActor())); view.setExpiresAt(p.getExpiresAt());
+            result.add(view);
+        }
+        result.sort(Comparator.comparingLong(AgentCommand.Approval::getExpiresAt));
+        return result;
+    }
+
+    private AgentCommand.Result decide(String requestId, boolean approve) {
+        Long actor = ContextUtil.getUid(), tenant = ContextUtil.getTenantId();
+        requireHuman(actor, tenant); validRequestId(requestId);
+        String raw = requiredRaw(tenant, requestId); Pending first = decode(raw);
+        if (first.getOwnerUid() == null || !Objects.equals(first.getOwnerUid(), actor)
+                || !Objects.equals(ownerCache.getOwnerUid(id(first.getRequest().getAiclawUid())), actor))
+            throw new BizException("command_not_found");
+        for (int attempt = 0; attempt < 16; attempt++) {
+            Pending p = decode(raw);
+            if (!APPROVAL_PENDING.equals(p.getApprovalStatus())) return p.getResult();
+            long now = System.currentTimeMillis();
+            if (now >= p.getExpiresAt()) return expireApproval(raw, p).getResult();
+            if (approve) {
+                String blocked = approvalBlocked(p);
+                if (blocked != null) return invalidateApproval(raw, p, blocked).getResult();
+            }
+            p.setApprovalStatus(approve ? "approved" : "rejected");
+            p.getResult().setApprovalStatus(p.getApprovalStatus());
+            if (approve) {
+                p.getResult().setStatus("accepted");
+                p.getResult().setPhase("dispatch");
+                p.getResult().setError(null);
+                p.setDeadline(now + DEADLINE_MS);
+            } else {
+                p.getResult().setStatus("noop");
+                p.getResult().setPhase("approval");
+                p.getResult().setError("approval_rejected");
+            }
+            if (!save(raw, p)) { raw = requiredRaw(tenant, requestId); continue; }
+            // CAS 已赢：后续复核/下发都基于赢家写入后的最新记录，不能用旧 raw 做二次 CAS。
+            raw = requiredRaw(tenant, requestId);
+            if (approve) {
+                // 下发前（CAS 之后）再复核一次；CAS 已保证只有一个赢家，本检查只负责拒绝已漂移的赢家。
+                String blocked = approvalBlocked(p);
+                if (blocked != null) return invalidateDispatched(raw, p, blocked);
+                removeApprovalIndex(p);
+                notifyApproval(p, false);
+                approvalFeedback(p);
+                return dispatch(p, raw);
+            }
+            removeApprovalIndex(p);
+            notifyApproval(p, false);
+            approvalFeedback(p);
+            return p.getResult();
+        }
+        throw new BizException("command_store_busy");
+    }
+
+    /** 审批/下发前的权威复核：成员与配置代次、策略指纹、最后已知会话代次。 */
+    private String approvalBlocked(Pending p) {
+        try {
+            Long tenant = p.getTenant(), actor = p.getActor();
+            long roomId = id(p.getRequest().getRoomId()), target = id(p.getRequest().getAiclawUid());
+            requireHuman(actor, tenant);
+            Room room = requireConversation(actor, tenant, roomId, target);
+            GroupRunAdmissionService.Admission allowed = admission.admitGroupRun(target, roomId, tenant, p.getEpoch());
+            if (allowed == null || !allowed.admitted()) return "authorization_changed";
+            long scope = room.getType() == 2 ? 0L : roomId;
+            AiclawCommandPolicyService.Snapshot snapshot = policies.snapshot(target, scope,
+                    p.getRequest().getCapabilityId(), actor, false);
+            if (snapshot == null || !Objects.equals(snapshot.fingerprint(), p.getPolicyFingerprint())
+                    || snapshot.decision().getVerdict() != AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
+                return "authorization_changed";
+            if (p.getGeneration() != null && !Objects.equals(p.getGeneration(), generation(tenant, target, roomId)))
+                return "authorization_changed";
+            return null;
+        } catch (RuntimeException e) {
+            return "authorization_changed";
+        }
+    }
+
+    private Pending expireApproval(String raw, Pending expected) {
+        for (int attempt = 0; attempt < 16; attempt++) {
+            Pending p = decode(raw);
+            if (!APPROVAL_PENDING.equals(p.getApprovalStatus())) return p;
+            if (System.currentTimeMillis() < p.getExpiresAt()) return p;
+            p.setApprovalStatus("expired");
+            p.getResult().setApprovalStatus("expired");
+            p.getResult().setStatus("noop");
+            p.getResult().setPhase("approval");
+            p.getResult().setError("approval_expired");
+            if (save(raw, p)) {
+                removeApprovalIndex(p); notifyApproval(p, false); approvalFeedback(p); return p;
+            }
+            raw = requiredRaw(p.getTenant(), p.getRequest().getRequestId());
+        }
+        return expected;
+    }
+
+    private Pending invalidateApproval(String raw, Pending expected, String error) {
+        for (int attempt = 0; attempt < 16; attempt++) {
+            Pending p = decode(raw);
+            if (!APPROVAL_PENDING.equals(p.getApprovalStatus())) return p;
+            p.setApprovalStatus("invalidated");
+            p.getResult().setApprovalStatus("invalidated");
+            p.getResult().setStatus("noop");
+            p.getResult().setPhase("approval");
+            p.getResult().setError(error);
+            if (save(raw, p)) {
+                removeApprovalIndex(p); notifyApproval(p, false); approvalFeedback(p); return p;
+            }
+            raw = requiredRaw(p.getTenant(), p.getRequest().getRequestId());
+        }
+        return expected;
+    }
+
+    private AgentCommand.Result invalidateDispatched(String raw, Pending expected, String error) {
+        for (int attempt = 0; attempt < 16; attempt++) {
+            Pending p = decode(raw);
+            // 只有在真实下发前（尚无 native ACK）才允许撤销；已下发则交给执行态超时/回调收敛。
+            if ("accepted".equals(p.getResult().getStatus()) && "approved".equals(p.getApprovalStatus())
+                    && "dispatch".equals(p.getResult().getPhase())) {
+                p.setApprovalStatus("invalidated");
+                p.getResult().setApprovalStatus("invalidated");
+                p.getResult().setStatus("noop");
+                p.getResult().setError(error);
+                p.getResult().setPhase("approval");
+                if (save(raw, p)) { removeApprovalIndex(p); notifyApproval(p, false); approvalFeedback(p); return p.getResult(); }
+                raw = requiredRaw(p.getTenant(), p.getRequest().getRequestId());
+                continue;
+            }
+            return p.getResult();
+        }
+        return expected.getResult();
+    }
+
+    /** #505: 主人待审批索引；60s 审批 TTL 与 24h 命令幂等记录分离。 */
+    private void indexApproval(Pending p) {
+        try {
+            String index = approvalIndexKey(p.getTenant(), p.getOwnerUid());
+            redis.opsForSet().add(index, p.getRequest().getRequestId());
+            redis.expire(index, RETENTION);
+        } catch (RuntimeException e) {
+            log.warn("Command approval index unavailable requestId={}", p.getRequest().getRequestId());
+        }
+    }
+
+    private void removeApprovalIndex(Pending p) {
+        removeApprovalIndex(p.getTenant(), p.getOwnerUid(), p.getRequest().getRequestId());
+    }
+
+    private void removeApprovalIndex(Long tenant, Long ownerUid, String requestId) {
+        if (ownerUid == null) return;
+        try {
+            redis.opsForSet().remove(approvalIndexKey(tenant, ownerUid), requestId);
+        } catch (RuntimeException e) {
+            log.warn("Command approval index cleanup unresolved requestId={}", requestId);
+        }
+    }
+
+    private static String approvalIndexKey(Long tenant, Long ownerUid) {
+        return "aiclaw:approval:pending:" + tenant + ":" + ownerUid;
+    }
+
+    /** 新待审推主人；终态推发起人，仅用于立即解锁其当前房间输入框。 */
+    private void notifyApproval(Pending p, boolean request) {
+        WSCommandApproval event = WSCommandApproval.builder()
+                .requestId(p.getRequest().getRequestId())
+                .roomId(p.getRequest().getRoomId())
+                .aiclawUid(p.getRequest().getAiclawUid())
+                .capabilityId(p.getRequest().getCapabilityId())
+                .callerUid(String.valueOf(p.getActor()))
+                .ownerUid(p.getOwnerUid() == null ? null : String.valueOf(p.getOwnerUid()))
+                .approvalStatus(p.getApprovalStatus())
+                .expiresAt(p.getExpiresAt())
+                .error(p.getResult() == null ? null : p.getResult().getError())
+                .build();
+        try {
+            if (request) push.submitPushMsg(WsAdapter.buildCommandApprovalRequest(event), p.getOwnerUid(), p.getActor());
+            else push.submitPushMsg(WsAdapter.buildCommandApprovalResult(event), p.getActor(), p.getOwnerUid());
+        } catch (RuntimeException e) {
+            // WS is unlock acceleration only; GET/refresh remains the source of truth.
+            log.warn("Command approval notification unresolved requestId={}", p.getRequest().getRequestId());
+        }
+    }
+
+    /** 审批结果普通消息，与执行反馈分开去重；不会回灌成命令执行。 */
+    private void approvalFeedback(Pending p) {
+        if (!"invoke".equals(p.getRequest().getOperation())) return;
+        if (p.getApprovalFeedbackReceiptId() == null || p.getApprovalFeedbackMessageId() != null) return;
+        Map<String, String> priorContext = ContextUtil.copyContext();
+        try {
+            for (int attempt = 0; attempt < 16; attempt++) {
+                String raw = requiredRaw(p.getTenant(), p.getRequest().getRequestId());
+                p = decode(raw);
+                if (APPROVAL_PENDING.equals(p.getApprovalStatus()) || p.getApprovalFeedbackMessageId() != null) return;
+                ContextUtil.remove(); ContextUtil.setUid(p.getActor()); ContextUtil.setTenantId(p.getTenant());
+                ChatMessageReq msg = new ChatMessageReq();
+                msg.setRoomId(id(p.getRequest().getRoomId())); msg.setMsgType(1);
+                msg.setRequestId(p.getApprovalFeedbackReceiptId());
+                msg.setCommandFeedbackRequestId(p.getRequest().getRequestId());
+                String outcome = switch (String.valueOf(p.getApprovalStatus())) {
+                    case "approved" -> "主人已批准，命令开始执行；执行结果另行反馈。";
+                    case "rejected" -> "主人已拒绝，命令未执行。";
+                    case "expired" -> "60 秒内未获批准，命令已过期，未执行。";
+                    default -> "审批已失效，命令未执行。";
+                };
+                String text = "审批反馈 · " + p.getRequest().getRequestId() + " · Agent "
+                        + p.getRequest().getAiclawUid() + " · " + p.getApprovalStatus() + "\n" + outcome;
+                msg.setBody(Map.of("content", text));
+                p.setApprovalFeedbackMessageId(chat.sendMsg(msg, p.getActor()));
+                if (save(raw, p)) return;
+            }
+        } catch (RuntimeException e) {
+            log.warn("Command approval feedback pending requestId={}", p.getRequest().getRequestId());
+        } finally {
+            ContextUtil.restoreContext(priorContext);
+        }
+    }
+
+    private String generation(Long tenant, Long target, long roomId) {
+        try {
+            return redis.opsForValue().get(generationKey(tenant, target, roomId));
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** 只记录成功回调/效果里真实出现的代次；这是审批时的最后已知值，最终线性化仍在插件执行前。 */
+    private void rememberGeneration(Pending p) {
+        String generation = p.getResult() == null ? null : p.getResult().getGeneration();
+        if (generation == null) return;
+        try {
+            redis.opsForValue().set(generationKey(p.getTenant(), id(p.getRequest().getAiclawUid()),
+                    id(p.getRequest().getRoomId())), generation, RETENTION);
+        } catch (RuntimeException e) {
+            log.warn("Command generation cache unavailable requestId={}", p.getRequest().getRequestId());
+        }
+    }
+
+    private static String generationKey(Long tenant, Long target, long roomId) {
+        return "aiclaw:generation:v1:" + tenant + ":" + target + ":" + roomId;
     }
 
     private Map<String, Object> frozenContext(Room room, User human, Long target, Long actor,
@@ -159,6 +503,9 @@ public class AgentCommandService {
 
     private static WsBaseResp<JsonNode> commandMessage(Pending p, boolean reconcileOnly) {
         ObjectNode payload = JSON.valueToTree(p.getRequest()); payload.set("context", JSON.valueToTree(p.getContext()));
+        // #505: 通知插件在执行前再线性化一次真实会话代次；服务端检查只覆盖最后已知值。
+        if (p.getGeneration() != null && payload.get("context") instanceof ObjectNode context)
+            context.put("expectedGeneration", p.getGeneration());
         if (reconcileOnly) payload.put("reconcileOnly", true); // Internal envelope only, never a public Request field.
         WsBaseResp<JsonNode> ws = new WsBaseResp<>(); ws.setType("agentCommand"); ws.setData(payload); return ws;
     }
@@ -252,7 +599,9 @@ public class AgentCommandService {
                 && !(execution(p.getRequest()) && "accepted".equals(p.getResult().getPhase()));
     }
     private boolean save(String raw, Pending p) {
-        return Long.valueOf(1).equals(redis.execute(CAS, List.of(key(p.getTenant(), p.getRequest().getRequestId())), raw, encode(p)));
+        boolean saved = Long.valueOf(1).equals(redis.execute(CAS, List.of(key(p.getTenant(), p.getRequest().getRequestId())), raw, encode(p)));
+        if (saved) rememberGeneration(p);
+        return saved;
     }
     private static void outcome(Pending p, String status, JsonNode catalog, String text, String error) {
         AgentCommand.Result result = p.getResult();
@@ -345,6 +694,11 @@ public class AgentCommandService {
 
     private Pending settle(String raw) {
         Pending p = decode(raw);
+        // #505: 审批等待是独立前置态；到点由 CAS 决定 expire 的唯一赢家，且不产生执行反馈。
+        if (APPROVAL_PENDING.equals(p.getApprovalStatus())) {
+            if (System.currentTimeMillis() >= p.getExpiresAt()) return expireApproval(raw, p);
+            return p;
+        }
         if (overdue(p))
             return finish(raw, "unknown", null, null, "command_timeout");
         feedback(p); return p;
@@ -376,6 +730,8 @@ public class AgentCommandService {
 
     private void feedback(Pending p) {
         if (!"invoke".equals(p.getRequest().getOperation())) return;
+        // #505: 审批结果走独立的审批反馈；执行反馈只在批准后产生。
+        if (p.getApprovalStatus() != null && !"approved".equals(p.getApprovalStatus())) return;
         Map<String, String> priorContext = ContextUtil.copyContext();
         Map<Integer, Long> sent = new HashMap<>();
         try {
