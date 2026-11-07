@@ -125,6 +125,9 @@ public class AgentCommandService {
         pending.setEpoch(allowed.getAuthorizationEpoch());
         // A private stable receipt cannot be preoccupied through a client-chosen ordinary message ID.
         pending.setFeedbackReceiptId("command:" + UUID.randomUUID());
+        // 审批只对真实可执行的能力有意义；不可执行能力不进入 pending，避免审批通过后才失败。
+        if (needsApproval && !callable(request.getCapabilityId()))
+            throw new BizException("execution_not_connected");
         AgentCommand.Result result = new AgentCommand.Result();
         result.setRequestId(request.getRequestId()); result.setRoomId(request.getRoomId());
         result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation());
