@@ -39,6 +39,9 @@ class AgentCommandServiceTest {
     private final AiclawOwnerCache ownerCache = mock(AiclawOwnerCache.class);
     private final AgentCommandService service = new AgentCommandService(facts, admission, members, groups, redis, push, chat, policies, ownerCache);
     private final Map<String,String> storage = new HashMap<>();
+    private final Map<String,Long> ttl = new HashMap<>();
+    private long clock = 1_000_000L;
+    private Runnable beforeGrant;
     private final ObjectMapper json = new ObjectMapper();
     private User human;
     private Room room;
@@ -58,11 +61,44 @@ class AgentCommandServiceTest {
         when(redis.opsForSet()).thenReturn(sets);
         when(sets.add(anyString(), anyString())).thenReturn(1L);
         when(values.get(anyString())).thenAnswer(i -> storage.get(i.getArgument(0)));
-        when(values.setIfAbsent(anyString(), anyString(), eq(Duration.ofHours(24))))
-                .thenAnswer(i -> storage.putIfAbsent(i.getArgument(0), i.getArgument(1)) == null);
+        when(values.setIfAbsent(anyString(), anyString(), any(Duration.class))).thenAnswer(i -> {
+            String key = i.getArgument(0);
+            if (storage.containsKey(key)) return false;
+            storage.put(key, i.getArgument(1));
+            ttl.put(key, clock + ((Duration) i.getArgument(2)).toMillis());
+            return true;
+        });
+        doAnswer(i -> {
+            String key = i.getArgument(0);
+            storage.put(key, i.getArgument(1));
+            ttl.put(key, clock + ((Duration) i.getArgument(2)).toMillis());
+            return null;
+        }).when(values).set(anyString(), anyString(), any(Duration.class));
+        when(redis.delete(anyString())).thenAnswer(i -> {
+            String key = i.getArgument(0);
+            ttl.remove(key);
+            return storage.remove(key) != null;
+        });
+        // 一 key=普通 CAS；两 key=审批截止脚本（EXPIRE 与 GRANT 的 Lua 文本不同）。TTL 用测试时钟解码。
         when(redis.execute(any(RedisScript.class), anyList(), anyString(), anyString())).thenAnswer(i -> {
-            String key = ((List<String>)i.getArgument(1)).get(0);
-            return storage.replace(key, i.getArgument(2), i.getArgument(3)) ? 1L : 0L;
+            List<String> keys = i.getArgument(1);
+            String script = ((RedisScript<?>) i.getArgument(0)).getScriptAsString();
+            String command = keys.get(0);
+            if (keys.size() == 1) return storage.replace(command, i.getArgument(2), i.getArgument(3)) ? 1L : 0L;
+            if (!Objects.equals(storage.get(command), i.getArgument(2))) return 0L;
+            Long recordTtl = ttl.get(command);
+            if (recordTtl == null || recordTtl <= clock) return 0L;
+            if (beforeGrant != null) beforeGrant.run();
+            Long deadlineTtl = ttl.get(keys.get(1));
+            boolean alive = deadlineTtl != null && deadlineTtl > clock;
+            if (script.contains("== 0 then return -1")) {           // GRANT：截止键存活才允许转态
+                if (!alive) return -1L;
+                storage.put(command, i.getArgument(3));
+                return 1L;
+            }
+            if (alive) return -1L;                                // EXPIRE：截止键消失才允许过期
+            storage.put(command, i.getArgument(3));
+            return 1L;
         });
         when(push.submitPushMsg(any(), eq(30L), eq(11L))).thenReturn(PushSubmission.resolved(
                 PushSubmission.targetsOf("node", Map.of("device", 30L))));
@@ -245,7 +281,7 @@ class AgentCommandServiceTest {
         return json.readValue("{\"requestId\":\"req-1\",\"roomId\":\"20\"," + fields + "}", AgentCommand.Callback.class);
     }
     private void pastDeadline() throws Exception {
-        String key = storage.keySet().iterator().next();
+        String key = storage.keySet().stream().filter(k -> k.startsWith("aiclaw:command:v1:")).findFirst().orElseThrow();
         var pending = json.readValue(storage.get(key), AgentCommandService.Pending.class);
         pending.setDeadline(1); storage.put(key, json.writeValueAsString(pending));
     }
@@ -536,7 +572,9 @@ class AgentCommandServiceTest {
         assertEquals("pending", pending.getApprovalStatus());
         assertTrue(pending.getExpiresAt() >= System.currentTimeMillis() + 59_000);
         verify(push, times(1)).submitPushMsg(any(), eq(99L), eq(11L));
-        verify(push, never()).submitPushMsg(any(), eq(30L), eq(11L));
+        // 待审批只允许代次侦测信封，不得真实下发执行。
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
         // 主人自己命中的是 #504 自批快速路径，不产生待审批。
         when(ownerCache.getOwnerUid(30L)).thenReturn(11L);
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(true))).thenReturn(
@@ -548,13 +586,16 @@ class AgentCommandServiceTest {
     @Test void ownerApprovesFrozenRequestExactlyOnceAndUnlocksViaWsAndMessage() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
         asOwner();
         assertEquals("accepted", service.approve("req-1").getStatus());
         assertEquals("approved", service.approve("req-1").getApprovalStatus());
         // approve 只允许一次真实下发：第二次是幂等读。
         assertEquals("approved", service.approve("req-1").getApprovalStatus());
-        verify(push, times(1)).submitPushMsg(argThat(ws -> !ws.getType().equals("commandApprovalRequest")
-                && !ws.getType().equals("commandApprovalResult")), eq(30L), eq(11L));
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(2)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        var dispatch = json.valueToTree(sent.getAllValues().get(1));
+        assertEquals("1", dispatch.path("data").path("context").path("expectedGeneration").asText());
         verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
     }
 
@@ -564,44 +605,160 @@ class AgentCommandServiceTest {
         asOwner();
         assertEquals("noop", service.reject("req-1").getStatus());
         assertEquals("rejected", service.reject("req-1").getApprovalStatus());
-        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
         ContextUtil.setUid(11L);
         var again = request("invoke"); again.setRequestId("req-2");
         assertEquals("pending", service.submit(again).getStatus());
-        // 过期：真实时钟越过冻结的 expiresAt，GET 只做 CAS 收敛，不执行。
-        String key = storage.keySet().stream().filter(k -> k.endsWith(":req-2")).findFirst().orElseThrow();
-        var pending = json.readValue(storage.get(key), AgentCommandService.Pending.class);
-        pending.setExpiresAt(1L); storage.put(key, json.writeValueAsString(pending));
+        // 过期：截止键消失等价 Redis TTL 到点；GET 只做 CAS 收敛，不执行。
+        expireApprovalKey("req-2");
         var expired = service.get("req-2");
         assertEquals("noop", expired.getStatus());
         assertEquals("expired", expired.getApprovalStatus());
         assertEquals("expired", service.get("req-2").getApprovalStatus());
-        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
     }
 
-    @Test void ownerCanApproveExactlyAtDeadlineButNotAfterAndDuplicateNeverDispatchesTwice() throws Exception {
+    @Test void ownerApprovesJustBeforeDeadlineAndLateTimerCannotExpireApprovedExecution() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
-        String key = storage.keySet().iterator().next();
-        var pending = json.readValue(storage.get(key), AgentCommandService.Pending.class);
-        pending.setExpiresAt(1L); storage.put(key, json.writeValueAsString(pending));
+        probeAck("req-1", "1");
+        clock += 59_999;
+        asOwner();
+        assertEquals("accepted", service.approve("req-1").getStatus());
+        assertEquals("approved", service.approve("req-1").getApprovalStatus());
+        // 批准即解锁：执行超过原审批窗口也不得被取消。
+        clock += 120_000;
+        ContextUtil.setUid(11L);
+        assertEquals("accepted", service.get("req-1").getStatus());
+        verify(push, times(1)).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void approvalAtExactDeadlineIsExpiredWithoutDispatch() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        clock += 60_000;
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("expired", result.getApprovalStatus());
+        assertEquals("approval_expired", result.getError());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void approvalAfterDeadlineIsExpiredAndRejectCannotReviveIt() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        clock += 60_001;
+        asOwner();
+        var approved = service.approve("req-1");
+        assertEquals("expired", approved.getApprovalStatus());
+        var rejected = service.reject("req-1");
+        assertEquals("expired", rejected.getApprovalStatus(), "approve/reject 竞争只有一个过期赢家");
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void slowApprovalDependencyCrossingDeadlineCannotGrant() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenAnswer(i -> {
+            clock += 60_000; // 权威复核本身很慢，跨过截止点
+            return approvalSnapshot("fp-1");
+        });
         asOwner();
         assertEquals("expired", service.approve("req-1").getApprovalStatus());
-        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void slowGrantCannotWriteApprovalPastDeadline() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        beforeGrant = () -> clock += 60_000; // 脚本执行前的排队/网络延迟跨过截止点
+        asOwner();
+        assertEquals("expired", service.approve("req-1").getApprovalStatus());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void probeFencesGenerationWithoutWarmCacheAndDispatchCarriesNumericValue() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        var probe = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push).submitPushMsg(probe.capture(), eq(30L), eq(11L));
+        var payload = json.valueToTree(probe.getValue());
+        assertTrue(payload.path("data").path("generationProbe").asBoolean());
+        assertEquals("generation", payload.path("data").path("operation").asText(), "旧插件必须把侦测信封当非法请求拒绝，绝不能执行");
+        assertFalse(payload.path("data").path("context").has("expectedGeneration"), "侦测信封不得让服务端猜代次");
+        probeAck("req-1", "1");
+        asOwner();
+        assertEquals("accepted", service.approve("req-1").getStatus());
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(2)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        assertEquals("1", json.valueToTree(sent.getAllValues().get(1)).path("data").path("context").path("expectedGeneration").asText());
+    }
+
+    @Test void approvalWithoutTrustedProbeFailsClosedAndLateProbeCannotResurrectIt() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+        ContextUtil.setUid(99L);
+        assertEquals("invalidated", probe("req-1", "1").getApprovalStatus(), "迟到的侦测回调不能复活已失效申请");
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void generationDriftDuringApprovalWindowInvalidatesBeforeDispatch() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        storage.put("aiclaw:generation:v1:1:30:20", "2"); // 等待期内另一次真实原生 reset 的回调
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void authoritativeInitialGenerationZeroApprovesAndClearsStaleCache() {
+        approvalPending("fp-1");
+        storage.put("aiclaw:generation:v1:1:30:20", "7"); // 旧缓存的最后已知值，不是当前权威值
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "0");
+        assertFalse(storage.containsKey("aiclaw:generation:v1:1:30:20"));
+        asOwner();
+        assertEquals("accepted", service.approve("req-1").getStatus());
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(2)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        assertEquals("0", json.valueToTree(sent.getAllValues().get(1)).path("data").path("context").path("expectedGeneration").asText());
     }
 
     @Test void policyFingerprintChangeInvalidatesEvenWhenVerdictStaysApprovalRequired() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
         when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
-                new AiclawCommandPolicyService.Snapshot(
-                        AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"), "fp-2"));
+                approvalSnapshot("fp-2"));
         asOwner();
         var result = service.approve("req-1");
         assertEquals("noop", result.getStatus());
         assertEquals("invalidated", result.getApprovalStatus());
         assertEquals("authorization_changed", result.getError());
-        verify(push, never()).submitPushMsg(argThat(ws -> !ws.getType().startsWith("commandApproval")), eq(30L), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
     }
 
     @Test void thirdPartyCannotListReadApproveOrRejectAnotherOwnersRequest() {
@@ -649,8 +806,28 @@ class AgentCommandServiceTest {
         when(policies.decide(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
                 AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"));
         when(ownerCache.getOwnerUid(30L)).thenReturn(99L);
-        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
-                new AiclawCommandPolicyService.Snapshot(
-                        AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"), fingerprint));
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(approvalSnapshot(fingerprint));
+    }
+
+    private AiclawCommandPolicyService.Snapshot approvalSnapshot(String fingerprint) {
+        return new AiclawCommandPolicyService.Snapshot(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"), fingerprint);
+    }
+
+    /** 模拟插件对代次侦测信封的真实回调；pending 记录只更新可信快照，不产生执行。 */
+    private AgentCommand.Result probe(String requestId, String generation) {
+        ContextUtil.setUid(30L);
+        var c = new AgentCommand.Callback(); c.setRequestId(requestId); c.setRoomId("20");
+        c.setStatus("completed"); c.setPhase("generation"); c.setGeneration(generation);
+        return service.complete(c);
+    }
+
+    private void probeAck(String requestId, String generation) {
+        assertEquals("pending", probe(requestId, generation).getStatus());
+    }
+
+    private void expireApprovalKey(String requestId) {
+        String key = "aiclaw:approval:deadline:v1:1:" + requestId;
+        storage.remove(key); ttl.remove(key);
     }
 }

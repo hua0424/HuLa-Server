@@ -46,6 +46,22 @@ public class AgentCommandService {
             "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end " +
             "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
             "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
+    /**
+     * aichatoverview#505: 审批转态的唯一切点。截止键由 Redis 服务端 TTL 解码，脚本在写赢家前检查它是否仍存活；
+     * 慢复核/慢 CAS/迟 timer 都不能把已过 60s 的申请写成 approved。返回 -1 表示已过期、0 表示记录已变、1 表示成功。
+     */
+    private static final DefaultRedisScript<Long> GRANT = new DefaultRedisScript<>(
+            "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end " +
+            "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
+            "if redis.call('EXISTS',KEYS[2]) == 0 then return -1 end " +
+            "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
+    /** 同一线性化点上的过期写入：截止键仍存活说明未到点，绝不能提前写 expired。 */
+    private static final DefaultRedisScript<Long> EXPIRE = new DefaultRedisScript<>(
+            "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end " +
+            "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
+            "if redis.call('EXISTS',KEYS[2]) == 1 then return -1 end " +
+            "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
+    private static final String APPROVAL_KEY = "aiclaw:approval:deadline:v1:";
     private final GroupRunAdmissionMapper facts;
     private final GroupRunAdmissionService admission;
     private final GroupMemberDao members;
@@ -100,7 +116,6 @@ public class AgentCommandService {
         boolean needsApproval = false;
         Long ownerUid = null;
         String policyFingerprint = null;
-        String expectedGeneration = null;
         if ("invoke".equals(request.getOperation())) {
             boolean owner = Objects.equals(ownerCache.getOwnerUid(target), actor);
             long scope = room.getType() == 2 ? 0L : roomId;
@@ -117,7 +132,6 @@ public class AgentCommandService {
                     throw new BizException(AiclawCommandPolicyService.DENIED_APPROVAL + ":" + request.getCapabilityId());
                 needsApproval = true;
                 policyFingerprint = snapshot.fingerprint();
-                expectedGeneration = generation(tenant, target, roomId);
             }
         }
         Pending pending = new Pending(); pending.setRequest(request); pending.setActor(actor); pending.setTenant(tenant);
@@ -136,7 +150,6 @@ public class AgentCommandService {
             pending.setExpiresAt(now + APPROVAL_MS);
             pending.setOwnerUid(ownerUid);
             pending.setPolicyFingerprint(policyFingerprint);
-            pending.setGeneration(expectedGeneration);
             pending.setApprovalFeedbackReceiptId("approval:" + UUID.randomUUID());
             // 审批期间不能触发执行超时；批准时再重置为执行 deadline。
             pending.setDeadline(now + APPROVAL_MS + DEADLINE_MS);
@@ -160,6 +173,13 @@ public class AgentCommandService {
             return finish(raw, "unsupported", null, null, "execution_not_connected").getResult();
         }
         if (needsApproval) {
+            // #505: 60s 窗口是独立截止键，Redis TTL 即权威时钟；TTL 与展示用 expiresAt 对齐（同一受理时刻起算）。
+            // 重复提交不续期（key 已存在则 TTL 不变）；启发式 expiresAt 只用于展示/列表排序。
+            long deadlineTtl = pending.getExpiresAt() - System.currentTimeMillis();
+            if (deadlineTtl > 0)
+                redis.opsForValue().setIfAbsent(approvalDeadlineKey(tenant, request.getRequestId()), "1",
+                        Duration.ofMillis(deadlineTtl));
+            probe(pending);
             indexApproval(pending);
             notifyApproval(pending, true);
             // deadline 同时承担审批过期采样；真实 expire 由 CAS 决定唯一赢家。
@@ -188,6 +208,30 @@ public class AgentCommandService {
         long tenant = pending.getTenant();
         deadlines.schedule(() -> expire(tenant, pending.getRequest().getRequestId()), DEADLINE_MS, TimeUnit.MILLISECONDS);
         return pending.getResult();
+    }
+
+    /**
+     * #505: 在 pending 消息里请求一次插件侧权威代次。投递失败（离线/无路由）不阻塞 pending：
+     * 该请求仍可被拒绝/过期，但批准会因缺少可信快照而 fail-closed，绝不会无字段下发。
+     */
+    private void probe(Pending p) {
+        try {
+            push.submitPushMsg(probeMessage(p), id(p.getRequest().getAiclawUid()), p.getActor());
+        } catch (RuntimeException e) {
+            log.warn("Approval fence probe undelivered requestId={}", p.getRequest().getRequestId());
+        }
+    }
+
+    private static WsBaseResp<JsonNode> probeMessage(Pending p) {
+        // #505: 独立的 operation 值让未升级插件把它当非法请求拒绝，绝不把侦测信封当真实 invoke 执行。
+        ObjectNode payload = JSON.createObjectNode();
+        payload.put("requestId", p.getRequest().getRequestId());
+        payload.put("roomId", p.getRequest().getRoomId());
+        payload.put("aiclawUid", p.getRequest().getAiclawUid());
+        payload.put("operation", "generation");
+        payload.put("generationProbe", true);
+        payload.set("context", JSON.valueToTree(p.getContext()));
+        WsBaseResp<JsonNode> ws = new WsBaseResp<>(); ws.setType("agentCommand"); ws.setData(payload); return ws;
     }
 
     public AgentCommand.Result get(String requestId) {
@@ -227,7 +271,6 @@ public class AgentCommandService {
         }
         List<AgentCommand.Approval> result = new ArrayList<>();
         if (ids == null) return result;
-        long now = System.currentTimeMillis();
         for (String requestId : ids) {
             try { validRequestId(requestId); } catch (BizException invalid) { removeApprovalIndex(tenant, actor, requestId); continue; }
             String raw = redis.opsForValue().get(key(tenant, requestId));
@@ -237,7 +280,8 @@ public class AgentCommandService {
                     || !Objects.equals(ownerCache.getOwnerUid(id(p.getRequest().getAiclawUid())), actor)) {
                 removeApprovalIndex(tenant, actor, requestId); continue;
             }
-            if (now >= p.getExpiresAt()) { expireApproval(raw, p); continue; }
+            Pending current = expireApproval(raw, p);
+            if (!APPROVAL_PENDING.equals(current.getApprovalStatus())) continue;
             AgentCommand.Approval view = new AgentCommand.Approval();
             view.setRequestId(requestId); view.setRoomId(p.getRequest().getRoomId());
             view.setAiclawUid(p.getRequest().getAiclawUid()); view.setCapabilityId(p.getRequest().getCapabilityId());
@@ -259,8 +303,6 @@ public class AgentCommandService {
         for (int attempt = 0; attempt < 16; attempt++) {
             Pending p = decode(raw);
             if (!APPROVAL_PENDING.equals(p.getApprovalStatus())) return p.getResult();
-            long now = System.currentTimeMillis();
-            if (now >= p.getExpiresAt()) return expireApproval(raw, p).getResult();
             if (approve) {
                 String blocked = approvalBlocked(p);
                 if (blocked != null) return invalidateApproval(raw, p, blocked).getResult();
@@ -271,14 +313,18 @@ public class AgentCommandService {
                 p.getResult().setStatus("accepted");
                 p.getResult().setPhase("dispatch");
                 p.getResult().setError(null);
-                p.setDeadline(now + DEADLINE_MS);
+                // 批准即解锁执行；执行超时从批准时刻重新起算，审批窗口不再参与执行态。
+                p.setDeadline(System.currentTimeMillis() + DEADLINE_MS);
             } else {
                 p.getResult().setStatus("noop");
                 p.getResult().setPhase("approval");
                 p.getResult().setError("approval_rejected");
             }
-            if (!save(raw, p)) { raw = requiredRaw(tenant, requestId); continue; }
-            // CAS 已赢：后续复核/下发都基于赢家写入后的最新记录，不能用旧 raw 做二次 CAS。
+            // 唯一线性化点：截止键（Redis TTL）仍存活时，这次 pending→approved/rejected 才成立。
+            long transition = grant(raw, p);
+            if (transition == 0) { raw = requiredRaw(tenant, requestId); continue; }
+            if (transition < 0) return expireApproval(raw, p).getResult();
+            // 已赢得原子转态：后续复核/下发都基于赢家写入后的最新记录，不能用旧 raw 做二次 CAS。
             raw = requiredRaw(tenant, requestId);
             if (approve) {
                 // 下发前（CAS 之后）再复核一次；CAS 已保证只有一个赢家，本检查只负责拒绝已漂移的赢家。
@@ -312,8 +358,11 @@ public class AgentCommandService {
             if (snapshot == null || !Objects.equals(snapshot.fingerprint(), p.getPolicyFingerprint())
                     || snapshot.decision().getVerdict() != AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
                 return "authorization_changed";
-            if (p.getGeneration() != null && !Objects.equals(p.getGeneration(), generation(tenant, target, roomId)))
-                return "authorization_changed";
+            // #505: 没有可信代次快照（插件离线/丢包/读取失败）时不能无字段下发，批准按 fail-closed 处理。
+            if (p.getGeneration() == null) return "authorization_changed";
+            // 缓存只是最后已知值；读失败(null)不否决可信快照，插件仍照 expectedGeneration 在原生执行前线性化。
+            String cached = generation(tenant, target, roomId);
+            if (cached != null && !Objects.equals(p.getGeneration(), cached)) return "authorization_changed";
             return null;
         } catch (RuntimeException e) {
             return "authorization_changed";
@@ -324,15 +373,17 @@ public class AgentCommandService {
         for (int attempt = 0; attempt < 16; attempt++) {
             Pending p = decode(raw);
             if (!APPROVAL_PENDING.equals(p.getApprovalStatus())) return p;
-            if (System.currentTimeMillis() < p.getExpiresAt()) return p;
             p.setApprovalStatus("expired");
             p.getResult().setApprovalStatus("expired");
             p.getResult().setStatus("noop");
             p.getResult().setPhase("approval");
             p.getResult().setError("approval_expired");
-            if (save(raw, p)) {
+            // 与批准共用截止键：键仍存活表示未到点，绝不能提前写 expired。
+            long transition = expireDue(raw, p);
+            if (transition == 1) {
                 removeApprovalIndex(p); notifyApproval(p, false); approvalFeedback(p); return p;
             }
+            if (transition < 0) return decode(raw);
             raw = requiredRaw(p.getTenant(), p.getRequest().getRequestId());
         }
         return expected;
@@ -534,6 +585,8 @@ public class AgentCommandService {
         validRequestId(callback.getRequestId());
         Long tenant = ContextUtil.getTenantId(), actor = ContextUtil.getUid();
         String phase = callback.getPhase() == null ? "outcome" : callback.getPhase();
+        // #505: 审批冻结前由插件回报一次权威原生代次；插件离线/丢包则不回报，批准按 fail-closed 处理。
+        if ("generation".equals(phase)) return recordGeneration(callback, tenant, actor);
         boolean ack = "accepted".equals(phase);
         if (!(ack && "accepted".equals(callback.getStatus()) || "outcome".equals(phase)
                 && Set.of("completed", "failed", "unsupported", "offline", "noop", "unknown").contains(String.valueOf(callback.getStatus()))))
@@ -584,6 +637,36 @@ public class AgentCommandService {
         throw new BizException("command_store_busy");
     }
 
+    /** #505: 只接受插件回报的数字代次；0 表示插件权威地“尚无会话记录”，服务端缓存随之清空。 */
+    private AgentCommand.Result recordGeneration(AgentCommand.Callback callback, Long tenant, Long actor) {
+        String generation = callback.getGeneration();
+        if (generation == null || !generation.matches("\\d{1,19}")) throw new BizException("invalid_command_result");
+        for (int attempt = 0; attempt < 16; attempt++) {
+            String raw = requiredRaw(tenant, callback.getRequestId()); Pending p = decode(raw);
+            if (!Objects.equals(actor, id(p.getRequest().getAiclawUid())) ||
+                    !Objects.equals(callback.getRoomId(), p.getRequest().getRoomId())) throw new BizException("command_not_found");
+            if (!APPROVAL_PENDING.equals(p.getApprovalStatus()) || !"pending".equals(p.getResult().getStatus()))
+                return p.getResult();
+            p.setGeneration(generation);
+            if (save(raw, p)) {
+                cacheGeneration(p.getTenant(), id(p.getRequest().getAiclawUid()), id(p.getRequest().getRoomId()), generation);
+                return p.getResult();
+            }
+            // Bounded retry: a concurrent decision may win first; the re-read result is authoritative either way.
+        }
+        throw new BizException("command_store_busy");
+    }
+
+    private void cacheGeneration(Long tenant, Long target, long roomId, String generation) {
+        try {
+            String key = generationKey(tenant, target, roomId);
+            if ("0".equals(generation)) redis.delete(key);
+            else redis.opsForValue().set(key, generation, RETENTION);
+        } catch (RuntimeException e) {
+            log.warn("Command generation cache unavailable target={} room={}", target, roomId);
+        }
+    }
+
     private void authorize(Pending p) {
         requireHuman(p.getActor(), p.getTenant());
         long target = id(p.getRequest().getAiclawUid()), room = id(p.getRequest().getRoomId());
@@ -598,6 +681,20 @@ public class AgentCommandService {
         return "accepted".equals(p.getResult().getStatus()) && System.currentTimeMillis() >= p.getDeadline()
                 && !(execution(p.getRequest()) && "accepted".equals(p.getResult().getPhase()));
     }
+    /** 截止键仍存活才允许这次 pending 转态；0=记录已变，-1=已过期，1=成功。 */
+    private long grant(String raw, Pending p) {
+        Long value = redis.execute(GRANT, List.of(key(p.getTenant(), p.getRequest().getRequestId()),
+                approvalDeadlineKey(p.getTenant(), p.getRequest().getRequestId())), raw, encode(p));
+        return value == null ? 0L : value;
+    }
+
+    /** 截止键已消失才写 expired；-1 表示尚未到点。 */
+    private long expireDue(String raw, Pending p) {
+        Long value = redis.execute(EXPIRE, List.of(key(p.getTenant(), p.getRequest().getRequestId()),
+                approvalDeadlineKey(p.getTenant(), p.getRequest().getRequestId())), raw, encode(p));
+        return value == null ? 0L : value;
+    }
+
     private boolean save(String raw, Pending p) {
         boolean saved = Long.valueOf(1).equals(redis.execute(CAS, List.of(key(p.getTenant(), p.getRequest().getRequestId())), raw, encode(p)));
         if (saved) rememberGeneration(p);
@@ -694,11 +791,8 @@ public class AgentCommandService {
 
     private Pending settle(String raw) {
         Pending p = decode(raw);
-        // #505: 审批等待是独立前置态；到点由 CAS 决定 expire 的唯一赢家，且不产生执行反馈。
-        if (APPROVAL_PENDING.equals(p.getApprovalStatus())) {
-            if (System.currentTimeMillis() >= p.getExpiresAt()) return expireApproval(raw, p);
-            return p;
-        }
+        // #505: 审批等待是独立前置态；到点由截止键 + CAS 决定 expire 的唯一赢家，且不产生执行反馈。
+        if (APPROVAL_PENDING.equals(p.getApprovalStatus())) return expireApproval(raw, p);
         if (overdue(p))
             return finish(raw, "unknown", null, null, "command_timeout");
         feedback(p); return p;
@@ -858,6 +952,9 @@ public class AgentCommandService {
         throw new BizException("invalid_command_id");
     }
     private static String key(Long tenant, String requestId) { return "aiclaw:command:v1:" + tenant + ":" + requestId; }
+    private static String approvalDeadlineKey(Long tenant, String requestId) {
+        return APPROVAL_KEY + tenant + ":" + requestId;
+    }
     private String requiredRaw(Long tenant, String requestId) {
         if (tenant == null || tenant <= 0) throw new BizException("command_forbidden");
         String raw = redis.opsForValue().get(key(tenant, requestId));
