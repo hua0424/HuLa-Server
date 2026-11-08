@@ -62,6 +62,32 @@ public class AgentCommandService {
             "if redis.call('EXISTS',KEYS[2]) == 1 then return -1 end " +
             "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
     private static final String APPROVAL_KEY = "aiclaw:approval:deadline:v1:";
+    /**
+     * aichatoverview#505: 受理时刻只认 Redis 服务器时钟；截止键用绝对时间 PEXPIREAT 创建，
+     * 网络/排队延迟不会把原始 expiresAt 向后挪。
+     */
+    private static final DefaultRedisScript<Long> CLOCK = new DefaultRedisScript<>(
+            "local t=redis.call('TIME'); return t[1]*1000+math.floor(t[2]/1000)", Long.class);
+    /** 请求记录与绝对截止键同脚本原子创建：不存在则同时写入，已存在返回 0 交给重放。 */
+    private static final DefaultRedisScript<Long> ACCEPT = new DefaultRedisScript<>(
+            "if redis.call('EXISTS',KEYS[1]) == 1 then return 0 end " +
+            "redis.call('SET',KEYS[1],ARGV[1],'PX',ARGV[2]) " +
+            "redis.call('SET',KEYS[2],'1') " +
+            "redis.call('PEXPIREAT',KEYS[2],ARGV[3]) return 1", Long.class);
+    /**
+     * aichatoverview#505: 代次观测点。缓存写入与 reset 证据（>=2 且与最后已知值不同）在同一脚本里递增房间 epoch，
+     * 审批冻结的 epoch 与它不一致即失效，避免等待期 reset 被晚到的首次探测静默换绑。
+     */
+    private static final DefaultRedisScript<Long> OBSERVE = new DefaultRedisScript<>(
+            "local old=redis.call('GET',KEYS[1]) " +
+            "local epoch=redis.call('GET',KEYS[2]) " +
+            "if not epoch then epoch='0' end " +
+            "if ARGV[1] == '0' then redis.call('DEL',KEYS[1]) " +
+            "else redis.call('SET',KEYS[1],ARGV[1],'PX',ARGV[2]) end " +
+            "if tonumber(ARGV[1]) >= 2 and (not old or old ~= ARGV[1]) then " +
+            "epoch=tostring(tonumber(epoch)+1) redis.call('SET',KEYS[2],epoch,'PX',ARGV[2]) end " +
+            "return tonumber(epoch)", Long.class);
+    private static final String EPOCH_KEY = "aiclaw:generation:epoch:v1:";
     private final GroupRunAdmissionMapper facts;
     private final GroupRunAdmissionService admission;
     private final GroupMemberDao members;
@@ -96,6 +122,8 @@ public class AgentCommandService {
         private Long ownerUid;
         private String policyFingerprint;
         private String generation;
+        /** 受理时冻结的代次观测 epoch；null 表示该 pending 没有可信代次事实，批准必须 fail-closed。 */
+        private Long generationEpoch;
         private Long approvalFeedbackMessageId;
         private String approvalFeedbackReceiptId;
     }
@@ -135,7 +163,8 @@ public class AgentCommandService {
             }
         }
         Pending pending = new Pending(); pending.setRequest(request); pending.setActor(actor); pending.setTenant(tenant);
-        long now = System.currentTimeMillis();
+        // 审批窗口用 Redis 时钟起算；受理记录 + 绝对截止键随后在同一 Lua 脚本里创建。
+        long now = needsApproval ? clock() : System.currentTimeMillis();
         pending.setEpoch(allowed.getAuthorizationEpoch());
         // A private stable receipt cannot be preoccupied through a client-chosen ordinary message ID.
         pending.setFeedbackReceiptId("command:" + UUID.randomUUID());
@@ -147,6 +176,10 @@ public class AgentCommandService {
         result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation());
         if (needsApproval) {
             pending.setApprovalStatus(APPROVAL_PENDING);
+            // 受理时冻结代次观测 epoch；读不到可信值（而非“确实没有 reset”）时拒绝受理，不能带未知下发。
+            Long acceptedEpoch = readEpoch(tenant, target, roomId);
+            if (acceptedEpoch == null) throw new BizException("command_store_unavailable");
+            pending.setGenerationEpoch(acceptedEpoch);
             pending.setExpiresAt(now + APPROVAL_MS);
             pending.setOwnerUid(ownerUid);
             pending.setPolicyFingerprint(policyFingerprint);
@@ -164,7 +197,13 @@ public class AgentCommandService {
         pending.setResult(result);
         pending.setContext(frozenContext(room, human, target, actor, allowed));
         String raw = encode(pending);
-        if (!Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, raw, RETENTION))) {
+        if (needsApproval) {
+            if (!accept(key, approvalDeadlineKey(tenant, request.getRequestId()), raw, pending.getExpiresAt())) {
+                String winner = redis.opsForValue().get(key);
+                if (winner == null) throw new BizException("command_store_unavailable");
+                return replay(winner, request, actor, tenant);
+            }
+        } else if (!Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, raw, RETENTION))) {
             String winner = redis.opsForValue().get(key);
             if (winner == null) throw new BizException("command_store_unavailable");
             return replay(winner, request, actor, tenant);
@@ -173,12 +212,7 @@ public class AgentCommandService {
             return finish(raw, "unsupported", null, null, "execution_not_connected").getResult();
         }
         if (needsApproval) {
-            // #505: 60s 窗口是独立截止键，Redis TTL 即权威时钟；TTL 与展示用 expiresAt 对齐（同一受理时刻起算）。
-            // 重复提交不续期（key 已存在则 TTL 不变）；启发式 expiresAt 只用于展示/列表排序。
-            long deadlineTtl = pending.getExpiresAt() - System.currentTimeMillis();
-            if (deadlineTtl > 0)
-                redis.opsForValue().setIfAbsent(approvalDeadlineKey(tenant, request.getRequestId()), "1",
-                        Duration.ofMillis(deadlineTtl));
+            // #505: 截止键已由受理脚本按 Redis 时钟的绝对 PEXPIREAT 建好，重复提交不会续期。
             probe(pending);
             indexApproval(pending);
             notifyApproval(pending, true);
@@ -359,7 +393,11 @@ public class AgentCommandService {
                     || snapshot.decision().getVerdict() != AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED)
                 return "authorization_changed";
             // #505: 没有可信代次快照（插件离线/丢包/读取失败）时不能无字段下发，批准按 fail-closed 处理。
-            if (p.getGeneration() == null) return "authorization_changed";
+            if (p.getGeneration() == null || p.getGenerationEpoch() == null) return "authorization_changed";
+            // 代次 epoch 必须仍是受理时观测到的那一代；等待期被报告的 reset 会推进 epoch。
+            Long currentEpoch = readEpoch(tenant, target, roomId);
+            if (currentEpoch == null || !currentEpoch.equals(p.getGenerationEpoch()))
+                return "authorization_changed";
             // 缓存只是最后已知值；读失败(null)不否决可信快照，插件仍照 expectedGeneration 在原生执行前线性化。
             String cached = generation(tenant, target, roomId);
             if (cached != null && !Objects.equals(p.getGeneration(), cached)) return "authorization_changed";
@@ -518,22 +556,6 @@ public class AgentCommandService {
         }
     }
 
-    /** 只记录成功回调/效果里真实出现的代次；这是审批时的最后已知值，最终线性化仍在插件执行前。 */
-    private void rememberGeneration(Pending p) {
-        String generation = p.getResult() == null ? null : p.getResult().getGeneration();
-        if (generation == null) return;
-        try {
-            redis.opsForValue().set(generationKey(p.getTenant(), id(p.getRequest().getAiclawUid()),
-                    id(p.getRequest().getRoomId())), generation, RETENTION);
-        } catch (RuntimeException e) {
-            log.warn("Command generation cache unavailable requestId={}", p.getRequest().getRequestId());
-        }
-    }
-
-    private static String generationKey(Long tenant, Long target, long roomId) {
-        return "aiclaw:generation:v1:" + tenant + ":" + target + ":" + roomId;
-    }
-
     private Map<String, Object> frozenContext(Room room, User human, Long target, Long actor,
                                                GroupRunAdmissionService.Admission allowed) {
         Map<String, Object> context = new LinkedHashMap<>(); context.put("roomType", room.getType());
@@ -638,6 +660,10 @@ public class AgentCommandService {
     }
 
     /** #505: 只接受插件回报的数字代次；0 表示插件权威地“尚无会话记录”，服务端缓存随之清空。 */
+    /**
+     * #505: 探测回包只在 pending 里冻结一次代次。首个可信快照必须与受理时 epoch 一致；
+     * 之后任何不同值（等待期 reset 被晚读、重复/乱序回包）都按 authorization_changed 失效，绝不换绑。
+     */
     private AgentCommand.Result recordGeneration(AgentCommand.Callback callback, Long tenant, Long actor) {
         String generation = callback.getGeneration();
         if (generation == null || !generation.matches("\\d{1,19}")) throw new BizException("invalid_command_result");
@@ -647,24 +673,70 @@ public class AgentCommandService {
                     !Objects.equals(callback.getRoomId(), p.getRequest().getRoomId())) throw new BizException("command_not_found");
             if (!APPROVAL_PENDING.equals(p.getApprovalStatus()) || !"pending".equals(p.getResult().getStatus()))
                 return p.getResult();
-            p.setGeneration(generation);
-            if (save(raw, p)) {
-                cacheGeneration(p.getTenant(), id(p.getRequest().getAiclawUid()), id(p.getRequest().getRoomId()), generation);
-                return p.getResult();
+            if (p.getGeneration() != null) {
+                if (p.getGeneration().equals(generation)) return p.getResult();
+                return invalidateApproval(raw, p, "authorization_changed").getResult();
             }
+            if (p.getGenerationEpoch() == null) return invalidateApproval(raw, p, "authorization_changed").getResult();
+            Long observed = observe(p.getTenant(), id(p.getRequest().getAiclawUid()), id(p.getRequest().getRoomId()), generation);
+            if (observed == null || !observed.equals(p.getGenerationEpoch()))
+                return invalidateApproval(raw, p, "authorization_changed").getResult();
+            p.setGeneration(generation);
+            if (save(raw, p)) return p.getResult();
             // Bounded retry: a concurrent decision may win first; the re-read result is authoritative either way.
         }
         throw new BizException("command_store_busy");
     }
 
-    private void cacheGeneration(Long tenant, Long target, long roomId, String generation) {
+    /** Redis 时钟（毫秒）；拿不到可信受理时刻就拒绝受理，不用本地时钟兜底。 */
+    private long clock() {
+        Long value = redis.execute(CLOCK, List.of(), "clock");
+        if (value == null) throw new BizException("command_store_unavailable");
+        return value;
+    }
+
+    /** 请求记录 + 绝对截止键原子创建；false 表示已有记录（重放）。 */
+    private boolean accept(String commandKey, String deadlineKey, String raw, long expiresAt) {
+        Long value = redis.execute(ACCEPT, List.of(commandKey, deadlineKey), raw,
+                String.valueOf(RETENTION.toMillis()), String.valueOf(expiresAt));
+        return value != null && value == 1L;
+    }
+
+    /** 观测代次并维护缓存/epoch；返回 null 表示观测失败（调用方按 fail-closed 处理）。 */
+    private Long observe(Long tenant, Long target, long roomId, String generation) {
         try {
-            String key = generationKey(tenant, target, roomId);
-            if ("0".equals(generation)) redis.delete(key);
-            else redis.opsForValue().set(key, generation, RETENTION);
+            return redis.execute(OBSERVE, List.of(generationKey(tenant, target, roomId), epochKey(tenant, target, roomId)),
+                    generation, String.valueOf(RETENTION.toMillis()));
         } catch (RuntimeException e) {
-            log.warn("Command generation cache unavailable target={} room={}", target, roomId);
+            log.warn("Command generation observe unavailable target={} room={}", target, roomId);
+            return null;
         }
+    }
+
+    /** 受理/批准时读 epoch：缺失=0（确实没有已报告的 reset），读失败=null（不可信）。 */
+    private Long readEpoch(Long tenant, Long target, long roomId) {
+        try {
+            String value = redis.opsForValue().get(epochKey(tenant, target, roomId));
+            if (value == null) return 0L;
+            return Long.parseLong(value);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** 只记录成功回调/效果里真实出现的代次；这是审批时的最后已知值，最终线性化仍在插件执行前。 */
+    private void rememberGeneration(Pending p) {
+        String generation = p.getResult() == null ? null : p.getResult().getGeneration();
+        if (generation == null || !generation.matches("\\d{1,19}")) return;
+        observe(p.getTenant(), id(p.getRequest().getAiclawUid()), id(p.getRequest().getRoomId()), generation);
+    }
+
+    private static String generationKey(Long tenant, Long target, long roomId) {
+        return "aiclaw:generation:v1:" + tenant + ":" + target + ":" + roomId;
+    }
+
+    private static String epochKey(Long tenant, Long target, long roomId) {
+        return EPOCH_KEY + tenant + ":" + target + ":" + roomId;
     }
 
     private void authorize(Pending p) {
