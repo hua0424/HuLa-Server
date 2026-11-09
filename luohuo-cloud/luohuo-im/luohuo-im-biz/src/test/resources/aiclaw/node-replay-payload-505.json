@@ -1,0 +1,29 @@
+{
+  "outcome": {
+    "status": "completed",
+    "generation": "1",
+    "nativeRef": {
+      "sessionId": "native",
+      "inputId": "input",
+      "messageId": "assistant",
+      "parentId": "input"
+    },
+    "phase": "outcome",
+    "requestId": "R",
+    "roomId": "20"
+  },
+  "replay": {
+    "status": "completed",
+    "generation": "1",
+    "nativeRef": {
+      "sessionId": "native",
+      "inputId": "input",
+      "messageId": "assistant",
+      "parentId": "input"
+    },
+    "phase": "outcome",
+    "reconciled": true,
+    "requestId": "R",
+    "roomId": "20"
+  }
+}

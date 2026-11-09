@@ -760,6 +760,53 @@ class AgentCommandServiceTest {
         assertEquals("0", json.valueToTree(sent.getAllValues().get(1)).path("data").path("context").path("expectedGeneration").asText());
     }
 
+    /**
+     * 旧代次的只读对账回放（reconciled completed）可以修复 unknown，但不得把当前代次缓存回退、
+     * 也不得重复推进 epoch，从而不影响新代次请求的审批与下发。
+     */
+    @Test void oldTerminalReconcileCannotRegressNewerGenerationCacheOrEpoch() throws Exception {
+        when(policies.decide(eq(30L), eq(0L), eq("skill:fixture"), eq(11L), eq(false))).thenReturn(
+                AiclawCommandPolicyService.Decision.of(AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED, "required"));
+        when(ownerCache.getOwnerUid(30L)).thenReturn(99L);
+        when(policies.snapshot(eq(30L), eq(0L), eq("skill:fixture"), eq(11L), eq(false))).thenReturn(approvalSnapshot("fp-1"));
+
+        var first = request("invoke"); first.setCapabilityId("skill:fixture"); first.setRequestId("R");
+        assertEquals("pending", service.submit(first).getStatus());
+        probeAck("R", "1");
+        asOwner();
+        assertEquals("accepted", service.approve("R").getStatus());
+        pastDeadline();
+        ContextUtil.setUid(11L);
+        assertEquals("unknown", service.get("R").getStatus());
+
+        // 复位已由另一条真实回调报告：当前权威代次 2、epoch 1。
+        storage.put("aiclaw:generation:v1:1:30:20", "2");
+        storage.put("aiclaw:generation:epoch:v1:1:30:20", "1");
+        ContextUtil.setUid(11L);
+        var second = request("invoke"); second.setRequestId("req-2"); second.setCapabilityId("skill:fixture");
+        assertEquals("pending", service.submit(second).getStatus());
+        probeAck("req-2", "2");
+
+        // 真实 Node 组件产生的 captured 回放载荷原样送入 complete()，不事后补字段。
+        var captured = json.readTree(getClass().getResourceAsStream("/aiclaw/node-replay-payload-505.json"));
+        ContextUtil.setUid(30L);
+        var replay = json.treeToValue(captured.get("replay"), AgentCommand.Callback.class);
+        var repaired = service.complete(replay);
+        assertEquals("completed", repaired.getStatus());
+        assertTrue(repaired.getReconciled());
+        assertEquals("2", storage.get("aiclaw:generation:v1:1:30:20"), "旧代终态回放不得回退当前缓存");
+        assertEquals("1", storage.get("aiclaw:generation:epoch:v1:1:30:20"), "旧代终态回放不得推进 epoch");
+
+        asOwner();
+        assertEquals("accepted", service.approve("req-2").getStatus());
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, atLeastOnce()).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        var dispatch = sent.getAllValues().stream()
+                .filter(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean())
+                .reduce((a, b) -> b).orElseThrow();
+        assertEquals("2", json.valueToTree(dispatch).path("data").path("context").path("expectedGeneration").asText());
+    }
+
     @Test void duplicateOrOutOfOrderProbeCannotOverwriteFrozenGeneration() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
@@ -929,6 +976,23 @@ class AgentCommandServiceTest {
                 storage.remove(keys.get(1)); ttl.remove(keys.get(1));
             }
             return 1L;
+        }
+        if (script.contains("local known=old")) {                             // OBSERVE_MAX：终态只读对账的单调缓存
+            String generation = i.getArgument(2);
+            String old = storage.get(keys.get(0));
+            long epoch = storage.containsKey(keys.get(1)) ? Long.parseLong(storage.get(keys.get(1))) : 0L;
+            long known = old == null ? -1 : Long.parseLong(old);
+            long value = Long.parseLong(generation);
+            if (value > 0 && value > known) {
+                storage.put(keys.get(0), generation);
+                ttl.put(keys.get(0), clock + Long.parseLong(i.getArgument(3)));
+                if (value >= 2) {
+                    epoch += 1;
+                    storage.put(keys.get(1), String.valueOf(epoch));
+                    ttl.put(keys.get(1), clock + Long.parseLong(i.getArgument(3)));
+                }
+            }
+            return epoch;
         }
         if (script.contains("tonumber(ARGV[1]) >= 2")) {                      // OBSERVE
             if (failObserve) { failObserve = false; throw new RuntimeException("observe down"); }

@@ -87,6 +87,21 @@ public class AgentCommandService {
             "if tonumber(ARGV[1]) >= 2 and (not old or old ~= ARGV[1]) then " +
             "epoch=tostring(tonumber(epoch)+1) redis.call('SET',KEYS[2],epoch,'PX',ARGV[2]) end " +
             "return tonumber(epoch)", Long.class);
+    /**
+     * aichatoverview#505: 终态回包的代次缓存只能单调前进。只读对账可能重放旧代次的 completed 终态，
+     * 若用 OBSERVE 无条件 SET 会把已经前进的当前代次写回退、并让新请求的审批被误判失效。
+     */
+    private static final DefaultRedisScript<Long> OBSERVE_MAX = new DefaultRedisScript<>(
+            "local old=redis.call('GET',KEYS[1]) " +
+            "local epoch=redis.call('GET',KEYS[2]) " +
+            "if not epoch then epoch='0' end " +
+            "local new=tonumber(ARGV[1]) " +
+            "local known=old and tonumber(old) or nil " +
+            "if new and new > 0 and (not known or new > known) then " +
+            "redis.call('SET',KEYS[1],ARGV[1],'PX',ARGV[2]) " +
+            "if new >= 2 then epoch=tostring(tonumber(epoch)+1) " +
+            "redis.call('SET',KEYS[2],epoch,'PX',ARGV[2]) end end " +
+            "return tonumber(epoch)", Long.class);
     private static final String EPOCH_KEY = "aiclaw:generation:epoch:v1:";
     private final GroupRunAdmissionMapper facts;
     private final GroupRunAdmissionService admission;
@@ -713,6 +728,19 @@ public class AgentCommandService {
         }
     }
 
+    /**
+     * 终态回包只允许把代次缓存向前推进：历史代次的只读对账回放不得回退当前缓存或重复推进 epoch。
+     * 观测失败不影响回包本身，本地兜底保留此前已知值。
+     */
+    private void observeMax(Long tenant, Long target, long roomId, String generation) {
+        try {
+            redis.execute(OBSERVE_MAX, List.of(generationKey(tenant, target, roomId), epochKey(tenant, target, roomId)),
+                    generation, String.valueOf(RETENTION.toMillis()));
+        } catch (RuntimeException e) {
+            log.warn("Command generation observe unavailable target={} room={}", target, roomId);
+        }
+    }
+
     /** 受理/批准时读 epoch：缺失=0（确实没有已报告的 reset），读失败=null（不可信）。 */
     private Long readEpoch(Long tenant, Long target, long roomId) {
         try {
@@ -728,7 +756,7 @@ public class AgentCommandService {
     private void rememberGeneration(Pending p) {
         String generation = p.getResult() == null ? null : p.getResult().getGeneration();
         if (generation == null || !generation.matches("\\d{1,19}")) return;
-        observe(p.getTenant(), id(p.getRequest().getAiclawUid()), id(p.getRequest().getRoomId()), generation);
+        observeMax(p.getTenant(), id(p.getRequest().getAiclawUid()), id(p.getRequest().getRoomId()), generation);
     }
 
     private static String generationKey(Long tenant, Long target, long roomId) {
