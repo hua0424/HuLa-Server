@@ -889,6 +889,157 @@ class AgentCommandServiceTest {
                 eq(30L), eq(11L));
     }
 
+    @Test void getInvalidatesPendingImmediatelyWhenPolicyFingerprintChanged() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                approvalSnapshot("fp-2"));
+        ContextUtil.setUid(11L);
+        var result = service.get("req-1");
+        assertEquals("noop", result.getStatus());
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        // 失效即解锁：GET 第二次只读终态，不重复反馈。
+        assertEquals("invalidated", service.get("req-1").getApprovalStatus());
+        verify(chat, times(1)).sendMsg(argThat(msg -> msg.getBody().toString().contains("审批反馈")
+                && msg.getBody().toString().contains("req-1")), eq(11L));
+        asOwner();
+        assertTrue(service.approvals().isEmpty());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void ownerListInvalidatesPendingWhenPolicyFingerprintChanged() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                approvalSnapshot("fp-2"));
+        asOwner();
+        assertTrue(service.approvals().isEmpty(), "失效申请不得继续占用主人的待审批列表");
+        ContextUtil.setUid(11L);
+        assertEquals("invalidated", service.get("req-1").getApprovalStatus());
+        verify(chat, times(1)).sendMsg(argThat(msg -> msg.getBody().toString().contains("审批反馈")
+                && msg.getBody().toString().contains("req-1")), eq(11L));
+    }
+
+    @Test void getAndOwnerListKeepPendingWhenPolicyAndFenceAreUnchanged() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        ContextUtil.setUid(11L);
+        var result = service.get("req-1");
+        assertEquals("pending", result.getStatus());
+        assertNull(result.getError());
+        asOwner();
+        when(sets.members("aiclaw:approval:pending:1:99")).thenReturn(new LinkedHashSet<>(List.of("req-1")));
+        var list = service.approvals();
+        assertEquals(1, list.size());
+        assertEquals("req-1", list.get(0).getRequestId());
+    }
+
+    @Test void unconfirmedGenerationProbeDoesNotInvalidatePendingOnGet() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        // 侦测回包仍在途：unknown 不是“代次变化”，不能借 GET 提前失效。
+        ContextUtil.setUid(11L);
+        var result = service.get("req-1");
+        assertEquals("pending", result.getStatus());
+        assertNull(result.getError());
+        asOwner();
+        when(sets.members("aiclaw:approval:pending:1:99")).thenReturn(new LinkedHashSet<>(List.of("req-1")));
+        assertEquals(1, service.approvals().size());
+    }
+
+    @Test void expiredStillWinsOverPolicyChangeAfterDeadline() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                approvalSnapshot("fp-2"));
+        expireApprovalKey("req-1");
+        ContextUtil.setUid(11L);
+        var result = service.get("req-1");
+        assertEquals("expired", result.getApprovalStatus());
+        assertEquals("approval_expired", result.getError(), "到点由截止键 CAS 先裁决，不能改写成失效");
+    }
+
+    @Test void policyDecisionChangeToOpenOrClosedInvalidatesPendingReads() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        for (AiclawCommandPolicyService.Verdict verdict : List.of(
+                AiclawCommandPolicyService.Verdict.OPEN, AiclawCommandPolicyService.Verdict.CLOSED)) {
+            when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                    new AiclawCommandPolicyService.Snapshot(
+                            AiclawCommandPolicyService.Decision.of(verdict, verdict.name()), "fp-1"));
+            ContextUtil.setUid(11L);
+            var result = service.get("req-1");
+            assertEquals("invalidated", result.getApprovalStatus(), verdict + " 不再需要审批时必须失效");
+            assertEquals("authorization_changed", result.getError());
+        }
+        verify(chat, times(1)).sendMsg(argThat(msg -> msg.getBody().toString().contains("审批反馈")), eq(11L));
+    }
+
+    @Test void pendingReadStaysPendingWhenPolicySnapshotUnavailable() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(null);
+        ContextUtil.setUid(11L);
+        assertEquals("pending", service.get("req-1").getStatus(), "读取失败是 unknown，不是规则变化");
+    }
+
+    @Test void invalidatedPendingReadsApproveRejectAndLateProbeAreIdempotent() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                approvalSnapshot("fp-2"));
+        ContextUtil.setUid(11L);
+        assertEquals("invalidated", service.get("req-1").getApprovalStatus());
+        asOwner();
+        assertEquals("invalidated", service.approve("req-1").getApprovalStatus());
+        assertEquals("invalidated", service.reject("req-1").getApprovalStatus());
+        assertEquals("invalidated", probe("req-1", "2").getApprovalStatus(), "迟到的合法 probe 不能复活已失效申请");
+        ContextUtil.setUid(11L);
+        assertEquals("invalidated", service.get("req-1").getApprovalStatus());
+        verify(chat, times(1)).sendMsg(argThat(msg -> msg.getBody().toString().contains("审批反馈")
+                && msg.getBody().toString().contains("req-1")), eq(11L));
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void replayOfPendingAfterPolicyChangeReturnsInvalidatedWithoutDispatch() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                approvalSnapshot("fp-2"));
+        ContextUtil.setUid(11L);
+        var result = service.submit(request("invoke"));
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
+    @Test void approvedExecutionIsNotInvalidatedByLaterPolicyChangeOrApprovalTtl() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        asOwner();
+        assertEquals("accepted", service.approve("req-1").getStatus());
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenReturn(
+                approvalSnapshot("fp-2"));
+        clock += 120_000;
+        ContextUtil.setUid(11L);
+        var result = service.get("req-1");
+        assertEquals("accepted", result.getStatus(), "批准即解锁，执行态不受审批期规则复核或原审批 TTL 影响");
+        assertEquals("approved", result.getApprovalStatus());
+    }
+
     @Test void thirdPartyCannotListReadApproveOrRejectAnotherOwnersRequest() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());

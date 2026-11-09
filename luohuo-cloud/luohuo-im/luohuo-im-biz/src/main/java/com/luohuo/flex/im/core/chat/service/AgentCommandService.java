@@ -331,11 +331,15 @@ public class AgentCommandService {
             }
             Pending current = expireApproval(raw, p);
             if (!APPROVAL_PENDING.equals(current.getApprovalStatus())) continue;
+            // 列表与 GET 同为审批等待态的读路径：规则/成员/代次已明确变化时必须立即失效并解锁，
+            // 不能等到主人点批准或自然过期；未确认的代次/读取失败不算“变化”，仍保持等待。
+            String blocked = approvalStale(current);
+            if (blocked != null) { invalidateApproval(raw, current, blocked); continue; }
             AgentCommand.Approval view = new AgentCommand.Approval();
-            view.setRequestId(requestId); view.setRoomId(p.getRequest().getRoomId());
-            view.setAiclawUid(p.getRequest().getAiclawUid()); view.setCapabilityId(p.getRequest().getCapabilityId());
-            view.setParameters(p.getRequest().getParameters());
-            view.setCallerUid(String.valueOf(p.getActor())); view.setExpiresAt(p.getExpiresAt());
+            view.setRequestId(requestId); view.setRoomId(current.getRequest().getRoomId());
+            view.setAiclawUid(current.getRequest().getAiclawUid()); view.setCapabilityId(current.getRequest().getCapabilityId());
+            view.setParameters(current.getRequest().getParameters());
+            view.setCallerUid(String.valueOf(current.getActor())); view.setExpiresAt(current.getExpiresAt());
             result.add(view);
         }
         result.sort(Comparator.comparingLong(AgentCommand.Approval::getExpiresAt));
@@ -420,6 +424,44 @@ public class AgentCommandService {
         } catch (RuntimeException e) {
             return "authorization_changed";
         }
+    }
+
+    /**
+     * GET/owner-list 的审批等待态复核：只把“能确认已变化”的条件视为失效，未知/读取失败保持等待。
+     * 批准与下发仍走 {@link #approvalBlocked} 的 fail-closed 路径，不能用本方法的宽松语义代替。
+     */
+    private String approvalStale(Pending p) {
+        Long tenant = p.getTenant(), actor = p.getActor();
+        long roomId = id(p.getRequest().getRoomId()), target = id(p.getRequest().getAiclawUid());
+        Room room;
+        try {
+            requireHuman(actor, tenant);
+            room = requireConversation(actor, tenant, roomId, target);
+            GroupRunAdmissionService.Admission allowed = admission.admitGroupRun(target, roomId, tenant, p.getEpoch());
+            if (allowed == null) return null;
+            if (!allowed.admitted()) return "authorization_changed";
+        } catch (BizException e) {
+            return "authorization_changed";
+        } catch (RuntimeException e) {
+            return null;
+        }
+        AiclawCommandPolicyService.Snapshot snapshot;
+        try {
+            long scope = room.getType() == 2 ? 0L : roomId;
+            snapshot = policies.snapshot(target, scope, p.getRequest().getCapabilityId(), actor, false);
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (snapshot != null && (!Objects.equals(snapshot.fingerprint(), p.getPolicyFingerprint())
+                || snapshot.decision().getVerdict() != AiclawCommandPolicyService.Verdict.APPROVAL_REQUIRED))
+            return "authorization_changed";
+        // 尚未收到可信代次快照（probe 在途/失败）是 unknown，不是代次变化。
+        if (p.getGeneration() == null || p.getGenerationEpoch() == null) return null;
+        Long currentEpoch = readEpoch(tenant, target, roomId);
+        if (currentEpoch != null && !currentEpoch.equals(p.getGenerationEpoch())) return "authorization_changed";
+        String cached = generation(tenant, target, roomId);
+        if (cached != null && !Objects.equals(p.getGeneration(), cached)) return "authorization_changed";
+        return null;
     }
 
     private Pending expireApproval(String raw, Pending expected) {
@@ -892,7 +934,14 @@ public class AgentCommandService {
     private Pending settle(String raw) {
         Pending p = decode(raw);
         // #505: 审批等待是独立前置态；到点由截止键 + CAS 决定 expire 的唯一赢家，且不产生执行反馈。
-        if (APPROVAL_PENDING.equals(p.getApprovalStatus())) return expireApproval(raw, p);
+        if (APPROVAL_PENDING.equals(p.getApprovalStatus())) {
+            Pending current = expireApproval(raw, p);
+            if (!APPROVAL_PENDING.equals(current.getApprovalStatus())) return current;
+            // 过期优先；仍在等待时才复核规则/成员/代次是否已明确变化，变化则立即失效并解锁。
+            String blocked = approvalStale(current);
+            if (blocked != null) return invalidateApproval(raw, current, blocked);
+            return current;
+        }
         if (overdue(p))
             return finish(raw, "unknown", null, null, "command_timeout");
         feedback(p); return p;
