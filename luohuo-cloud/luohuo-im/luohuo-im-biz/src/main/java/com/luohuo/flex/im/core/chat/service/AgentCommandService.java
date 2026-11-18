@@ -247,7 +247,7 @@ public class AgentCommandService {
             if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED)
                 return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
             if (submitted.getRouteStatus() == PushSubmission.RouteStatus.NO_TARGET)
-                return finish(raw, "offline", null, null, "agent_offline").getResult();
+                return finish(raw, "offline", null, "目标 Agent 离线，命令未执行，不会在上线后补执行。", "agent_offline").getResult();
             if (submitted.getAdmission() == PushSubmission.Admission.NONE)
                 return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
         } catch (RuntimeException failure) {
@@ -587,7 +587,7 @@ public class AgentCommandService {
                 msg.setRequestId(p.getApprovalFeedbackReceiptId());
                 msg.setCommandFeedbackRequestId(p.getRequest().getRequestId());
                 String outcome = switch (String.valueOf(p.getApprovalStatus())) {
-                    case "approved" -> "主人已批准，命令开始执行；执行结果另行反馈。";
+                    case "approved" -> "主人已批准；命令是否执行及结果另行反馈。";
                     case "rejected" -> "主人已拒绝，命令未执行。";
                     case "expired" -> "60 秒内未获批准，命令已过期，未执行。";
                     default -> "审批已失效，命令未执行。";
