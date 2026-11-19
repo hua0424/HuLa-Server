@@ -584,6 +584,44 @@ class AgentCommandServiceTest {
         verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
     }
 
+    @Test void ownerApprovalWhenAgentGoesOfflineReportsNoExecutionAndNeverRetries() {
+        approvalPending("fp-1");
+        assertEquals("pending", service.submit(request("invoke")).getStatus());
+        probeAck("req-1", "1");
+        when(push.submitPushMsg(any(), eq(30L), eq(11L))).thenReturn(PushSubmission.noTarget());
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("approved", result.getApprovalStatus());
+        assertEquals("offline", result.getStatus());
+        assertEquals("agent_offline", result.getError());
+
+        // Reconnecting does not make the old approved request eligible for delivery.
+        when(push.submitPushMsg(any(), eq(30L), eq(11L))).thenReturn(PushSubmission.resolved(
+                PushSubmission.targetsOf("node", Map.of("device", 30L))));
+        assertEquals("offline", service.approve("req-1").getStatus());
+        ContextUtil.setUid(11L);
+        assertEquals("offline", service.get("req-1").getStatus());
+        assertEquals("offline", service.submit(request("invoke")).getStatus());
+        verify(push, times(2)).submitPushMsg(any(), eq(30L), eq(11L)); // One probe, one dispatch attempt.
+
+        var sent = ArgumentCaptor.forClass(ChatMessageReq.class);
+        verify(chat, times(2)).sendMsg(sent.capture(), eq(11L));
+        var approvalMessage = sent.getAllValues().get(0);
+        var executionMessage = sent.getAllValues().get(1);
+        for (var message : sent.getAllValues()) {
+            assertEquals(20L, message.getRoomId());
+            assertEquals("req-1", message.getCommandFeedbackRequestId());
+            assertNotNull(message.getRequestId());
+            assertFalse(message.getRequestId().isBlank());
+        }
+        assertNotEquals(approvalMessage.getRequestId(), executionMessage.getRequestId());
+        var approval = json.valueToTree(approvalMessage.getBody()).path("content").asText();
+        var execution = json.valueToTree(executionMessage.getBody()).path("content").asText();
+        assertTrue(approval.contains("主人已批准"));
+        assertFalse(approval.contains("命令开始执行"), approval);
+        assertTrue(execution.contains("离线") && execution.contains("未执行"), execution);
+    }
+
     @Test void ownerRejectExpiresNeverDispatchAndNewRequestNeedsNewId() throws Exception {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
