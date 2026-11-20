@@ -337,6 +337,29 @@ class AgentCommandServiceTest {
         var done = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\"},\"effect\":{\"kind\":\"compact\",\"controlId\":\"c1\",\"summaryId\":\"a1\",\"summary\":true}");
         assertTrue(service.complete(done).getEffect().getSummary());
     }
+    @Test void compactAcceptsBoundSummaryWithoutInventingANativeSummaryId() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        String binding = "\"generation\":\"1\",\"nativeRef\":{\"sessionId\":\"s1\"}";
+        String bound = "\"status\":\"completed\"," + binding + ",";
+        String summary = "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":true}";
+        var uncorrelated = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"other-request\",\"summary\":true}");
+        assertEquals("invalid_command_result", assertThrows(BizException.class, () -> service.complete(uncorrelated)).getMessage());
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\"," + binding + "," + summary);
+        assertEquals("accepted", service.complete(ack).getStatus());
+        var effectless = nativeCallback("\"status\":\"completed\"," + binding);
+        assertThrows(BizException.class, () -> service.complete(effectless));
+        var noSummary = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        assertThrows(BizException.class, () -> service.complete(noSummary));
+        var done = nativeCallback(bound + summary + ",\"nativeResult\":{\"summary\":\"private fixture summary\"}");
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus());
+        assertEquals("1", result.getGeneration());
+        assertEquals("s1", result.getNativeRef().getSessionId());
+        assertEquals("req-1", result.getEffect().getControlId());
+        assertTrue(result.getEffect().getSummary());
+        assertNull(result.getEffect().getSummaryId());
+        assertFalse(json.writeValueAsString(result).contains("private fixture summary"));
+    }
     @Test void completionRereadsCompetingNativeAckInsteadOfLosingOutcome() throws Exception {
         var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
         var done = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"}");
