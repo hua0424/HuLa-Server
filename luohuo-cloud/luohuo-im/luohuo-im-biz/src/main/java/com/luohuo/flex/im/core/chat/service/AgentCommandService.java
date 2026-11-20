@@ -697,7 +697,7 @@ public class AgentCommandService {
             AgentCommand.Result previous = uncertain ? JSON.convertValue(p.getResult(), AgentCommand.Result.class) : null;
             mergeBinding(p.getResult(), callback);
             mergeEffect(p.getRequest(), p.getResult(), callback.getEffect());
-            validateEvidence(p.getRequest(), p.getResult(), callback.getStatus());
+            validateEvidence(p.getRequest(), p.getResult(), callback);
             if (uncertain && !ack && !reconcile) { feedback(decode(raw)); return decode(raw).getResult(); }
             if (ack) {
                 if (!uncertain) p.getResult().setPhase("accepted"); // A lost ACK can pin IDs, never erase unknown.
@@ -904,9 +904,9 @@ public class AgentCommandService {
         }
         result.setEffect(effect);
     }
-    private static void validateEvidence(AgentCommand.Request request, AgentCommand.Result result, String status) {
+    private static void validateEvidence(AgentCommand.Request request, AgentCommand.Result result, AgentCommand.Callback callback) {
         if (!execution(request)) return;
-        String capability = request.getCapabilityId();
+        String capability = request.getCapabilityId(), status = callback.getStatus();
         AgentCommand.NativeRef ref = result.getNativeRef(); AgentCommand.Effect effect = result.getEffect();
         if (skill(capability) && ref != null && ref.getInputId() != null && ref.getParentId() != null
                 && !ref.getInputId().equals(ref.getParentId())) throw new BizException("command_binding_conflict");
@@ -918,7 +918,10 @@ public class AgentCommandService {
         if (skill(capability)) {
             if (ref.getMessageId() == null || !Objects.equals(ref.getInputId(), ref.getParentId())) throw new BizException("invalid_command_result");
         } else if ("session.compact".equals(capability)) {
-            if (effect == null || !Boolean.TRUE.equals(effect.getSummary()) || effect.getSummaryId() == null)
+            // Require fresh outcome evidence; an ACK cannot stand in for a completed compaction.
+            AgentCommand.Effect compact = callback.getEffect();
+            if (compact == null || compact.getControlId() == null || !Boolean.TRUE.equals(compact.getSummary())
+                    || (compact.getSummaryId() == null && !request.getRequestId().equals(compact.getControlId())))
                 throw new BizException("invalid_command_result");
         } else if ("session.reset".equals(capability)) {
             if (effect == null || ref != null && Objects.equals(ref.getSessionId(), effect.getSessionId())
