@@ -47,19 +47,19 @@ public class AgentCommandService {
             "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
             "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
     /**
-     * aichatoverview#505: 审批转态的唯一切点。截止键由 Redis 服务端 TTL 解码，脚本在写赢家前检查它是否仍存活；
-     * 慢复核/慢 CAS/迟 timer 都不能把已过 60s 的申请写成 approved。返回 -1 表示已过期、0 表示记录已变、1 表示成功。
+     * aichatoverview#505: 只有正的 Redis 剩余期限允许批准、拒绝或失效；到点时 EXISTS 可能仍为 1。
+     * 返回 -1 表示期限已结束或不可信，0 表示记录已变，1 表示成功。
      */
     private static final DefaultRedisScript<Long> GRANT = new DefaultRedisScript<>(
             "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end " +
             "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
-            "if redis.call('EXISTS',KEYS[2]) == 0 then return -1 end " +
+            "if redis.call('PTTL',KEYS[2]) <= 0 then return -1 end " +
             "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
-    /** 同一线性化点上的过期写入：截止键仍存活说明未到点，绝不能提前写 expired。 */
+    /** 同一线性化点上的过期写入：剩余期限为正时不能写 expired。 */
     private static final DefaultRedisScript<Long> EXPIRE = new DefaultRedisScript<>(
             "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end " +
             "local ttl=redis.call('PTTL',KEYS[1]); if ttl<=0 then return 0 end " +
-            "if redis.call('EXISTS',KEYS[2]) == 1 then return -1 end " +
+            "if redis.call('PTTL',KEYS[2]) > 0 then return -1 end " +
             "redis.call('SET',KEYS[1],ARGV[2],'PX',ttl); return 1", Long.class);
     private static final String APPROVAL_KEY = "aiclaw:approval:deadline:v1:";
     /**
@@ -493,9 +493,12 @@ public class AgentCommandService {
             p.getResult().setStatus("noop");
             p.getResult().setPhase("approval");
             p.getResult().setError(error);
-            if (save(raw, p)) {
+            // 失效与批准、拒绝共用截止键裁决；复核跨过期限时不能把已过期写成失效。
+            long transition = grant(raw, p);
+            if (transition == 1) {
                 removeApprovalIndex(p); notifyApproval(p, false); approvalFeedback(p); return p;
             }
+            if (transition < 0) return expireApproval(raw, expected);
             raw = requiredRaw(p.getTenant(), p.getRequest().getRequestId());
         }
         return expected;
