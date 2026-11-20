@@ -700,6 +700,25 @@ class AgentCommandServiceTest {
                 eq(30L), eq(11L));
     }
 
+    @Test void policyDriftAtDeadlineCannotOverwriteExpiryDuringApproval() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        probeAck("req-1", "1");
+        when(policies.snapshot(eq(30L), eq(0L), eq("model.list"), eq(11L), eq(false))).thenAnswer(i -> {
+            clock = pending.getExpiresAt();
+            return approvalSnapshot("fp-2");
+        });
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("expired", result.getApprovalStatus());
+        assertEquals("approval_expired", result.getError());
+        assertEquals(pending.getExpiresAt(), result.getExpiresAt());
+        assertEquals("expired", service.reject("req-1").getApprovalStatus());
+        verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
+                eq(30L), eq(11L));
+    }
+
     @Test void slowGrantCannotWriteApprovalPastDeadline() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
@@ -1207,14 +1226,19 @@ class AgentCommandServiceTest {
         Long recordTtl = ttl.get(command);
         if (recordTtl == null || recordTtl <= clock) return 0L;
         if (beforeGrant != null) beforeGrant.run();
-        Long deadlineTtl = ttl.get(keys.get(1));
-        boolean alive = deadlineTtl != null && deadlineTtl > clock;
-        if (script.contains("== 0 then return -1")) {           // GRANT：截止键存活才允许转态
-            if (!alive) return -1L;
+        String deadlineKey = keys.get(1);
+        Long deadline = ttl.get(deadlineKey);
+        // Redis may still return EXISTS=1 at the exact deadline while PTTL is already 0.
+        boolean exists = storage.containsKey(deadlineKey) && (deadline == null || deadline >= clock);
+        long remaining = !exists ? -2L : deadline == null ? -1L : deadline - clock;
+        boolean byTtl = script.contains("'PTTL',KEYS[2]");
+        boolean live = byTtl ? remaining > 0 : exists;
+        if (script.contains(byTtl ? "<= 0 then return -1" : "== 0 then return -1")) { // GRANT
+            if (!live) return -1L;
             storage.put(command, i.getArgument(3));
             return 1L;
         }
-        if (alive) return -1L;                                // EXPIRE：截止键消失才允许过期
+        if (live) return -1L;                                // EXPIRE
         storage.put(command, i.getArgument(3));
         return 1L;
     }
