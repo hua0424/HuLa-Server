@@ -708,11 +708,14 @@ public class AgentCommandService {
                 }
                 JsonNode catalog = "discover".equals(p.getRequest().getOperation()) && "completed".equals(callback.getStatus())
                         ? policyCatalog(p, callback.getCatalog()) : null;
-                outcome(p, callback.getStatus(), catalog,
-                        Set.of("completed", "noop").contains(callback.getStatus()) ? safeText(callback.getText(), 2000)
-                                : "unknown".equals(callback.getStatus()) && "ambiguous_compaction".equals(callback.getError())
-                                ? "已观察到原生压缩，但无法确认属于本次请求；不会自动重发。" : null,
-                        safeError(callback.getError()));
+                String status = callback.getStatus();
+                AgentCommand.Effect effect = callback.getEffect();
+                String text = Set.of("completed", "noop").contains(status) ? safeText(callback.getText(), 2000)
+                        : "unknown".equals(status) && "ambiguous_compaction".equals(callback.getError())
+                        ? "已观察到原生压缩，但无法确认属于本次请求；不会自动重发。" : null;
+                if ("completed".equals(status) && effect != null && "compact".equals(effect.getKind())
+                        && Boolean.FALSE.equals(effect.getSummary())) text = "已完成原生压缩，未生成新摘要。";
+                outcome(p, status, catalog, text, safeError(callback.getError()));
             }
             if (save(raw, p)) { feedback(p); return p.getResult(); }
         }
@@ -919,9 +922,13 @@ public class AgentCommandService {
             if (ref.getMessageId() == null || !Objects.equals(ref.getInputId(), ref.getParentId())) throw new BizException("invalid_command_result");
         } else if ("session.compact".equals(capability)) {
             // Require fresh outcome evidence; an ACK cannot stand in for a completed compaction.
-            AgentCommand.Effect compact = callback.getEffect();
-            if (compact == null || compact.getControlId() == null || !Boolean.TRUE.equals(compact.getSummary())
-                    || (compact.getSummaryId() == null && !request.getRequestId().equals(compact.getControlId())))
+            AgentCommand.Effect callbackEffect = callback.getEffect();
+            if (callbackEffect == null || callbackEffect.getControlId() == null
+                    || (callbackEffect.getSummaryId() == null && !request.getRequestId().equals(callbackEffect.getControlId())))
+                throw new BizException("invalid_command_result");
+            // A no-summary outcome must supply its own binding and cannot inherit an ACK's summary ID.
+            if (Boolean.FALSE.equals(callbackEffect.getSummary()) && (callback.getGeneration() == null
+                    || callback.getNativeRef() == null || result.getEffect().getSummaryId() != null))
                 throw new BizException("invalid_command_result");
         } else if ("session.reset".equals(capability)) {
             if (effect == null || ref != null && Objects.equals(ref.getSessionId(), effect.getSessionId())

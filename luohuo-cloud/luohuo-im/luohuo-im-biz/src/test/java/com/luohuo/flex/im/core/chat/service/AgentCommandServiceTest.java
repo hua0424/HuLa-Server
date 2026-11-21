@@ -348,8 +348,8 @@ class AgentCommandServiceTest {
         assertEquals("accepted", service.complete(ack).getStatus());
         var effectless = nativeCallback("\"status\":\"completed\"," + binding);
         assertThrows(BizException.class, () -> service.complete(effectless));
-        var noSummary = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
-        assertThrows(BizException.class, () -> service.complete(noSummary));
+        var contradictory = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summaryId\":\"a1\",\"summary\":false}");
+        assertThrows(BizException.class, () -> service.complete(contradictory));
         var done = nativeCallback(bound + summary + ",\"nativeResult\":{\"summary\":\"private fixture summary\"}");
         var result = service.complete(done);
         assertEquals("completed", result.getStatus());
@@ -359,6 +359,57 @@ class AgentCommandServiceTest {
         assertTrue(result.getEffect().getSummary());
         assertNull(result.getEffect().getSummaryId());
         assertFalse(json.writeValueAsString(result).contains("private fixture summary"));
+    }
+    @Test void compactReportsConfirmedCompletionWithoutInventingASummary() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        String bound = "\"status\":\"completed\",\"generation\":\"1\",\"nativeRef\":{\"sessionId\":\"s1\"},";
+        var uncorrelated = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"other-request\",\"summary\":false}");
+        assertEquals("invalid_command_result", assertThrows(BizException.class, () -> service.complete(uncorrelated)).getMessage());
+        var done = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus());
+        assertEquals("outcome", result.getPhase());
+        assertEquals("1", result.getGeneration());
+        assertEquals("s1", result.getNativeRef().getSessionId());
+        assertEquals("req-1", result.getEffect().getControlId());
+        assertEquals(Boolean.FALSE, result.getEffect().getSummary());
+        assertNull(result.getEffect().getSummaryId());
+        assertEquals("已完成原生压缩，未生成新摘要。", result.getText());
+        verify(chat).sendMsg(argThat(msg -> msg.getRoomId().equals(20L)
+                && msg.getBody().toString().contains("已完成原生压缩，未生成新摘要。")), eq(11L));
+    }
+    @Test void completedCompactionCannotBorrowASummaryIdFromAnAck() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        String binding = "\"generation\":\"1\",\"nativeRef\":{\"sessionId\":\"s1\"},";
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\"," + binding
+                + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summaryId\":\"a1\",\"summary\":true}");
+        assertEquals("accepted", service.complete(ack).getStatus());
+        var contradictory = nativeCallback("\"status\":\"completed\"," + binding
+                + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        assertThrows(BizException.class, () -> service.complete(contradictory));
+        verifyNoInteractions(chat);
+    }
+    @Test void compactWithoutSummaryNeedsItsOwnBindingToReconcileAnUnknownOutcome() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r); pastDeadline();
+        assertEquals("unknown", service.get("req-1").getStatus());
+        String nativeRef = "\"nativeRef\":{\"sessionId\":\"s1\"},";
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\",\"generation\":\"1\"," + nativeRef
+                + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        assertEquals("unknown", service.complete(ack).getStatus());
+        String outcome = "\"status\":\"completed\",\"reconciled\":true,";
+        String effect = "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}";
+        for (String partial : List.of(nativeRef, "\"generation\":\"1\",")) {
+            var unbound = nativeCallback(outcome + partial + effect);
+            assertEquals("invalid_command_result", assertThrows(BizException.class, () -> service.complete(unbound)).getMessage());
+        }
+        var done = nativeCallback(outcome + "\"generation\":\"1\"," + nativeRef + effect);
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus());
+        assertEquals(2, result.getReceiptRevision());
+        assertTrue(result.getReconciled());
+        assertEquals(Boolean.FALSE, result.getEffect().getSummary());
+        assertEquals("completed", service.complete(done).getStatus());
+        verify(chat, times(2)).sendMsg(any(), eq(11L));
     }
     @Test void completionRereadsCompetingNativeAckInsteadOfLosingOutcome() throws Exception {
         var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
