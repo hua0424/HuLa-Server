@@ -238,22 +238,33 @@ public class AgentCommandService {
         return dispatch(pending, raw);
     }
 
-    /** #505: 审批通过后的唯一一次真实下发；调用方必须已赢得 approved CAS。 */
+    /** #505: 已审批请求仅由赢得 approved CAS 的调用者下发。 */
     private AgentCommand.Result dispatch(Pending pending, String raw) {
+        boolean approved = "approved".equals(pending.getApprovalStatus());
+        if (approved) {
+            String blocked = approvalBlocked(pending);
+            if (blocked != null) return invalidateDispatched(raw, pending, blocked);
+        }
         if (pending.getContext() == null) return finish(raw, "unknown", null, null, "authorization_changed").getResult();
         WsBaseResp<JsonNode> ws = commandMessage(pending, false);
+        PushSubmission submitted;
         try {
-            PushSubmission submitted = push.submitPushMsg(ws, id(pending.getRequest().getAiclawUid()), pending.getActor());
-            if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED)
-                return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
-            if (submitted.getRouteStatus() == PushSubmission.RouteStatus.NO_TARGET)
-                return finish(raw, "offline", null, "目标 Agent 离线，命令未执行，不会在上线后补执行。", "agent_offline").getResult();
-            if (submitted.getAdmission() == PushSubmission.Admission.NONE)
-                return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
+            submitted = push.submitPushMsg(ws, id(pending.getRequest().getAiclawUid()), pending.getActor());
         } catch (RuntimeException failure) {
             // A throwing transport can have submitted already. Never resend a native command.
-            return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
+            submitted = null;
         }
+        if (approved) {
+            // 不让审批反馈的 I/O 隔开最终授权检查与下发；反馈不等待原生执行。
+            removeApprovalIndex(pending);
+            notifyApproval(pending, false);
+            approvalFeedback(pending);
+        }
+        if (submitted != null && submitted.getRouteStatus() == PushSubmission.RouteStatus.NO_TARGET)
+            return finish(raw, "offline", null, "目标 Agent 离线，命令未执行，不会在上线后补执行。", "agent_offline").getResult();
+        if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED
+                || submitted.getAdmission() == PushSubmission.Admission.NONE)
+            return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
         long tenant = pending.getTenant();
         deadlines.schedule(() -> expire(tenant, pending.getRequest().getRequestId()), DEADLINE_MS, TimeUnit.MILLISECONDS);
         return pending.getResult();
@@ -379,15 +390,7 @@ public class AgentCommandService {
             if (transition < 0) return expireApproval(raw, p).getResult();
             // 已赢得原子转态：后续复核/下发都基于赢家写入后的最新记录，不能用旧 raw 做二次 CAS。
             raw = requiredRaw(tenant, requestId);
-            if (approve) {
-                // 下发前（CAS 之后）再复核一次；CAS 已保证只有一个赢家，本检查只负责拒绝已漂移的赢家。
-                String blocked = approvalBlocked(p);
-                if (blocked != null) return invalidateDispatched(raw, p, blocked);
-                removeApprovalIndex(p);
-                notifyApproval(p, false);
-                approvalFeedback(p);
-                return dispatch(p, raw);
-            }
+            if (approve) return dispatch(p, raw);
             removeApprovalIndex(p);
             notifyApproval(p, false);
             approvalFeedback(p);
@@ -398,6 +401,7 @@ public class AgentCommandService {
 
     /** 审批/下发前的权威复核：成员与配置代次、策略指纹、最后已知会话代次。 */
     private String approvalBlocked(Pending p) {
+        if (p.getContext() == null) return "authorization_changed";
         try {
             Long tenant = p.getTenant(), actor = p.getActor();
             long roomId = id(p.getRequest().getRoomId()), target = id(p.getRequest().getAiclawUid());

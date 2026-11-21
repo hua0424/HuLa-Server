@@ -655,7 +655,10 @@ class AgentCommandServiceTest {
         verify(push, times(2)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
         var dispatch = json.valueToTree(sent.getAllValues().get(1));
         assertEquals("1", dispatch.path("data").path("context").path("expectedGeneration").asText());
-        verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
+        var delivery = inOrder(push, chat);
+        delivery.verify(push).submitPushMsg(argThat(ws -> "invoke".equals(json.valueToTree(ws.getData()).path("operation").asText())),
+                eq(30L), eq(11L));
+        delivery.verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
     }
 
     @Test void ownerApprovalWhenAgentGoesOfflineReportsNoExecutionAndNeverRetries() {
