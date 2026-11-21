@@ -699,6 +699,47 @@ class AgentCommandServiceTest {
         assertTrue(execution.contains("离线") && execution.contains("未执行"), execution);
     }
 
+    @Test void ownerApprovalWithUncertainDeliveryOnlyReconcilesTheOriginalRequest() {
+        var invoke = request("invoke");
+        invoke.setCapabilityId("session.reset");
+        var policy = approvalSnapshot("fp-1");
+        when(ownerCache.getOwnerUid(30L)).thenReturn(99L);
+        when(policies.decide(30L, 0L, "session.reset", 11L, false)).thenReturn(policy.decision());
+        when(policies.snapshot(30L, 0L, "session.reset", 11L, false)).thenReturn(policy);
+        assertEquals("pending", service.submit(invoke).getStatus());
+        probeAck("req-1", "1");
+        when(push.submitPushMsg(any(), eq(30L), eq(11L)))
+                .thenThrow(new IllegalStateException("submission outcome unresolved"))
+                .thenReturn(PushSubmission.resolved(PushSubmission.targetsOf("node", Map.of("device", 30L))));
+
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("approved", result.getApprovalStatus());
+        assertEquals("unknown", result.getStatus());
+        assertEquals("dispatch_unknown", result.getError());
+        assertEquals(result, service.approve("req-1"));
+        verify(push, times(2)).submitPushMsg(any(), eq(30L), eq(11L));
+        ContextUtil.setUid(11L);
+        assertEquals(result, service.get("req-1"));
+        verify(push, times(3)).submitPushMsg(any(), eq(30L), eq(11L));
+        assertEquals(result, service.submit(invoke));
+
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(4)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        var attempts = sent.getAllValues().stream().map(ws -> json.valueToTree(ws).path("data")).toList();
+        assertTrue(attempts.get(0).path("generationProbe").asBoolean());
+        var execution = attempts.get(1);
+        assertEquals("req-1", execution.path("requestId").asText());
+        assertEquals("invoke", execution.path("operation").asText());
+        assertFalse(execution.path("generationProbe").asBoolean());
+        assertFalse(execution.path("reconcileOnly").asBoolean());
+        for (var recovery : attempts.subList(2, 4)) {
+            assertTrue(recovery.path("reconcileOnly").asBoolean());
+            assertEquals("req-1", recovery.path("requestId").asText());
+        }
+        verify(chat, times(1)).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
+    }
+
     @Test void ownerRejectExpiresNeverDispatchAndNewRequestNeedsNewId() throws Exception {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());
