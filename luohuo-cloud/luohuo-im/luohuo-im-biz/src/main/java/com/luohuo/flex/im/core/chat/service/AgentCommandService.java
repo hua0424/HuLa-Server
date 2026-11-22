@@ -438,6 +438,13 @@ public class AgentCommandService {
      */
     private String approvalStale(Pending p) {
         Long tenant = p.getTenant(), actor = p.getActor();
+        try {
+            requireHuman(p.getOwnerUid(), tenant);
+        } catch (BizException e) {
+            return "authorization_changed";
+        } catch (RuntimeException e) {
+            // An unavailable account read is not revocation and must not mask other known changes.
+        }
         long roomId = id(p.getRequest().getRoomId()), target = id(p.getRequest().getAiclawUid());
         Room room;
         try {

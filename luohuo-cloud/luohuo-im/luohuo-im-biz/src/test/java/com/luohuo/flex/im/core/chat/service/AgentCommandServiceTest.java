@@ -53,6 +53,7 @@ class AgentCommandServiceTest {
         ContextUtil.setUid(11L); ContextUtil.setTenantId(1L);
         human = new User(); human.setId(11L); human.setTenantId(1L); human.setState(0); human.setUserType(3);
         when(facts.selectUser(11L)).thenReturn(human);
+        when(facts.selectUser(99L)).thenReturn(owner());
         room = new Room(); room.setId(20L); room.setType(2);
         when(facts.selectRoom(20L, 1L)).thenReturn(room);
         friend = new RoomFriend(); friend.setUid1(11L); friend.setUid2(30L);
@@ -1198,6 +1199,36 @@ class AgentCommandServiceTest {
         assertEquals("authorization_changed", result.getError());
         verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
                 eq(30L), eq(11L));
+    }
+
+    @Test void pendingReadInvalidatesAnIneligibleApproverEvenBeforeGenerationArrives() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        User disabled = owner();
+        disabled.setState(1);
+        when(facts.selectUser(99L)).thenReturn(disabled);
+
+        var invalidated = service.get("req-1");
+
+        assertEquals("invalidated", invalidated.getApprovalStatus());
+        assertEquals("authorization_changed", invalidated.getError());
+        assertEquals(pending.getExpiresAt(), invalidated.getExpiresAt());
+        assertEquals(invalidated, service.submit(request("invoke")));
+        verify(push, never()).submitPushMsg(argThat(ws -> "invoke".equals(json.valueToTree(ws.getData())
+                .path("operation").asText())), eq(30L), eq(11L));
+    }
+
+    @Test void unknownApproverEligibilityDoesNotMaskKnownPolicyChange() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        when(facts.selectUser(99L)).thenThrow(new IllegalStateException("account lookup unavailable"));
+        assertEquals("pending", service.get("req-1").getStatus());
+        when(policies.snapshot(30L, 0L, "model.list", 11L, false)).thenReturn(approvalSnapshot("fp-2"));
+        var invalidated = service.get("req-1");
+        assertEquals("invalidated", invalidated.getApprovalStatus());
+        assertEquals(pending.getExpiresAt(), invalidated.getExpiresAt());
     }
 
     @Test void ownerDisabledDuringApprovalDoesNotDispatch() {
