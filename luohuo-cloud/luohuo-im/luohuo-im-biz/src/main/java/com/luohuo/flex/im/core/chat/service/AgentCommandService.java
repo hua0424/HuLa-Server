@@ -190,6 +190,7 @@ public class AgentCommandService {
         result.setRequestId(request.getRequestId()); result.setRoomId(request.getRoomId());
         result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation());
         if (needsApproval) {
+            requireHuman(ownerUid, tenant);
             pending.setApprovalStatus(APPROVAL_PENDING);
             // 受理时冻结代次观测 epoch；读不到可信值（而非“确实没有 reset”）时拒绝受理，不能带未知下发。
             Long acceptedEpoch = readEpoch(tenant, target, roomId);

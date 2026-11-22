@@ -1201,6 +1201,20 @@ class AgentCommandServiceTest {
                 eq(30L), eq(11L));
     }
 
+    @Test void doesNotCreateAnApprovalForAnAlreadyDisabledApprover() {
+        approvalPending("fp-1");
+        User disabled = owner();
+        disabled.setState(1);
+        when(facts.selectUser(99L)).thenReturn(disabled);
+
+        var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
+
+        assertEquals("command_forbidden", failure.getMessage());
+        assertTrue(storage.isEmpty());
+        assertTrue(ttl.isEmpty());
+        verifyNoInteractions(push, chat, sets);
+    }
+
     @Test void pendingReadInvalidatesAnIneligibleApproverEvenBeforeGenerationArrives() {
         approvalPending("fp-1");
         var pending = service.submit(request("invoke"));
