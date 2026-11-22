@@ -1200,6 +1200,27 @@ class AgentCommandServiceTest {
                 eq(30L), eq(11L));
     }
 
+    @Test void ownerDisabledDuringApprovalDoesNotDispatch() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        probeAck("req-1", "1");
+        asOwner();
+        User approver = owner();
+        when(facts.selectUser(99L)).thenReturn(approver);
+        beforeGrant = () -> approver.setState(1);
+
+        var result = service.approve("req-1");
+
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        assertEquals(pending.getExpiresAt(), result.getExpiresAt());
+        verify(push, never()).submitPushMsg(argThat(ws -> "invoke".equals(json.valueToTree(ws.getData())
+                .path("operation").asText())), eq(30L), eq(11L));
+        ContextUtil.setUid(11L);
+        assertEquals("invalidated", service.get("req-1").getApprovalStatus());
+    }
+
     @Test void approvedExecutionIsNotInvalidatedByLaterPolicyChangeOrApprovalTtl() {
         approvalPending("fp-1");
         assertEquals("pending", service.submit(request("invoke")).getStatus());

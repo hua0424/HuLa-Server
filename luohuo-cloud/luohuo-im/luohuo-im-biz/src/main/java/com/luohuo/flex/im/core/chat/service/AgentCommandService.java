@@ -424,6 +424,8 @@ public class AgentCommandService {
             // 缓存只是最后已知值；读失败(null)不否决可信快照，插件仍照 expectedGeneration 在原生执行前线性化。
             String cached = generation(tenant, target, roomId);
             if (cached != null && !Objects.equals(p.getGeneration(), cached)) return "authorization_changed";
+            // The approver must still qualify when the approved command reaches its final dispatch check.
+            requireHuman(p.getOwnerUid(), tenant);
             return null;
         } catch (RuntimeException e) {
             return "authorization_changed";
