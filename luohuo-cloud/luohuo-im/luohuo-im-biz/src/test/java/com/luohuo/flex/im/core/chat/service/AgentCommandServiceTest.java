@@ -53,6 +53,7 @@ class AgentCommandServiceTest {
         ContextUtil.setUid(11L); ContextUtil.setTenantId(1L);
         human = new User(); human.setId(11L); human.setTenantId(1L); human.setState(0); human.setUserType(3);
         when(facts.selectUser(11L)).thenReturn(human);
+        when(facts.selectUser(99L)).thenReturn(owner());
         room = new Room(); room.setId(20L); room.setType(2);
         when(facts.selectRoom(20L, 1L)).thenReturn(room);
         friend = new RoomFriend(); friend.setUid1(11L); friend.setUid2(30L);
@@ -337,6 +338,80 @@ class AgentCommandServiceTest {
         var done = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\"},\"effect\":{\"kind\":\"compact\",\"controlId\":\"c1\",\"summaryId\":\"a1\",\"summary\":true}");
         assertTrue(service.complete(done).getEffect().getSummary());
     }
+    @Test void compactAcceptsBoundSummaryWithoutInventingANativeSummaryId() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        String binding = "\"generation\":\"1\",\"nativeRef\":{\"sessionId\":\"s1\"}";
+        String bound = "\"status\":\"completed\"," + binding + ",";
+        String summary = "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":true}";
+        var uncorrelated = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"other-request\",\"summary\":true}");
+        assertEquals("invalid_command_result", assertThrows(BizException.class, () -> service.complete(uncorrelated)).getMessage());
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\"," + binding + "," + summary);
+        assertEquals("accepted", service.complete(ack).getStatus());
+        var effectless = nativeCallback("\"status\":\"completed\"," + binding);
+        assertThrows(BizException.class, () -> service.complete(effectless));
+        var contradictory = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summaryId\":\"a1\",\"summary\":false}");
+        assertThrows(BizException.class, () -> service.complete(contradictory));
+        var done = nativeCallback(bound + summary + ",\"nativeResult\":{\"summary\":\"private fixture summary\"}");
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus());
+        assertEquals("1", result.getGeneration());
+        assertEquals("s1", result.getNativeRef().getSessionId());
+        assertEquals("req-1", result.getEffect().getControlId());
+        assertTrue(result.getEffect().getSummary());
+        assertNull(result.getEffect().getSummaryId());
+        assertFalse(json.writeValueAsString(result).contains("private fixture summary"));
+    }
+    @Test void compactReportsConfirmedCompletionWithoutInventingASummary() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        String bound = "\"status\":\"completed\",\"generation\":\"1\",\"nativeRef\":{\"sessionId\":\"s1\"},";
+        var uncorrelated = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"other-request\",\"summary\":false}");
+        assertEquals("invalid_command_result", assertThrows(BizException.class, () -> service.complete(uncorrelated)).getMessage());
+        var done = nativeCallback(bound + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus());
+        assertEquals("outcome", result.getPhase());
+        assertEquals("1", result.getGeneration());
+        assertEquals("s1", result.getNativeRef().getSessionId());
+        assertEquals("req-1", result.getEffect().getControlId());
+        assertEquals(Boolean.FALSE, result.getEffect().getSummary());
+        assertNull(result.getEffect().getSummaryId());
+        assertEquals("已完成原生压缩，未生成新摘要。", result.getText());
+        verify(chat).sendMsg(argThat(msg -> msg.getRoomId().equals(20L)
+                && msg.getBody().toString().contains("已完成原生压缩，未生成新摘要。")), eq(11L));
+    }
+    @Test void completedCompactionCannotBorrowASummaryIdFromAnAck() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r);
+        String binding = "\"generation\":\"1\",\"nativeRef\":{\"sessionId\":\"s1\"},";
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\"," + binding
+                + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summaryId\":\"a1\",\"summary\":true}");
+        assertEquals("accepted", service.complete(ack).getStatus());
+        var contradictory = nativeCallback("\"status\":\"completed\"," + binding
+                + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        assertThrows(BizException.class, () -> service.complete(contradictory));
+        verifyNoInteractions(chat);
+    }
+    @Test void compactWithoutSummaryNeedsItsOwnBindingToReconcileAnUnknownOutcome() throws Exception {
+        var r = request("invoke"); r.setCapabilityId("session.compact"); service.submit(r); pastDeadline();
+        assertEquals("unknown", service.get("req-1").getStatus());
+        String nativeRef = "\"nativeRef\":{\"sessionId\":\"s1\"},";
+        var ack = nativeCallback("\"status\":\"accepted\",\"phase\":\"accepted\",\"generation\":\"1\"," + nativeRef
+                + "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}");
+        assertEquals("unknown", service.complete(ack).getStatus());
+        String outcome = "\"status\":\"completed\",\"reconciled\":true,";
+        String effect = "\"effect\":{\"kind\":\"compact\",\"controlId\":\"req-1\",\"summary\":false}";
+        for (String partial : List.of(nativeRef, "\"generation\":\"1\",")) {
+            var unbound = nativeCallback(outcome + partial + effect);
+            assertEquals("invalid_command_result", assertThrows(BizException.class, () -> service.complete(unbound)).getMessage());
+        }
+        var done = nativeCallback(outcome + "\"generation\":\"1\"," + nativeRef + effect);
+        var result = service.complete(done);
+        assertEquals("completed", result.getStatus());
+        assertEquals(2, result.getReceiptRevision());
+        assertTrue(result.getReconciled());
+        assertEquals(Boolean.FALSE, result.getEffect().getSummary());
+        assertEquals("completed", service.complete(done).getStatus());
+        verify(chat, times(2)).sendMsg(any(), eq(11L));
+    }
     @Test void completionRereadsCompetingNativeAckInsteadOfLosingOutcome() throws Exception {
         var r = request("invoke"); r.setCapabilityId("skill:fixture"); service.submit(r);
         var done = nativeCallback("\"status\":\"completed\",\"generation\":\"g1\",\"nativeRef\":{\"sessionId\":\"s1\",\"inputId\":\"u1\",\"messageId\":\"a1\",\"parentId\":\"u1\"}");
@@ -481,6 +556,22 @@ class AgentCommandServiceTest {
         assertFalse(catalog.path("models").path("items").get(0).path("connected").asBoolean());
         assertFalse(catalog.toString().contains("discard")); verifyNoInteractions(chat);
     }
+    @Test void nativeModelPagePreservesUnknownConnectivityWithoutCoercion() throws Exception {
+        var request = request("discover"); request.setCapabilityId("model.set"); service.submit(request);
+        var callback = callback();
+        var catalog = json.readTree("""
+                {"version":"cc-inventory","framework":"cc","runtimeVersion":"2.1.195","capabilities":[],
+                 "models":{"items":[{"providerId":"firstParty","modelId":"native-model","label":"Native model"}],"total":1,"offset":0}}
+                """);
+        var row = (com.fasterxml.jackson.databind.node.ObjectNode) catalog.path("models").path("items").get(0);
+        callback.setCatalog(catalog);
+        row.put("connected", "false");
+        assertThrows(BizException.class, () -> service.complete(callback));
+        row.remove("connected");
+        var projected = service.complete(callback).getCatalog().path("models").path("items").get(0);
+        assertEquals("native-model", projected.path("modelId").asText());
+        assertFalse(projected.has("connected"));
+    }
     @Test void invalidParameterTypesAndExtraKeysNeverDispatch() {
         for (Object value : Arrays.asList(null, List.of("x"), Map.of("x", "y"), 1, "x".repeat(4097), "x\u0000y")) {
             var r = request("invoke"); r.setCapabilityId("skill:fixture");
@@ -581,7 +672,10 @@ class AgentCommandServiceTest {
         verify(push, times(2)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
         var dispatch = json.valueToTree(sent.getAllValues().get(1));
         assertEquals("1", dispatch.path("data").path("context").path("expectedGeneration").asText());
-        verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
+        var delivery = inOrder(push, chat);
+        delivery.verify(push).submitPushMsg(argThat(ws -> "invoke".equals(json.valueToTree(ws.getData()).path("operation").asText())),
+                eq(30L), eq(11L));
+        delivery.verify(chat).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
     }
 
     @Test void ownerApprovalWhenAgentGoesOfflineReportsNoExecutionAndNeverRetries() {
@@ -620,6 +714,47 @@ class AgentCommandServiceTest {
         assertTrue(approval.contains("主人已批准"));
         assertFalse(approval.contains("命令开始执行"), approval);
         assertTrue(execution.contains("离线") && execution.contains("未执行"), execution);
+    }
+
+    @Test void ownerApprovalWithUncertainDeliveryOnlyReconcilesTheOriginalRequest() {
+        var invoke = request("invoke");
+        invoke.setCapabilityId("session.reset");
+        var policy = approvalSnapshot("fp-1");
+        when(ownerCache.getOwnerUid(30L)).thenReturn(99L);
+        when(policies.decide(30L, 0L, "session.reset", 11L, false)).thenReturn(policy.decision());
+        when(policies.snapshot(30L, 0L, "session.reset", 11L, false)).thenReturn(policy);
+        assertEquals("pending", service.submit(invoke).getStatus());
+        probeAck("req-1", "1");
+        when(push.submitPushMsg(any(), eq(30L), eq(11L)))
+                .thenThrow(new IllegalStateException("submission outcome unresolved"))
+                .thenReturn(PushSubmission.resolved(PushSubmission.targetsOf("node", Map.of("device", 30L))));
+
+        asOwner();
+        var result = service.approve("req-1");
+        assertEquals("approved", result.getApprovalStatus());
+        assertEquals("unknown", result.getStatus());
+        assertEquals("dispatch_unknown", result.getError());
+        assertEquals(result, service.approve("req-1"));
+        verify(push, times(2)).submitPushMsg(any(), eq(30L), eq(11L));
+        ContextUtil.setUid(11L);
+        assertEquals(result, service.get("req-1"));
+        verify(push, times(3)).submitPushMsg(any(), eq(30L), eq(11L));
+        assertEquals(result, service.submit(invoke));
+
+        var sent = ArgumentCaptor.forClass(com.luohuo.flex.model.entity.WsBaseResp.class);
+        verify(push, times(4)).submitPushMsg(sent.capture(), eq(30L), eq(11L));
+        var attempts = sent.getAllValues().stream().map(ws -> json.valueToTree(ws).path("data")).toList();
+        assertTrue(attempts.get(0).path("generationProbe").asBoolean());
+        var execution = attempts.get(1);
+        assertEquals("req-1", execution.path("requestId").asText());
+        assertEquals("invoke", execution.path("operation").asText());
+        assertFalse(execution.path("generationProbe").asBoolean());
+        assertFalse(execution.path("reconcileOnly").asBoolean());
+        for (var recovery : attempts.subList(2, 4)) {
+            assertTrue(recovery.path("reconcileOnly").asBoolean());
+            assertEquals("req-1", recovery.path("requestId").asText());
+        }
+        verify(chat, times(1)).sendMsg(argThat(msg -> msg.getBody().toString().contains("主人已批准")), eq(11L));
     }
 
     @Test void ownerRejectExpiresNeverDispatchAndNewRequestNeedsNewId() throws Exception {
@@ -1080,6 +1215,71 @@ class AgentCommandServiceTest {
         assertEquals("authorization_changed", result.getError());
         verify(push, never()).submitPushMsg(argThat(ws -> !json.valueToTree(ws.getData()).path("generationProbe").asBoolean()),
                 eq(30L), eq(11L));
+    }
+
+    @Test void doesNotCreateAnApprovalForAnAlreadyDisabledApprover() {
+        approvalPending("fp-1");
+        User disabled = owner();
+        disabled.setState(1);
+        when(facts.selectUser(99L)).thenReturn(disabled);
+
+        var failure = assertThrows(BizException.class, () -> service.submit(request("invoke")));
+
+        assertEquals("command_forbidden", failure.getMessage());
+        assertTrue(storage.isEmpty());
+        assertTrue(ttl.isEmpty());
+        verifyNoInteractions(push, chat, sets);
+    }
+
+    @Test void pendingReadInvalidatesAnIneligibleApproverEvenBeforeGenerationArrives() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        User disabled = owner();
+        disabled.setState(1);
+        when(facts.selectUser(99L)).thenReturn(disabled);
+
+        var invalidated = service.get("req-1");
+
+        assertEquals("invalidated", invalidated.getApprovalStatus());
+        assertEquals("authorization_changed", invalidated.getError());
+        assertEquals(pending.getExpiresAt(), invalidated.getExpiresAt());
+        assertEquals(invalidated, service.submit(request("invoke")));
+        verify(push, never()).submitPushMsg(argThat(ws -> "invoke".equals(json.valueToTree(ws.getData())
+                .path("operation").asText())), eq(30L), eq(11L));
+    }
+
+    @Test void unknownApproverEligibilityDoesNotMaskKnownPolicyChange() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        when(facts.selectUser(99L)).thenThrow(new IllegalStateException("account lookup unavailable"));
+        assertEquals("pending", service.get("req-1").getStatus());
+        when(policies.snapshot(30L, 0L, "model.list", 11L, false)).thenReturn(approvalSnapshot("fp-2"));
+        var invalidated = service.get("req-1");
+        assertEquals("invalidated", invalidated.getApprovalStatus());
+        assertEquals(pending.getExpiresAt(), invalidated.getExpiresAt());
+    }
+
+    @Test void ownerDisabledDuringApprovalDoesNotDispatch() {
+        approvalPending("fp-1");
+        var pending = service.submit(request("invoke"));
+        assertEquals("pending", pending.getStatus());
+        probeAck("req-1", "1");
+        asOwner();
+        User approver = owner();
+        when(facts.selectUser(99L)).thenReturn(approver);
+        beforeGrant = () -> approver.setState(1);
+
+        var result = service.approve("req-1");
+
+        assertEquals("invalidated", result.getApprovalStatus());
+        assertEquals("authorization_changed", result.getError());
+        assertEquals(pending.getExpiresAt(), result.getExpiresAt());
+        verify(push, never()).submitPushMsg(argThat(ws -> "invoke".equals(json.valueToTree(ws.getData())
+                .path("operation").asText())), eq(30L), eq(11L));
+        ContextUtil.setUid(11L);
+        assertEquals("invalidated", service.get("req-1").getApprovalStatus());
     }
 
     @Test void approvedExecutionIsNotInvalidatedByLaterPolicyChangeOrApprovalTtl() {

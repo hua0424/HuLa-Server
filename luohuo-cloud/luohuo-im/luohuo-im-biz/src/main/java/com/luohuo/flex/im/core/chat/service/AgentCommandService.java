@@ -190,6 +190,7 @@ public class AgentCommandService {
         result.setRequestId(request.getRequestId()); result.setRoomId(request.getRoomId());
         result.setAiclawUid(request.getAiclawUid()); result.setOperation(request.getOperation());
         if (needsApproval) {
+            requireHuman(ownerUid, tenant);
             pending.setApprovalStatus(APPROVAL_PENDING);
             // 受理时冻结代次观测 epoch；读不到可信值（而非“确实没有 reset”）时拒绝受理，不能带未知下发。
             Long acceptedEpoch = readEpoch(tenant, target, roomId);
@@ -238,22 +239,33 @@ public class AgentCommandService {
         return dispatch(pending, raw);
     }
 
-    /** #505: 审批通过后的唯一一次真实下发；调用方必须已赢得 approved CAS。 */
+    /** #505: 已审批请求仅由赢得 approved CAS 的调用者下发。 */
     private AgentCommand.Result dispatch(Pending pending, String raw) {
+        boolean approved = "approved".equals(pending.getApprovalStatus());
+        if (approved) {
+            String blocked = approvalBlocked(pending);
+            if (blocked != null) return invalidateDispatched(raw, pending, blocked);
+        }
         if (pending.getContext() == null) return finish(raw, "unknown", null, null, "authorization_changed").getResult();
         WsBaseResp<JsonNode> ws = commandMessage(pending, false);
+        PushSubmission submitted;
         try {
-            PushSubmission submitted = push.submitPushMsg(ws, id(pending.getRequest().getAiclawUid()), pending.getActor());
-            if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED)
-                return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
-            if (submitted.getRouteStatus() == PushSubmission.RouteStatus.NO_TARGET)
-                return finish(raw, "offline", null, "目标 Agent 离线，命令未执行，不会在上线后补执行。", "agent_offline").getResult();
-            if (submitted.getAdmission() == PushSubmission.Admission.NONE)
-                return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
+            submitted = push.submitPushMsg(ws, id(pending.getRequest().getAiclawUid()), pending.getActor());
         } catch (RuntimeException failure) {
             // A throwing transport can have submitted already. Never resend a native command.
-            return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
+            submitted = null;
         }
+        if (approved) {
+            // 不让审批反馈的 I/O 隔开最终授权检查与下发；反馈不等待原生执行。
+            removeApprovalIndex(pending);
+            notifyApproval(pending, false);
+            approvalFeedback(pending);
+        }
+        if (submitted != null && submitted.getRouteStatus() == PushSubmission.RouteStatus.NO_TARGET)
+            return finish(raw, "offline", null, "目标 Agent 离线，命令未执行，不会在上线后补执行。", "agent_offline").getResult();
+        if (submitted == null || submitted.getRouteStatus() == PushSubmission.RouteStatus.FAILED
+                || submitted.getAdmission() == PushSubmission.Admission.NONE)
+            return finish(raw, "unknown", null, null, "dispatch_unknown").getResult();
         long tenant = pending.getTenant();
         deadlines.schedule(() -> expire(tenant, pending.getRequest().getRequestId()), DEADLINE_MS, TimeUnit.MILLISECONDS);
         return pending.getResult();
@@ -379,15 +391,7 @@ public class AgentCommandService {
             if (transition < 0) return expireApproval(raw, p).getResult();
             // 已赢得原子转态：后续复核/下发都基于赢家写入后的最新记录，不能用旧 raw 做二次 CAS。
             raw = requiredRaw(tenant, requestId);
-            if (approve) {
-                // 下发前（CAS 之后）再复核一次；CAS 已保证只有一个赢家，本检查只负责拒绝已漂移的赢家。
-                String blocked = approvalBlocked(p);
-                if (blocked != null) return invalidateDispatched(raw, p, blocked);
-                removeApprovalIndex(p);
-                notifyApproval(p, false);
-                approvalFeedback(p);
-                return dispatch(p, raw);
-            }
+            if (approve) return dispatch(p, raw);
             removeApprovalIndex(p);
             notifyApproval(p, false);
             approvalFeedback(p);
@@ -398,6 +402,7 @@ public class AgentCommandService {
 
     /** 审批/下发前的权威复核：成员与配置代次、策略指纹、最后已知会话代次。 */
     private String approvalBlocked(Pending p) {
+        if (p.getContext() == null) return "authorization_changed";
         try {
             Long tenant = p.getTenant(), actor = p.getActor();
             long roomId = id(p.getRequest().getRoomId()), target = id(p.getRequest().getAiclawUid());
@@ -420,6 +425,8 @@ public class AgentCommandService {
             // 缓存只是最后已知值；读失败(null)不否决可信快照，插件仍照 expectedGeneration 在原生执行前线性化。
             String cached = generation(tenant, target, roomId);
             if (cached != null && !Objects.equals(p.getGeneration(), cached)) return "authorization_changed";
+            // The approver must still qualify when the approved command reaches its final dispatch check.
+            requireHuman(p.getOwnerUid(), tenant);
             return null;
         } catch (RuntimeException e) {
             return "authorization_changed";
@@ -432,6 +439,13 @@ public class AgentCommandService {
      */
     private String approvalStale(Pending p) {
         Long tenant = p.getTenant(), actor = p.getActor();
+        try {
+            requireHuman(p.getOwnerUid(), tenant);
+        } catch (BizException e) {
+            return "authorization_changed";
+        } catch (RuntimeException e) {
+            // An unavailable account read is not revocation and must not mask other known changes.
+        }
         long roomId = id(p.getRequest().getRoomId()), target = id(p.getRequest().getAiclawUid());
         Room room;
         try {
@@ -697,7 +711,7 @@ public class AgentCommandService {
             AgentCommand.Result previous = uncertain ? JSON.convertValue(p.getResult(), AgentCommand.Result.class) : null;
             mergeBinding(p.getResult(), callback);
             mergeEffect(p.getRequest(), p.getResult(), callback.getEffect());
-            validateEvidence(p.getRequest(), p.getResult(), callback.getStatus());
+            validateEvidence(p.getRequest(), p.getResult(), callback);
             if (uncertain && !ack && !reconcile) { feedback(decode(raw)); return decode(raw).getResult(); }
             if (ack) {
                 if (!uncertain) p.getResult().setPhase("accepted"); // A lost ACK can pin IDs, never erase unknown.
@@ -708,11 +722,14 @@ public class AgentCommandService {
                 }
                 JsonNode catalog = "discover".equals(p.getRequest().getOperation()) && "completed".equals(callback.getStatus())
                         ? policyCatalog(p, callback.getCatalog()) : null;
-                outcome(p, callback.getStatus(), catalog,
-                        Set.of("completed", "noop").contains(callback.getStatus()) ? safeText(callback.getText(), 2000)
-                                : "unknown".equals(callback.getStatus()) && "ambiguous_compaction".equals(callback.getError())
-                                ? "已观察到原生压缩，但无法确认属于本次请求；不会自动重发。" : null,
-                        safeError(callback.getError()));
+                String status = callback.getStatus();
+                AgentCommand.Effect effect = callback.getEffect();
+                String text = Set.of("completed", "noop").contains(status) ? safeText(callback.getText(), 2000)
+                        : "unknown".equals(status) && "ambiguous_compaction".equals(callback.getError())
+                        ? "已观察到原生压缩，但无法确认属于本次请求；不会自动重发。" : null;
+                if ("completed".equals(status) && effect != null && "compact".equals(effect.getKind())
+                        && Boolean.FALSE.equals(effect.getSummary())) text = "已完成原生压缩，未生成新摘要。";
+                outcome(p, status, catalog, text, safeError(callback.getError()));
             }
             if (save(raw, p)) { feedback(p); return p.getResult(); }
         }
@@ -904,9 +921,9 @@ public class AgentCommandService {
         }
         result.setEffect(effect);
     }
-    private static void validateEvidence(AgentCommand.Request request, AgentCommand.Result result, String status) {
+    private static void validateEvidence(AgentCommand.Request request, AgentCommand.Result result, AgentCommand.Callback callback) {
         if (!execution(request)) return;
-        String capability = request.getCapabilityId();
+        String capability = request.getCapabilityId(), status = callback.getStatus();
         AgentCommand.NativeRef ref = result.getNativeRef(); AgentCommand.Effect effect = result.getEffect();
         if (skill(capability) && ref != null && ref.getInputId() != null && ref.getParentId() != null
                 && !ref.getInputId().equals(ref.getParentId())) throw new BizException("command_binding_conflict");
@@ -918,7 +935,14 @@ public class AgentCommandService {
         if (skill(capability)) {
             if (ref.getMessageId() == null || !Objects.equals(ref.getInputId(), ref.getParentId())) throw new BizException("invalid_command_result");
         } else if ("session.compact".equals(capability)) {
-            if (effect == null || !Boolean.TRUE.equals(effect.getSummary()) || effect.getSummaryId() == null)
+            // Require fresh outcome evidence; an ACK cannot stand in for a completed compaction.
+            AgentCommand.Effect callbackEffect = callback.getEffect();
+            if (callbackEffect == null || callbackEffect.getControlId() == null
+                    || (callbackEffect.getSummaryId() == null && !request.getRequestId().equals(callbackEffect.getControlId())))
+                throw new BizException("invalid_command_result");
+            // A no-summary outcome must supply its own binding and cannot inherit an ACK's summary ID.
+            if (Boolean.FALSE.equals(callbackEffect.getSummary()) && (callback.getGeneration() == null
+                    || callback.getNativeRef() == null || result.getEffect().getSummaryId() != null))
                 throw new BizException("invalid_command_result");
         } else if ("session.reset".equals(capability)) {
             if (effect == null || ref != null && Objects.equals(ref.getSessionId(), effect.getSessionId())
@@ -1200,12 +1224,14 @@ public class AgentCommandService {
             for (JsonNode model : supplied.path("items")) {
                 if (!model.isObject() || !model.path("providerId").isTextual() || !model.path("modelId").isTextual()
                         || !model.path("label").isTextual() || model.path("label").asText().length() > 256
-                        || !model.path("connected").isBoolean()) throw new BizException("invalid_command_catalog");
+                        || (model.has("connected") && !model.path("connected").isBoolean()))
+                    throw new BizException("invalid_command_catalog");
                 String provider = opaque(model.path("providerId").asText(), 256, "invalid_command_catalog");
                 String id = opaque(model.path("modelId").asText(), 256, "invalid_command_catalog");
                 if (!models.add(List.of(provider, id))) throw new BizException("invalid_command_catalog");
-                items.addObject().put("providerId", provider).put("modelId", id)
-                        .put("label", safeText(model.path("label").asText(), 256)).put("connected", model.path("connected").asBoolean());
+                ObjectNode item = items.addObject().put("providerId", provider).put("modelId", id)
+                        .put("label", safeText(model.path("label").asText(), 256));
+                if (model.has("connected")) item.put("connected", model.path("connected").asBoolean());
             }
         }
         return out;
