@@ -1224,12 +1224,14 @@ public class AgentCommandService {
             for (JsonNode model : supplied.path("items")) {
                 if (!model.isObject() || !model.path("providerId").isTextual() || !model.path("modelId").isTextual()
                         || !model.path("label").isTextual() || model.path("label").asText().length() > 256
-                        || !model.path("connected").isBoolean()) throw new BizException("invalid_command_catalog");
+                        || (model.has("connected") && !model.path("connected").isBoolean()))
+                    throw new BizException("invalid_command_catalog");
                 String provider = opaque(model.path("providerId").asText(), 256, "invalid_command_catalog");
                 String id = opaque(model.path("modelId").asText(), 256, "invalid_command_catalog");
                 if (!models.add(List.of(provider, id))) throw new BizException("invalid_command_catalog");
-                items.addObject().put("providerId", provider).put("modelId", id)
-                        .put("label", safeText(model.path("label").asText(), 256)).put("connected", model.path("connected").asBoolean());
+                ObjectNode item = items.addObject().put("providerId", provider).put("modelId", id)
+                        .put("label", safeText(model.path("label").asText(), 256));
+                if (model.has("connected")) item.put("connected", model.path("connected").asBoolean());
             }
         }
         return out;

@@ -556,6 +556,22 @@ class AgentCommandServiceTest {
         assertFalse(catalog.path("models").path("items").get(0).path("connected").asBoolean());
         assertFalse(catalog.toString().contains("discard")); verifyNoInteractions(chat);
     }
+    @Test void nativeModelPagePreservesUnknownConnectivityWithoutCoercion() throws Exception {
+        var request = request("discover"); request.setCapabilityId("model.set"); service.submit(request);
+        var callback = callback();
+        var catalog = json.readTree("""
+                {"version":"cc-inventory","framework":"cc","runtimeVersion":"2.1.195","capabilities":[],
+                 "models":{"items":[{"providerId":"firstParty","modelId":"native-model","label":"Native model"}],"total":1,"offset":0}}
+                """);
+        var row = (com.fasterxml.jackson.databind.node.ObjectNode) catalog.path("models").path("items").get(0);
+        callback.setCatalog(catalog);
+        row.put("connected", "false");
+        assertThrows(BizException.class, () -> service.complete(callback));
+        row.remove("connected");
+        var projected = service.complete(callback).getCatalog().path("models").path("items").get(0);
+        assertEquals("native-model", projected.path("modelId").asText());
+        assertFalse(projected.has("connected"));
+    }
     @Test void invalidParameterTypesAndExtraKeysNeverDispatch() {
         for (Object value : Arrays.asList(null, List.of("x"), Map.of("x", "y"), 1, "x".repeat(4097), "x\u0000y")) {
             var r = request("invoke"); r.setCapabilityId("skill:fixture");
